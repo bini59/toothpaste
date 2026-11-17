@@ -1,0 +1,59 @@
+/* Base styles of the ui/ components. They sit in the components layer, so any utility passed in className
+ * (h-9, p-0, bg-grey-900, text-danger-700, ...) overrides them without a class-merging library. */
+@layer components {
+  .ui-button {
+    @apply relative inline-flex cursor-pointer items-center justify-center gap-2 rounded-lg text-sm font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-primary-200 disabled:pointer-events-none disabled:opacity-50;
+  }
+  .ui-button-md {
+    @apply h-10 px-4;
+  }
+  .ui-button-sm {
+    @apply h-8 px-3 text-xs;
+  }
+  .ui-button-primary {
+    @apply bg-primary text-white hover:bg-primary-700;
+  }
+  .ui-button-secondary {
+    @apply border border-border bg-surface text-text-main hover:bg-grey-50;
+  }
+
+  .ui-badge {
+    @apply inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium;
+  }
+  .ui-badge-draft {
+    @apply bg-grey-100 text-grey-800;
+  }
+  .ui-badge-warning {
+    @apply bg-warning-100 text-warning-800;
+  }
+  .ui-badge-danger {
+    @apply bg-danger-100 text-danger-800;
+  }
+  .ui-badge-success {
+    @apply bg-success-100 text-success-800;
+  }
+  .ui-badge-info {
+    @apply bg-info-100 text-info-800;
+  }
+
+  .ui-card {
+    @apply rounded-xl border border-border bg-surface;
+  }
+
+  /* shared by Input and components/Select */
+  .ui-field {
+    @apply rounded-lg border border-border bg-surface px-3 text-text-main outline-none transition-colors hover:border-grey-300 focus:border-primary focus:ring-2 focus:ring-primary-200;
+  }
+  .ui-select {
+    @apply cursor-pointer;
+  }
+  .ui-select-md {
+    @apply h-10 text-sm;
+  }
+  .ui-select-sm {
+    @apply h-8 text-xs;
+  }
+  .ui-input {
+    @apply h-10 w-full text-sm placeholder:font-medium placeholder:text-text-muted disabled:cursor-not-allowed disabled:bg-grey-50 disabled:text-text-muted;
+  }
+}

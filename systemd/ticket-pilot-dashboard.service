@@ -1,0 +1,24 @@
+# ticket-pilot dashboard (Linux). Template: systemd/install.sh fills in __TP_DIR__, __TP_PORT__ (dashboard_port),
+# __TP_HOST__ (0.0.0.0 with lan_share on, TP-152) and installs it to ~/.config/systemd/user. launchd counterpart:
+# launchd/com.ticket-pilot.dashboard.plist.
+[Unit]
+Description=ticket-pilot dashboard
+
+[Service]
+WorkingDirectory=__TP_DIR__
+ExecStart="__TP_PYTHON__" -m ticket_pilot.cli serve
+Environment="PATH=__TP_HOME__/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+Environment="PYTHONPATH=__TP_DIR__"
+Environment="TP_HOST=__TP_HOST__"
+Environment="TP_PORT=__TP_PORT__"
+# 업데이트 button: tp update writes update.log here and passes it on to install.sh
+Environment="TP_LOG_DIR=__TP_LOG_DIR__"
+Restart=on-failure
+# The 업데이트 button and 로컬망 공유 start install.sh (own session) from here, and it restarts this unit: kill only
+# the dashboard itself, like launchd, or the restart would kill install.sh half-way.
+KillMode=process
+StandardOutput=append:__TP_LOG_DIR__/dashboard.log
+StandardError=append:__TP_LOG_DIR__/dashboard.log
+
+[Install]
+WantedBy=default.target

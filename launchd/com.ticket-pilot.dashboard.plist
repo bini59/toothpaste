@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- ticket-pilot dashboard. Template: launchd/install.sh fills in __TP_DIR__, __TP_PORT__ (dashboard_port), __TP_HOST__ (0.0.0.0 with lan_share on, TP-152) and installs it to ~/Library/LaunchAgents. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.ticket-pilot.dashboard</string>
+  <!-- Run python directly: TCC blocks /bin/sh from reading bin/tp under ~/Desktop (exit 126), while Python.app has Full Disk Access. -->
+  <key>ProgramArguments</key>
+  <array><string>__TP_PYTHON__</string><string>-m</string><string>ticket_pilot.cli</string><string>serve</string></array>
+  <key>WorkingDirectory</key><string>__TP_DIR__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>__TP_HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PYTHONPATH</key><string>__TP_DIR__</string>
+    <key>TP_HOST</key><string>__TP_HOST__</string>
+    <key>TP_PORT</key><string>__TP_PORT__</string>
+    <!-- 업데이트 button: tp update writes update.log here and passes it on to install.sh -->
+    <key>TP_LOG_DIR</key><string>__TP_LOG_DIR__</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <!-- Logs live outside ~/Desktop: launchd opens these before python starts, and after a reboot TCC denies it
+       files under ~/Desktop (exit 78, "Unable to open stdout path ... Operation not permitted"). -->
+  <key>StandardOutPath</key><string>__TP_LOG_DIR__/dashboard.log</string>
+  <key>StandardErrorPath</key><string>__TP_LOG_DIR__/dashboard.log</string>
+</dict>
+</plist>

@@ -1,0 +1,101 @@
+# Tests on Linux and macOS for every PR and push to main (TP-162). GitHub-hosted runners, no secrets.
+# Not the deploy workflow: track.py reads only deploy.yml's runs, so keep this name and these job ids apart from it.
+name: test
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: test-${{ github.ref }}
+  # a push to main is never cancelled: release.yml releases only commits whose test run succeeded (TP-186)
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  oss-check:
+    # TP-184: no personal or company names, home paths or token-shaped strings in the tree
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/oss-check.sh
+  unit:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"  # runs the .ts check directly
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: python -m unittest
+        run: python -m unittest discover tests
+      - name: web build and check
+        working-directory: web
+        run: npm ci --no-audit --no-fund && npm run build && npm run check
+  docker:
+    # TP-164: the image builds, refuses to start without TP_ADMINS / TP_ORG, and asks every visitor to log in
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: compose files are valid (TP-166 tunnel profile included)
+        run: docker compose -f docker/compose.yaml --profile tunnel config -q
+      - name: build
+        run: docker build -f docker/Dockerfile -t ticket-pilot:ci .
+      - name: no TP_ADMINS, no TP_ORG -> does not start
+        run: |
+          if out=$(docker run --rm -e TP_ADMINS= -e TP_ORG= ticket-pilot:ci 2>&1); then echo "started: $out"; exit 1; fi
+          echo "$out" | grep TP_ADMINS
+      - name: /api/state needs a login; tp and claude run
+        run: |
+          docker run -d --name tp -e TP_ADMINS=ci-admin -p 127.0.0.1:3032:3032 ticket-pilot:ci
+          for _ in $(seq 30); do curl -s -o /dev/null http://127.0.0.1:3032/api/lan/me && break; sleep 1; done
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3032/api/state)
+          [ "$code" = 401 ] || { echo "/api/state: $code"; docker logs tp; exit 1; }
+          docker exec tp tp --help >/dev/null
+          docker exec tp claude --version
+          docker stop tp
+          docker logs tp 2>&1 | grep "tp run: stopped"
+  mode:
+    # TP-165: a host install -> tp mode docker --apply -> the container sees the DB and the worktree folder at the same
+    # path -> tp mode host --apply brings the DB back (no systemd units on the runner: the service steps are skipped)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: a host install
+        run: |
+          mkdir -p "$RUNNER_TEMP/wt" && echo hi > "$RUNNER_TEMP/wt/marker"
+          bin/tp config set global.worktree_root "\"$RUNNER_TEMP/wt\""
+          bin/tp config set global.owner_name '"ci-marker"'
+          bin/tp mode
+      - name: preview changes nothing
+        run: |
+          bin/tp mode docker --admins ci-admin
+          test ! -e docker/compose.override.yaml && test ! -e ~/tp-work/mode-state.json
+      - name: tp mode docker --apply
+        run: bin/tp mode docker --apply --admins ci-admin
+      - name: the container has the DB and the worktree folder
+        working-directory: docker
+        run: |
+          docker compose exec -T tp tp config get global.owner_name | grep ci-marker
+          docker compose exec -T tp cat "$RUNNER_TEMP/wt/marker" | grep hi
+          docker compose exec -T tp tp config set global.owner_name '"from-docker"'
+          test ! -w ../data/tp.db
+      - name: tp mode host --apply
+        run: |
+          bin/tp mode host --apply
+          bin/tp config get global.owner_name | grep from-docker
+          test -w data/tp.db
+      - if: failure()
+        working-directory: docker
+        run: docker compose logs tp || true; cat ~/tp-work/mode-state.json || true

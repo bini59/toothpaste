@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- ticket-pilot tick: the automations (dispatch, review, staging diff, cleanup) that Orca used to schedule.
+     Template: launchd/install.sh fills in __TP_DIR__ and installs it to ~/Library/LaunchAgents. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.ticket-pilot.tick</string>
+  <!-- Run python directly: TCC blocks /bin/sh from reading bin/tp under ~/Desktop (exit 126), while Python.app has Full Disk Access.
+       -P keeps the cwd off sys.path. -->
+  <key>ProgramArguments</key>
+  <array><string>__TP_PYTHON__</string><string>-P</string><string>-m</string><string>ticket_pilot.cli</string><string>tick</string></array>
+  <key>WorkingDirectory</key><string>__TP_DIR__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>__TP_HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PYTHONPATH</key><string>__TP_DIR__</string>
+  </dict>
+  <key>StartInterval</key><integer>60</integer>
+  <key>RunAtLoad</key><true/>
+  <!-- agents started by a tick (own session) must outlive it -->
+  <key>AbandonProcessGroup</key><true/>
+  <!-- Logs live outside ~/Desktop: launchd opens these before python starts, and after a reboot TCC denies it
+       files under ~/Desktop (exit 78, "Unable to open stdout path ... Operation not permitted"). -->
+  <key>StandardOutPath</key><string>__TP_LOG_DIR__/tick.log</string>
+  <key>StandardErrorPath</key><string>__TP_LOG_DIR__/tick.log</string>
+</dict>
+</plist>

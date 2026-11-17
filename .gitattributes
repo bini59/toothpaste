@@ -1,0 +1,2 @@
+# TP-186: the public snapshot (scripts/export-public.sh, git archive) leaves out the private repository's self-hosted deploy
+.github/workflows/deploy.yml export-ignore

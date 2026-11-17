@@ -1,0 +1,16 @@
+data/
+# settings live in data/tp.db since TP-49; only the *.example.json format samples are in git
+config/settings.json
+config/project_map.json
+__pycache__/
+*.pyc
+.DS_Store
+
+# web (React/Vite)
+web/node_modules/
+web/dist/
+
+# Docker mode settings (docker/.env.example is the template)
+docker/.env
+# tp mode docker (TP-165) writes the host's mounts here
+docker/compose.override.yaml

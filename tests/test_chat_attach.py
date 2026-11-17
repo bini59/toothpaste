@@ -1,0 +1,165 @@
+"""TP-72: chat attachments (validation, storage, agent delivery, file lookup, delete). Run: python3 -m unittest discover tests"""
+import base64
+import json
+import sqlite3
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from ticket_pilot import chat as CH, core, runner
+
+
+def b64(data: bytes) -> str:
+    return base64.b64encode(data).decode()
+
+
+class AttachTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.con = sqlite3.connect(":memory:")
+        self.con.row_factory = sqlite3.Row
+        self.con.executescript(core.SCHEMA)
+        core._migrate(self.con)
+        other = Path(self.tmp.name) / "r2"
+        other.mkdir()
+        self.pm = {"repos": {"r": {"github": "o/r", "path": self.tmp.name, "agent": {"tool": "claude"}},
+                             "r2": {"github": "o/r2", "path": str(other)}, "solo": {"path": "/nonexistent"},
+                             "solo2": {"path": self.tmp.name}},
+                   "projects": [{"id": "p", "name": "P", "source": "none",
+                                 "repos": [{"repo": "r2", "role": "be"}, {"repo": "r", "role": "fe", "default": True}]},
+                                {"id": "q", "name": "Q", "source": "github", "repos": [{"repo": "r2", "role": "be"}]}]}
+        self.launch = mock.MagicMock(return_value="1 /tmp/tp-test-chat.log")
+        for p in (mock.patch.object(CH, "db", lambda: self.con),
+                  mock.patch.object(CH, "UPLOADS", Path(self.tmp.name) / "uploads"),
+                  mock.patch.object(CH, "project_map", lambda: self.pm),
+                  mock.patch.object(CH.R, "resolve", lambda a: {"tool": "claude"}),
+                  mock.patch.object(CH.R, "describe", lambda a: "claude"),
+                  mock.patch.object(CH.R, "launch", self.launch),
+                  mock.patch.object(CH.R, "stop"),
+                  mock.patch.object(CH.R, "agent_state", lambda h: (True, None))):
+            p.start()
+            self.addCleanup(p.stop)
+        self.id = "c" + "0" * 16
+        self.con.execute("INSERT INTO chat_conversations(id,repo,title) VALUES(?,?,?)", (self.id, "r", "새 대화"))
+        self.con.commit()
+
+    def test_projects_are_projects_with_repos(self):
+        ps = {p["id"]: p for p in CH.projects()}
+        self.assertEqual(list(ps), ["p", "q", core.UNSORTED])
+        self.assertEqual(([r["name"] for r in ps["p"]["repos"]], ps["p"]["repo"]), (["r", "r2"], "r"))  # default first
+        self.assertEqual([r["name"] for r in ps["q"]["repos"]], ["r2"])  # r2 is in p and q
+        self.assertEqual(([r["name"] for r in ps[core.UNSORTED]["repos"]], ps[core.UNSORTED]["name"]), (["solo", "solo2"], "미분류"))
+        # the pre-TP-91 conversation (project_id NULL) shows under the first project with its repo
+        self.assertEqual((ps["p"]["conversations"], ps["q"]["conversations"]), (1, 0))
+        self.assertEqual([c["id"] for c in CH.conversations("p")], [self.id])
+        cid = CH.create("q")
+        self.assertEqual(dict(self.con.execute("SELECT project_id, repo FROM chat_conversations WHERE id=?", (cid,)).fetchone()),
+                         {"project_id": "q", "repo": "r2"})
+        self.assertEqual([c["id"] for c in CH.conversations("q")], [cid])
+        self.pm["projects"].pop(1)  # q deleted: its conversation goes to the first project with r2
+        self.assertEqual({c["id"] for c in CH.conversations("p")}, {self.id, cid})
+
+    def test_send_runs_in_the_default_repo_with_the_others_added(self):
+        CH.send(self.id, "hi")
+        kw = self.launch.call_args.kwargs
+        self.assertEqual((self.launch.call_args.args[0], kw["add_dirs"]), (self.tmp.name, [str(Path(self.tmp.name) / "r2")]))
+        prompt = self.launch.call_args.args[1]
+        self.assertIn("project P", prompt)
+        self.assertIn(f"r2 (be, GitHub o/r2): {Path(self.tmp.name) / 'r2'}", prompt)
+
+    def test_unsorted_chat_runs_in_its_own_repo_only(self):
+        cid = CH.create(core.UNSORTED, "solo2")
+        CH.send(cid, "hi")
+        self.assertEqual((self.launch.call_args.args[0], self.launch.call_args.kwargs["add_dirs"]), (self.tmp.name, []))
+        self.assertEqual(self.con.execute("SELECT repo FROM chat_conversations WHERE id=?", (cid,)).fetchone()[0], "solo2")
+        with self.assertRaises(SystemExit):
+            CH.create("p", "solo")
+
+    def test_send_keeps_a_conversation_in_its_repo(self):
+        self.con.execute("UPDATE chat_conversations SET repo='r2', session='s1', tool='claude' WHERE id=?", (self.id,))
+        self.con.commit()
+        CH.send(self.id, "hi")  # r2 is not p's default, but still in p: same checkout, the session resumes
+        self.assertEqual((self.launch.call_args.args[0], self.launch.call_args.kwargs["resume"]),
+                         (str(Path(self.tmp.name) / "r2"), "s1"))
+        self.assertEqual(self.launch.call_args.kwargs["add_dirs"], [self.tmp.name])
+
+    def test_send_stores_files_and_passes_paths(self):
+        CH.send(self.id, "이거 봐줘", [{"name": "image.png", "data": b64(b"\x89PNG")},
+                                     {"name": "build log.txt", "data": b64(b"err")}])
+        d = (CH.UPLOADS / self.id).resolve()
+        files = sorted(p.name for p in d.iterdir())
+        self.assertEqual(len(files), 2)
+        prompt = self.launch.call_args.args[1]
+        png = next(f for f in files if f.endswith("image.png"))
+        self.assertIn(f"- {d / png} (이미지)", prompt)
+        self.assertIn(str(d / next(f for f in files if f.endswith("build log.txt"))), prompt)
+        self.assertEqual(self.launch.call_args.kwargs["images"], [str(d / png)])
+        m = CH.messages(self.id)["messages"][0]
+        self.assertEqual([a["name"] for a in m["attachments"]], ["image.png", "build log.txt"])
+        self.assertTrue(m["attachments"][0]["image"])
+        self.assertEqual(m["text"], "이거 봐줘")  # the stored text has no paths
+        name = m["attachments"][1]["url"].split("name=", 1)[1]
+        self.assertEqual(CH.file_path(self.id, name.replace("%20", " ")).read_bytes(), b"err")
+        CH.delete(self.id)
+        self.assertFalse(d.exists())
+
+    def test_comma_kept_out_of_stored_name(self):
+        CH.send(self.id, "", [{"name": "a, b.png", "data": b64(b"x")}])
+        self.assertNotIn(",", self.launch.call_args.kwargs["images"][0])
+        self.assertEqual(CH.messages(self.id)["messages"][0]["attachments"][0]["name"], "a, b.png")
+
+    def test_files_only_message_titles_by_name(self):
+        CH.send(self.id, "", [{"name": "shot.png", "data": b64(b"x")}])
+        self.assertEqual(self.con.execute("SELECT title FROM chat_conversations").fetchone()[0], "shot.png")
+
+    def test_rejects_bad_names_and_big_files(self):
+        for name in ("../x.txt", "a/b.txt", ".env", "", "a\x00b", "x" * 121):
+            with self.subTest(name=name), self.assertRaisesRegex(SystemExit, "잘못된 파일 이름"):
+                CH.send(self.id, "t", [{"name": name, "data": b64(b"x")}])
+        with mock.patch.object(CH, "MAX_FILE", 3), self.assertRaisesRegex(SystemExit, "너무 커요"):
+            CH.send(self.id, "t", [{"name": "ok.txt", "data": b64(b"x")}, {"name": "big.log", "data": b64(b"1234")}])
+        with self.assertRaisesRegex(SystemExit, "읽지 못했어요"):
+            CH.send(self.id, "t", [{"name": "a.txt", "data": "not base64!"}])
+        self.assertFalse((CH.UPLOADS / self.id).exists())  # nothing written for a rejected message
+        self.launch.assert_not_called()
+
+    def test_file_path_stays_inside(self):
+        (CH.UPLOADS / self.id).mkdir(parents=True)
+        (CH.UPLOADS / self.id / "ok.txt").write_text("x")
+        (CH.UPLOADS / "secret.txt").write_text("s")
+        self.assertIsNotNone(CH.file_path(self.id, "ok.txt"))
+        for ident, name in ((self.id, "../secret.txt"), (self.id, ".."), ("../uploads", "secret.txt"), (self.id, "")):
+            self.assertIsNone(CH.file_path(ident, name))
+
+    def test_busy_refused_before_upload(self):
+        CH.send(self.id, "first")
+        with self.assertRaisesRegex(SystemExit, "기다리는 중"):
+            CH.send(self.id, "second", [{"name": "a.txt", "data": b64(b"x")}])
+        self.assertFalse((CH.UPLOADS / self.id).exists())
+
+
+class CodexImageTest(unittest.TestCase):
+    def test_image_flag_does_not_swallow_prompt(self):
+        a = {"tool": "codex", "model": None, "effort": None, "ultracode": False, "images": ["/u/a.png"]}
+        cmd = runner.command(a, Path("/tmp/x.log"))
+        self.assertEqual(cmd[-1], "-")
+        self.assertIn("--image=/u/a.png", cmd)
+        cmd = runner.command({**a, "resume": "sid"}, Path("/tmp/x.log"))
+        self.assertEqual(cmd[-2:], ["sid", "-"])
+        self.assertIn("--image=/u/a.png", cmd)
+
+
+
+class AddDirTest(unittest.TestCase):
+    def test_command_adds_dirs(self):
+        base = {"model": None, "effort": None, "ultracode": None, "add_dirs": ["/a", "/b"], "session": "s"}
+        self.assertIn("--add-dir=/b", runner.command({**base, "tool": "claude"}, Path("/tmp/x.log")))
+        self.assertIn("--add-dir=/a", runner.command({**base, "tool": "codex"}, Path("/tmp/x.log")))
+        # codex exec resume has no --add-dir
+        self.assertNotIn("--add-dir=/a", runner.command({**base, "tool": "codex", "resume": "t"}, Path("/tmp/x.log")))
+        self.assertIn("--add-dir=/a", runner.command({**base, "tool": "claude", "resume": "s"}, Path("/tmp/x.log")))
+
+if __name__ == "__main__":
+    unittest.main()

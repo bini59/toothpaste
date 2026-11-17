@@ -1,0 +1,95 @@
+{
+  "_comment": "Format example only. ticket-pilot keeps its settings in data/tp.db (TP-49): edit them on the dashboard 설정 page or with `tp config`. A DB without settings imports config/settings.json + config/project_map.json once, if they exist. Values missing here use the defaults in ticket_pilot/core.py (DEFAULT_SETTINGS).",
+  "asana_workspace_gid": "1234567890",
+  "asana_tag": "tp",
+  "asana_keychain_service": "ticket-pilot-asana",
+  "max_active_runs": 3,
+  "agent": "codex",
+  "git_user": "your-github-login",
+  "dashboard_port": 3032,
+  "review": {
+    "max_rework_rounds": 3
+  },
+  "check": {
+    "timeout_min": 10,
+    "max_parallel": 2
+  },
+  "release": {
+    "weekdays": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "at": "10:00",
+    "window_min": 120,
+    "timezone": "Asia/Seoul",
+    "staging_branch": "staging",
+    "main_branch": "main",
+    "retarget_since": ""
+  },
+  "deploy": {
+    "deploy_timeout_min": 45,
+    "repos": {
+      "01_Web": {
+        "train": true,
+        "merge": "merge",
+        "modes": [
+          "staging",
+          "direct",
+          "promote",
+          "all"
+        ],
+        "staging": {
+          "branch": "staging",
+          "pipeline": "web-staging"
+        },
+        "prod": {
+          "branch": "main",
+          "pipeline": "web-prod",
+          "ecs": {
+            "cluster": "web-prod-cluster",
+            "service": "web-prod"
+          },
+          "smoke": [
+            "https://example.com/"
+          ]
+        }
+      },
+      "02_Api": {
+        "merge": "squash",
+        "modes": [
+          "staging",
+          "direct",
+          "promote",
+          "all"
+        ],
+        "staging": {
+          "branch": "dev"
+        },
+        "pr_into_staging": true,
+        "preview_label": "preview",
+        "prod": {
+          "branch": "main",
+          "workflow": "deploy.yml"
+        }
+      },
+      "03_Admin": {
+        "merge": "merge",
+        "modes": [
+          "direct"
+        ],
+        "version": "npm-patch",
+        "via": "main",
+        "prod": {
+          "branch": "production",
+          "pipeline": "admin-prod"
+        }
+      }
+    }
+  },
+  "github_issues": {
+    "02_Api": "API"
+  }
+}

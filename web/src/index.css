@@ -1,0 +1,9 @@
+@import "tailwindcss";
+/* static: the 작업실 canvas reads color tokens from CSS variables at runtime, so keep every one (TP-127) */
+@import "./theme/tokens.css" theme(static);
+@import "./ui/ui.css";
+
+/* keep the scrollbar's place on short pages too, so moving between long and short pages does not shift everything 15px (TP-174) */
+html {
+  scrollbar-gutter: stable;
+}

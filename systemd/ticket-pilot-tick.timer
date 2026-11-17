@@ -1,0 +1,11 @@
+# Starts ticket-pilot-tick.service every minute (launchd: StartInterval 60). Installed by systemd/install.sh.
+[Unit]
+Description=ticket-pilot tick, every minute
+
+[Timer]
+OnActiveSec=0
+OnUnitActiveSec=60
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

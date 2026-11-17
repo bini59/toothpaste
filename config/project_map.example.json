@@ -1,0 +1,79 @@
+{
+  "_comment": "Format example only (see settings.example.json). checks: commands tp check runs on PR heads ({name, cmd, dir?}; off + reason keeps a check switched off); ci: true reads gh pr checks instead; review.max_rework_rounds overrides the global value for one repo.",
+  "repos": {
+    "01_Web": {
+      "orca_repo_id": "00000000-0000-0000-0000-000000000001",
+      "path": "~/src/01_Web",
+      "github": "your-org/web",
+      "description": "Public website",
+      "checks": [
+        {
+          "name": "lint",
+          "cmd": "pnpm run lint"
+        },
+        {
+          "name": "test",
+          "cmd": "pnpm test",
+          "off": true,
+          "reason": "fails on staging too"
+        }
+      ]
+    },
+    "02_Api": {
+      "orca_repo_id": "00000000-0000-0000-0000-000000000002",
+      "path": "~/src/02_Api",
+      "github": "your-org/api",
+      "description": "Backend API",
+      "ci": true
+    },
+    "03_Admin": {
+      "orca_repo_id": "00000000-0000-0000-0000-000000000003",
+      "path": "~/src/03_Admin",
+      "github": "your-org/admin",
+      "description": "Admin app",
+      "checks": [
+        {
+          "name": "typecheck",
+          "dir": "app",
+          "cmd": "npx tsc --noEmit"
+        }
+      ],
+      "review": {
+        "max_rework_rounds": 2
+      }
+    }
+  },
+  "projects": [
+    {
+      "asana_gid": "1200000000000001",
+      "name": "Website",
+      "confidence": "high",
+      "repos": [
+        {
+          "repo": "01_Web",
+          "role": "fe",
+          "default": true
+        },
+        {
+          "repo": "02_Api",
+          "role": "be"
+        }
+      ]
+    },
+    {
+      "asana_gid": "1200000000000002",
+      "name": "Admin",
+      "confidence": "medium",
+      "repos": [
+        {
+          "repo": "03_Admin",
+          "role": "app",
+          "default": true
+        }
+      ]
+    }
+  ],
+  "hidden_projects": {
+    "1200000000000099": "Old project"
+  }
+}

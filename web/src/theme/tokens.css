@@ -1,0 +1,103 @@
+/*
+ * Color and font tokens for Tailwind v4 (bg-primary, text-text-muted, border-border, font-sans, ...).
+ * Every color is a fixed 50-900 scale: pick the nearest step instead of an opacity shade (bg-primary/10).
+ * Values are 6-digit hex on purpose: the 작업실 canvas reads --color-<family>-<step> at runtime and parses hex
+ * (views/factory/pixel.ts), so keep every name and keep it hex. index.css imports this with theme(static) so all are emitted.
+ */
+@theme {
+  /* grey: neutral, text, backgrounds, panels, borders */
+  --color-grey-50: #f8fafe;
+  --color-grey-100: #f1f4f8;
+  --color-grey-200: #e4e6ea;
+  --color-grey-300: #d2d4d8;
+  --color-grey-400: #a2a5a8;
+  --color-grey-500: #727578;
+  --color-grey-600: #595b5e;
+  --color-grey-700: #434548;
+  --color-grey-800: #2c2e31;
+  --color-grey-900: #191b1d;
+
+  /* primary */
+  --color-primary-50: #f3f6ff;
+  --color-primary-100: #e3eaff;
+  --color-primary-200: #cad7ff;
+  --color-primary-300: #aabdff;
+  --color-primary-400: #839af8;
+  --color-primary-500: #6076de;
+  --color-primary-600: #4e60c0;
+  --color-primary-700: #3f4e9e;
+  --color-primary-800: #313d7b;
+  --color-primary-900: #202955;
+
+  /* secondary */
+  --color-secondary-50: #fdf4fa;
+  --color-secondary-100: #f9e4f3;
+  --color-secondary-200: #f1cce8;
+  --color-secondary-300: #e4add7;
+  --color-secondary-400: #cf84bf;
+  --color-secondary-500: #b05ea0;
+  --color-secondary-600: #964a87;
+  --color-secondary-700: #7b3c6f;
+  --color-secondary-800: #602f56;
+  --color-secondary-900: #421f3b;
+
+  /* success */
+  --color-success-50: #f0faf3;
+  --color-success-100: #dcf2e2;
+  --color-success-200: #bce5c9;
+  --color-success-300: #91d3a8;
+  --color-success-400: #58b87e;
+  --color-success-500: #129858;
+  --color-success-600: #008046;
+  --color-success-700: #006938;
+  --color-success-800: #01522c;
+  --color-success-900: #02381d;
+
+  /* warning */
+  --color-warning-50: #fdf5ed;
+  --color-warning-100: #fae8d4;
+  --color-warning-200: #f4d3ad;
+  --color-warning-300: #e9b67c;
+  --color-warning-400: #d69135;
+  --color-warning-500: #b86c00;
+  --color-warning-600: #9d5700;
+  --color-warning-700: #814700;
+  --color-warning-800: #643800;
+  --color-warning-900: #452500;
+
+  /* danger */
+  --color-danger-50: #fff3f3;
+  --color-danger-100: #ffe2e2;
+  --color-danger-200: #ffc8c8;
+  --color-danger-300: #fda5a7;
+  --color-danger-400: #ef787e;
+  --color-danger-500: #d14c59;
+  --color-danger-600: #b33947;
+  --color-danger-700: #932d39;
+  --color-danger-800: #73242d;
+  --color-danger-900: #50181d;
+
+  /* info */
+  --color-info-50: #eff8fe;
+  --color-info-100: #d9effd;
+  --color-info-200: #b7e0f9;
+  --color-info-300: #8acaf0;
+  --color-info-400: #4aade1;
+  --color-info-500: #008bc5;
+  --color-info-600: #0074a9;
+  --color-info-700: #005f8b;
+  --color-info-800: #004a6c;
+  --color-info-900: #00324b;
+
+  /* semantic aliases: literal values (not var()) so Tailwind always emits them; keep in sync with the scales */
+  --color-background: #f8fafe; /* grey-50: page */
+  --color-surface: #ffffff; /* cards, panels */
+  --color-primary: #4e60c0; /* primary-600: actions, active nav (white text stays readable) */
+  --color-secondary: #7b3c6f; /* secondary-700 */
+  --color-text-main: #191b1d; /* grey-900: body text */
+  --color-text-muted: #66696c; /* between grey-500 and grey-600: secondary text, >= 4.5:1 on background, surface and grey-100 (TP-175) */
+  --color-accent: #129858; /* success-500 */
+  --color-border: #e4e6ea; /* grey-200 */
+
+  --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+}

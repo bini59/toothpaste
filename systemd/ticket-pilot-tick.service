@@ -1,0 +1,16 @@
+# ticket-pilot tick (Linux): the automations, started every minute by ticket-pilot-tick.timer.
+# Template: systemd/install.sh fills in __TP_DIR__ and installs it to ~/.config/systemd/user.
+[Unit]
+Description=ticket-pilot tick
+
+[Service]
+Type=oneshot
+WorkingDirectory=__TP_DIR__
+# -P keeps the cwd off sys.path
+ExecStart="__TP_PYTHON__" -P -m ticket_pilot.cli tick
+Environment="PATH=__TP_HOME__/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+Environment="PYTHONPATH=__TP_DIR__"
+# agents started by a tick (own session) must outlive it (launchd: AbandonProcessGroup)
+KillMode=process
+StandardOutput=append:__TP_LOG_DIR__/tick.log
+StandardError=append:__TP_LOG_DIR__/tick.log

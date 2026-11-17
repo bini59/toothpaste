@@ -1,0 +1,8 @@
+#!/bin/sh
+# ticket-pilot CLI wrapper; works from any cwd (tick, launchd, agents in their worktrees).
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+export PYTHONPATH="$DIR${PYTHONPATH:+:$PYTHONPATH}"
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+# -P: python -m would put the cwd first on sys.path, so an agent in a worktree of this repo would import that
+# worktree's ticket_pilot (and write its data/tp.db) instead of this checkout's
+exec /usr/bin/env python3 -P -m ticket_pilot.cli "$@"

@@ -1,0 +1,39 @@
+# ticket-pilot in Docker (TP-164). Settings: docker/.env (copy .env.example). README "Docker로 실행하기".
+# The DB lives only in the tp-data named volume and only processes in this container write it (TP-8: never share a
+# tp.db with a host process over a bind mount).
+name: ticket-pilot
+services:
+  tp:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: ticket-pilot:local
+    init: true  # reaps the agents' processes; SIGTERM goes to tp run, which waits for the running tick
+    stop_grace_period: 5m
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false  # without it TP_ADMINS is empty and tp run says so and exits
+    environment:
+      TP_PORT: "3032"  # inside the container; TP_PORT in .env is the host port below
+    ports:
+      - "127.0.0.1:${TP_PORT:-3032}:3032"
+    volumes:
+      - tp-data:/opt/tp/data  # tp.db, logs, secrets.json, tp's gh config
+      - tp-home:/home/node  # ~/.claude, ~/.codex, ~/.config, ~/.gitconfig
+      - tp-work:/home/node/tp-work  # worktrees, repos
+  # TP-166: public access through a Cloudflare Tunnel, only when asked: docker compose --profile tunnel up -d.
+  # The tunnel's public hostname points at http://tp:3032 on this compose network; the host port above stays 127.0.0.1.
+  cloudflared:
+    profiles: [tunnel]
+    image: cloudflare/cloudflared
+    command: tunnel --no-autoupdate --metrics 0.0.0.0:2000 run  # tp reads :2000/ready for 설정 → 고급 → 외부 공개
+    restart: unless-stopped
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}  # from docker/.env
+    depends_on:
+      - tp
+volumes:
+  tp-data:
+  tp-home:
+  tp-work:

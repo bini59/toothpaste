@@ -1,0 +1,54 @@
+# TP-186: tag + GitHub Release for each push to main of the public repository, on GitHub's runner (no self-hosted runner
+# there: a fork PR must not run code on anyone's machine). Same version rule as deploy.yml's release job (bin/tp
+# release-tag, update.release): PR label major / minor, else patch; a commit that already has a v* tag is skipped.
+# Runs after the push's test workflow succeeded. workflow_dispatch tags main's HEAD, optionally with a given version
+# (the first public release, v0.5.0). Installs pick the release up with tp update (update.auto, check_min).
+name: release
+on:
+  workflow_run:
+    workflows: [test]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "vX.Y.Z (empty = bump the last tag by the merged PR's label)"
+        required: false
+        default: ""
+concurrency:
+  group: release
+  cancel-in-progress: false
+jobs:
+  release:
+    # only the public repository: the private one still tags from deploy.yml, so a commit gets one release
+    if: >-
+      github.repository == 'bini59/toothpaste' && (
+        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+        (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: read  # the merged PR's labels
+    env:
+      SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SHA }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: build web/dist (attached as web-dist.tar.gz)
+        working-directory: web
+        run: npm ci --no-audit --no-fund && npm run build
+      - name: tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: bin/tp release-tag --sha "$SHA" --repo "$GITHUB_REPOSITORY" ${VERSION:+--version "$VERSION"}
