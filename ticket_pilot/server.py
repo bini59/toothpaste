@@ -344,6 +344,8 @@ def _asana_me(tok: str) -> dict:
 
 def asana_status() -> dict:
     """Connected account name and email, its workspaces and the chosen one (TP-148); never the token."""
+    if not settings().get("asana_enabled", True):
+        return {"connected": False, "enabled": False}
     try:
         tok = asana_token()
     except AsanaError:

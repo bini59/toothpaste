@@ -324,6 +324,7 @@ def validate(doc: dict, old: dict | None = None) -> list[str]:
         ags = {}
     work = ags.get("work")
     work_tool = (work.get("tool") if isinstance(work, dict) else None) or st.get("agent")  # an empty repo tool follows it
+    need(isinstance(st.get("asana_enabled", True), bool), "global.asana_enabled", "true 또는 false여야 해요")
     need(_text(st.get("asana_tag")), "global.asana_tag", "비어 있으면 안 돼요")
     need(_text(st.get("milestone_tag")), "global.milestone_tag", "비어 있으면 안 돼요")
     need(_int(st.get("dashboard_port"), 1024, 65535), "global.dashboard_port", "1024~65535 사이 정수여야 해요")

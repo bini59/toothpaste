@@ -48,7 +48,7 @@ Docker로 바꾼 동안에는 `tp update`, `tp setup`, `tp migrate`가 멈춰요
 - 실패하면 끝난 단계와 되돌리는 방법을 보여 줘요. 고친 뒤 같은 명령을 다시 실행하면 이어서 해요(기록: `~/tp-work/mode-state.json`).
 - 맥에서 컨테이너는 keychain의 Claude 로그인을 못 봐요. 컨테이너에서 claude 인증이 실패하면 **설정 → 에이전트 → 활성 계정**에서 claude에 로그인하세요.
 
-1. Asana 연결: Personal access token을 넣습니다(macOS는 키체인, Linux는 secrets.json에 저장).
+1. Asana 연결 (선택): 사용한다면 Personal access token을 넣습니다(macOS는 키체인, Linux는 secrets.json에 저장). 사용하지 않으면 **Asana 사용 안 함**을 누르세요. GitHub 이슈는 Asana 없이도 동기화합니다.
 2. GitHub 연결: 화면에 나온 코드로 Device Flow 로그인.
 3. 에이전트 로그인: claude나 codex 중 쓰는 것 하나. 이미 터미널에서 로그인돼 있으면 완료로 나와요(아래 **agent** 주제).
 4. 사용자 이름: 에이전트가 질문하거나 보고할 때 부르는 이름.
@@ -73,7 +73,7 @@ Docker로 바꾼 동안에는 `tp update`, `tp setup`, `tp migrate`가 멈춰요
 티켓 출처, 단계, 여러 레포 티켓, 의존 관계.
 
 **출처**
-- Asana: 나에게 배정된 미완료 태스크에 설정 `asana_tag`의 태그(새 설치 기본 **`tp`**)를 붙이면 티켓이 됩니다. 태스크의 프로젝트가 설정에서 레포와 연결돼 있어야 해요.
+- Asana: 설정에서 사용을 끄면 동기화와 Asana 작업을 중지하며 기존 연결 정보와 티켓은 보존합니다. 다시 켜면 다음 동기화부터 재개합니다. Asana 연결에 오류가 나도 GitHub 이슈는 동기화합니다. 나에게 배정된 미완료 태스크에 설정 `asana_tag`의 태그(새 설치 기본 **`tp`**)를 붙이면 티켓이 됩니다. 태스크의 프로젝트가 설정에서 레포와 연결돼 있어야 해요.
 - GitHub 이슈: 설정 `github_issues`에 있는 레포의 열린 이슈는 모두 티켓입니다(키 `TP-<번호>` 등). 출처가 `github`인 프로젝트의 레포는 라벨 `tp`가 붙은 열린 이슈만 받습니다. 라벨을 떼면 티켓이 빠지고, 다시 붙이면 돌아와요.
 - 티켓 번호는 Asana `ID` 커스텀 필드(예: `CRSC-340`), 없으면 `AS-<gid>`. worktree와 브랜치는 소문자 번호(`tp/crsc-340`)입니다.
 

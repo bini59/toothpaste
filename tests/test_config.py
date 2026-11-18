@@ -74,7 +74,7 @@ def old_repo_rules(st):
 
 
 # settings added after the pre-TP-49 files (local runner, milestones): an imported file without them reads the code defaults
-RUNNER_KEYS = ("worktree_root", "clone_root", "branch_prefix", "agent_max_min", "milestone_tag", "agent_asana_write",
+RUNNER_KEYS = ("asana_enabled", "worktree_root", "clone_root", "branch_prefix", "agent_max_min", "milestone_tag", "agent_asana_write",
                "owner_name", "lan_share", "theme", "agents", "update")
 
 

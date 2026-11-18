@@ -41,6 +41,7 @@ def now() -> str:
 # git keeps only config/*.example.json. Edit with `tp config` or the dashboard 설정 page (ticket_pilot/config.py).
 DEFAULT_SETTINGS = {
     "asana_workspace_gid": "",
+    "asana_enabled": True,
     "asana_tag": "tp",
     # an Asana parent task with this tag is a milestone: its subtasks merge into a milestone branch (milestone.py)
     "milestone_tag": "tp-milestone",
@@ -756,6 +757,8 @@ NO_WORKSPACE = "Asana 워크스페이스가 비어 있어요. 설정 → Asana �
 
 def asana_workspace() -> str:
     """The chosen Asana workspace gid (TP-148: picked on 설정 → Asana 연결), read fresh on every call."""
+    if not settings().get("asana_enabled", True):
+        raise AsanaError("Asana 사용이 꺼져 있어요. 설정 → Asana 연결에서 켜세요")
     ws = settings().get("asana_workspace_gid")
     if not ws:
         raise AsanaError(NO_WORKSPACE)
@@ -793,6 +796,8 @@ def _fixture(path: str):
 
 
 def asana(method: str, path: str, params: dict | None = None, body: dict | None = None) -> dict:
+    if not settings().get("asana_enabled", True):
+        raise AsanaError("Asana 사용이 꺼져 있어요. 설정 → Asana 연결에서 켜세요")
     if os.environ.get("TP_ASANA_FIXTURE"):
         return _fixture(path)
     url = "https://app.asana.com/api/1.0" + path

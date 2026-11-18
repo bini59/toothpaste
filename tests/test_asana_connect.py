@@ -151,12 +151,57 @@ class AsanaConnectTest(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(self._ws(), "77")
 
-    def test_empty_workspace_stops_with_hint(self):
-        with mock.patch.object(core, "asana") as api:
-            with self.assertRaisesRegex(core.AsanaError, "설정 → Asana 연결에서 워크스페이스를 고르세요"):
-                P.sync(log=lambda *a: None)
-            self.assertIn("설정 → Asana 연결에서 워크스페이스를 고르세요", OB.asana_projects(refresh=True)["error"])
-            api.assert_not_called()
+    def test_empty_workspace_does_not_block_github_sync(self):
+        with mock.patch.object(P, "sync_issues") as github:
+            result = P.sync(log=lambda *a: None)
+        self.assertIn("워크스페이스", result["asana_error"])
+        github.assert_called_once()
+        self.assertIn("설정 → Asana 연결에서 워크스페이스를 고르세요", OB.asana_projects(refresh=True)["error"])
+
+    def test_github_issue_is_imported_without_asana_workspace(self):
+        con = core.db()
+        issue = {"number": 1, "title": "mobile", "body": "", "url": "https://example.test/1",
+                 "updatedAt": "now", "labels": [{"name": "tp"}]}
+        sources = {"repo": ("REPO", "tp")}
+        with mock.patch.object(P, "issue_repos", return_value=sources), \
+             mock.patch.object(P, "_gh_issue_json", return_value=[issue]), \
+             mock.patch.object(P, "load_map"):
+            con.execute("INSERT INTO repos(name, github) VALUES ('repo', 'owner/repo')")
+            con.commit()
+            result = P.sync(log=lambda *a: None)
+        self.assertIn("asana_error", result)
+        self.assertEqual(con.execute("SELECT key FROM tickets WHERE gid='gh:owner/repo#1'").fetchone()[0], "REPO-1")
+
+    def test_disabled_asana_preserves_existing_tickets_and_syncs_github(self):
+        G.update("global", {"asana_enabled": False}, actor="cli")
+        con = core.db()
+        con.execute("INSERT INTO tickets(gid,key,name,assigned,completed) VALUES ('123','AS-123','existing',1,0)")
+        con.commit()
+        with mock.patch.object(P, "asana_all") as api, mock.patch.object(P, "sync_issues") as github:
+            result = P.sync(log=lambda *a: None)
+        api.assert_not_called()
+        github.assert_called_once()
+        self.assertNotIn("asana_error", result)
+        self.assertEqual(tuple(con.execute("SELECT assigned,completed FROM tickets WHERE gid='123'").fetchone()), (1, 0))
+        self.assertEqual(S.asana_status(), {"connected": False, "enabled": False})
+        with self.assertRaisesRegex(core.AsanaError, "꺼져"):
+            core.asana("GET", "/users/me")
+
+    def test_asana_failure_rolls_back_partial_changes(self):
+        G.update("global", {"asana_workspace_gid": "1"}, actor="cli")
+        con = core.db()
+        con.execute("INSERT INTO tickets(gid,key,name,assigned,completed) VALUES ('123','AS-123','existing',1,0)")
+        con.commit()
+        def partial(con, st, mapped, names, hidden, ts, tagged):
+            con.execute("UPDATE tickets SET assigned=0 WHERE gid='123'")
+            tagged.append("AS-123")
+            raise core.AsanaError("offline")
+        with mock.patch.object(P, "_sync_asana", side_effect=partial), mock.patch.object(P, "sync_issues") as github:
+            result = P.sync(log=lambda *a: None)
+        self.assertEqual(result["asana_error"], "offline")
+        self.assertEqual(result["new_tagged"], [])
+        self.assertEqual(con.execute("SELECT assigned FROM tickets WHERE gid='123'").fetchone()[0], 1)
+        github.assert_called_once()
 
     def test_foreign_origin_is_forbidden(self):
         self.kc[("ticket-pilot-asana", "asana")] = "old"
