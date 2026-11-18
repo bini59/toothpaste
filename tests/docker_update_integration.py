@@ -90,6 +90,24 @@ for login in ('ci-admin', 'ci-member'):
             return job
 
         wait_until_idle(manager)
+        holder = subprocess.Popen(
+            [manager.docker, "exec", "-i", original, "python3", "-c",
+             "import fcntl, sys; f = open('/opt/tp/data/tick.lock', 'a'); "
+             "fcntl.flock(f, fcntl.LOCK_EX); print('locked', flush=True); sys.stdin.read()"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+        )
+        try:
+            assert holder.stdout.readline().strip() == "locked"
+            job = request("v0.0.2")
+            with patch.object(updater, "latest_release", return_value=job["tag"]), \
+                 patch.object(manager, "pull", return_value=None):
+                manager.apply(job)
+            assert manager.snapshot()["state"] == "failed", manager.snapshot()
+            assert "자동화가 실행 중" in manager.snapshot()["message"]
+            assert manager.container() == original
+        finally:
+            holder.communicate(timeout=10)
+
         job = request("v0.0.2")
         with patch.object(updater, "latest_release", return_value=job["tag"]), \
              patch.object(updater.channel, "REGISTRY_IMAGE", registry_image):

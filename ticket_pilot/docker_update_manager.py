@@ -43,11 +43,17 @@ with (core.DATA / 'tick.lock').open('a') as lock:
             raise SystemExit('실행 중인 작업이 있어요: ' + ', '.join(busy))
 """
 PROBE = """
-import json, urllib.request
-from ticket_pilot import update
+import json, os, sqlite3, urllib.request
+from contextlib import closing
+from ticket_pilot import core, update
 with urllib.request.urlopen('http://127.0.0.1:3032/api/update/health', timeout=3) as response:
     if not json.load(response)['ready']:
         raise SystemExit('대시보드가 준비되지 않았어요')
+db = core.DB_PATH
+if not os.access(db, os.R_OK | os.W_OK) or not os.access(db.parent, os.W_OK):
+    raise SystemExit('기존 데이터 볼륨에 접근할 수 없어요')
+with closing(sqlite3.connect(db.resolve().as_uri() + '?mode=ro', uri=True, timeout=3)) as connection:
+    connection.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
 print(update.current())
 """
 
@@ -182,7 +188,7 @@ class Manager:
         # Only the node account and image-owned files are adjusted. Existing volumes keep their owners.
         dockerfile = f"""FROM {digest}
 USER root
-RUN groupmod -o -g {gid} node && usermod -o -u {uid} -g {gid} node \\
+RUN /usr/sbin/groupmod -o -g {gid} node && /usr/sbin/usermod -o -u {uid} -g {gid} node \\
  && chown -R {uid}:{gid} /opt/tp /home/node
 USER node
 """
@@ -269,6 +275,7 @@ def install(manager):
         raise RuntimeError("먼저 docker compose up -d --build로 기존 tp를 실행해 주세요")
     container = manager.container()
     if manager.exec(container, "sh", "-c", 'printf "%s" "$TP_DOCKER_UPDATE_DIR"') != "/run/tp-update":
+        manager.exec(container, "python3", "-c", PREFLIGHT)
         manager.compose("up", "-d", "--build", "--no-deps", "tp", timeout=1800)
         manager.wait()
 
