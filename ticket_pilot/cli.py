@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 from . import asana_write as AW
 from . import cleanup as C
+from . import chat as CH
 from . import config as G
 from . import checks as K
 from . import deploy as D
@@ -150,6 +151,11 @@ def cmd_tick(a):
         if maintenance():
             return
     con = db()
+    try:
+        CH.compact_idle(con)
+    except Exception as e:  # keep the regular tick running if chat compaction fails
+        con.rollback()
+        print(f"chat compaction: {e}", file=sys.stderr, flush=True)
     snap = meta_get(con, "automations") or {}
     prev = {x["id"]: x for x in snap.get("automations", [])}
     usage = {i["automationId"]: i.get("usageSummary") or {} for i in snap.get("items", [])}

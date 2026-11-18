@@ -14,9 +14,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import time
 import uuid
 from datetime import datetime
@@ -180,12 +182,22 @@ def command(a: dict, log: Path) -> list[str]:
     dirs = a.get("add_dirs") or ()
     if a["tool"] == "claude":
         cmd = [*CLAUDE, "--resume" if a.get("resume") else "--session-id", a["session"]]
+        if a.get("compact"):
+            # Claude's PostCompact hook supplies the actual summary. Stdout may contain status text.
+            save = ("import json, pathlib, sys; "
+                    "pathlib.Path(sys.argv[1]).write_text(json.load(sys.stdin)['compact_summary'], encoding='utf-8')")
+            hook = {"type": "command", "command": shlex.join([sys.executable, "-c", save, f"{log}.summary"])}
+            config = {"hooks": {"PostCompact": [{"matcher": "manual", "hooks": [hook]}]}}
+            if a["ultracode"]:
+                config["ultracode"] = True
+            cmd = ["claude", "-p", "--resume", a["session"], "--no-session-persistence",
+                   "--setting-sources", "", "--strict-mcp-config", "--no-chrome", "--settings", json.dumps(config)]
         cmd += [f"--add-dir={d}" for d in dirs]
         if a["model"]:
             cmd += ["--model", a["model"]]
         if a["effort"]:
             cmd += ["--effort", a["effort"]]
-        if a["ultracode"]:
+        if a["ultracode"] and not a.get("compact"):
             # the toggle, not --effort ultracode (that would pin the effort to xhigh)
             cmd += ["--settings", json.dumps({"ultracode": True})]
         return cmd
@@ -203,17 +215,20 @@ def command(a: dict, log: Path) -> list[str]:
 
 def launch(cwd: str, prompt: str, tag: str, setup: str | None = None, repo_path: str | None = None,
            agent: dict | None = None, resume: str | None = None, split_stderr: bool = False,
-           images: list[str] | None = None, add_dirs: list[str] | None = None, role: str = "work") -> str:
+           images: list[str] | None = None, add_dirs: list[str] | None = None, role: str = "work",
+           compact: bool = False) -> str:
     """Start the agent (agent = a repo's agent settings, see resolve()) in cwd with the prompt on stdin, detached;
     returns the handle "<pid> <log>". setup (a repo's worktree setup script) runs first in the same wrapper; its
     failure is logged, the agent still runs. resume = a session id of the same tool to continue. split_stderr
     writes stderr (codex progress, CLI warnings) to <log>.err so the log holds only the answer (chat.py).
     images = image files codex gets with --image (claude reads them itself from the paths in the prompt).
-    role = whose agent card applies when the repo sets none (resolve())."""
+    role = whose agent card applies when the repo sets none (resolve()). compact = Claude /compact of the
+    resumed history, with a PostCompact hook and session persistence disabled."""
     a = resolve(agent, role)
     a["resume"] = resume
     a["images"] = images
     a["add_dirs"] = add_dirs
+    a["compact"] = compact
     LOGS.mkdir(parents=True, exist_ok=True)
     log = LOGS / f"{re.sub(r'[^A-Za-z0-9._-]+', '-', tag)}-{datetime.now():%Y%m%d-%H%M%S}.log"
     prompt_file = log.with_suffix(".prompt.md")
@@ -365,6 +380,17 @@ def settings_of(handle: str | None) -> dict:
     except (OSError, ValueError, TypeError):
         return {}
     return {k: meta.get(k) for k in ("agent", "model", "effort", "ultracode")}
+
+
+def compacted_summary(handle: str | None, limit: int) -> str:
+    _, log = _parts(handle)
+    if not log:
+        return ""
+    try:
+        with Path(f"{log}.summary").open(encoding="utf-8", errors="replace") as f:
+            return f.read(limit).strip()
+    except OSError:
+        return ""
 
 
 def last_message(handle: str | None, limit: int = 4000) -> str:

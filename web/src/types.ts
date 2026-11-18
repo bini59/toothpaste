@@ -609,7 +609,7 @@ export interface InboxNotification {
 }
 export interface ChatMessage {
   id: number;
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "compaction";
   text: string | null; // null = the turn is still running
   ts: string;
   failed: boolean;
