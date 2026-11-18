@@ -135,7 +135,7 @@ class Manager:
             else:
                 claimed.unlink(missing_ok=True)
 
-    def image_name(self):
+    def service_config(self):
         service = json.loads(self.compose("config", "--format", "json", "tp"))["services"]["tp"]
         for mount in service.get("volumes", []):
             if mount.get("type") != "bind" or mount.get("read_only"):
@@ -147,10 +147,12 @@ class Manager:
             # outside any writable bind that covers the install checkout, even in a migrated host setup.
             if source.is_relative_to(self.root) or self.root.is_relative_to(source):
                 raise RuntimeError("설치 저장소가 컨테이너에 쓰기 가능하게 연결돼 있어요. 호스트 전용 설치 경로가 필요해요")
-        return service["image"]
+        return service
 
-    def container(self):
+    def container(self, *, required=True):
         containers = self.compose("ps", "-q", "tp").splitlines()
+        if not containers and not required:
+            return None
         if len(containers) != 1 or not re.fullmatch(r"[0-9a-f]{12,64}", containers[0]):
             raise RuntimeError("업데이트할 tp 컨테이너를 하나 찾을 수 있어야 해요")
         return containers[0]
@@ -220,7 +222,7 @@ USER node
             installed = re.match(r"^v[0-9]+\.[0-9]+\.[0-9]+", current)
             if installed and update.latest([installed[0], tag]) == installed[0]:
                 raise RuntimeError("이 릴리즈 또는 더 최신 버전이 이미 설치되어 있어요")
-            name = self.image_name()
+            name = self.service_config()["image"]
             old = _run(self.docker, "inspect", "--format", "{{.Image}}", container)
             candidate = self.pull(tag, container)
             self.publish(**job, state="switching", message="대시보드를 새 이미지로 교체하는 중이에요")
@@ -288,16 +290,23 @@ def systemd_unit(root: Path, args: list[str], env: dict[str, str]) -> str:
 
 def install(manager):
     manager.prepare()
-    manager.image_name()  # check the install checkout before starting a host service
-    # Build the first managed container from the checked-out release; later updates pull the published image.
-    if not manager.compose("ps", "-q", "tp") or not manager.compose("images", "-q", "tp"):
-        raise RuntimeError("먼저 docker compose up -d --build로 기존 tp를 실행해 주세요")
-    container = manager.container()
-    if manager.exec(container, "sh", "-c", 'printf "%s" "$TP_DOCKER_UPDATE_DIR"') != "/run/tp-update":
-        manager.exec(container, "python3", "-c", PREFLIGHT)
-        manager.compose("up", "-d", "--build", "--no-deps", "tp", timeout=1800)
-        manager.wait()
+    env = manager.service_config().get("environment", {})
+    admins = (env.get("TP_ADMINS") or "").split(",")
+    if not any(login.strip() for login in admins) and not (env.get("TP_ORG") or "").strip():
+        raise RuntimeError("docker/.env에 TP_ADMINS(관리자 GitHub 아이디) 또는 TP_ORG를 넣고 다시 실행하세요")
 
+    container = manager.container(required=False)
+    managed = container and manager.exec(container, "sh", "-c", 'printf "%s" "$TP_DOCKER_UPDATE_DIR"') == "/run/tp-update"
+    # Build the first managed container from the checkout. Subsequent dashboard updates pull published images.
+    if not managed:
+        if container:
+            manager.exec(container, "python3", "-c", PREFLIGHT)
+        manager.compose("up", "-d", "--build", "--no-deps", "tp", timeout=1800)
+    manager.wait()
+    install_service(manager)
+
+
+def install_service(manager):
     key = hashlib.sha256(os.fsencode(manager.root)).hexdigest()[:12]
     label = f"com.ticket-pilot.docker-updater.{key}"
     args = [sys.executable, "-m", "ticket_pilot.docker_update_manager", "run"]
@@ -341,7 +350,7 @@ if __name__ == "__main__":
     try:
         if action == "install":
             install(Manager())
-            print("Docker 업데이트 관리자를 시작했어요")
+            print("Docker 대시보드와 업데이트 관리자를 시작했어요")
         else:
             Manager().run()
     except (OSError, RuntimeError, subprocess.SubprocessError) as e:

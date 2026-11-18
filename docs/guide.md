@@ -21,16 +21,16 @@ Linux에서 알아 둘 것:
 
 Docker로 실행하기(선택, 기본은 위의 호스트 설치):
 1. `cp docker/.env.example docker/.env` 후 `TP_ADMINS`(GitHub 아이디, 쉼표 구분)나 `TP_ORG`(이 조직 멤버도 허용)를 넣습니다. 둘 다 비면 시작하지 않아요.
-2. `cd docker && docker compose up -d --build`, 그다음 `http://127.0.0.1:3032`에서 GitHub로 로그인합니다. Docker 모드에서는 127.0.0.1도 로그인해야 해요.
+2. macOS 또는 Linux의 Docker 호스트에서 저장소 폴더를 열고 `python3 -m ticket_pilot.docker_update_manager install`을 실행하세요. 대시보드와 업데이트 관리자가 함께 설치돼요. `http://127.0.0.1:3032`에서 GitHub로 로그인합니다.
 3. 시작하기의 **에이전트 로그인** 단계(설정 → 에이전트 → 활성 계정과 같은 화면)에서 버튼으로 로그인해요. 터미널이 필요 없어요.
-4. 업데이트는 호스트에서 `git pull && (cd docker && docker compose up -d --build)`. `tp setup`, `tp migrate`, 로컬망 공유는 Docker 모드에서 쓰지 않아요.
+4. `TP_ADMINS` 계정은 **설정 → 고급 → 업데이트**에서 새 릴리즈를 설치할 수 있어요. `tp setup`, `tp migrate`, 로컬망 공유는 Docker 모드에서 쓰지 않아요.
 - 컨테이너를 멈추거나 다시 빌드하면(업데이트 포함) 그 안에서 돌던 에이전트도 끝나요. 작업 중인 티켓이 없을 때 업데이트하세요.
 - 에이전트가 Docker를 써야 하는 저장소는 안 되고, 맥 Docker Desktop에서는 파일 입출력이 느려요.
 
 Docker 모드 외부 공개(선택, Cloudflare Tunnel). 모든 접속이 GitHub 로그인을 거치는 Docker 모드에서만 써요(호스트 설치는 공개하지 마세요):
 1. Cloudflare Zero Trust → Networks → Tunnels → 터널 만들기 → 토큰을 복사해 `docker/.env`의 `TUNNEL_TOKEN`에 넣습니다.
 2. Public hostname: `tp.example.com` → `http://tp:3032`.
-3. `docker/.env`에 `TP_PUBLIC_URL=https://tp.example.com`을 넣고 `docker compose -f docker/compose.yaml --profile tunnel up -d`.
+3. `docker/.env`에 `TP_PUBLIC_URL=https://tp.example.com`을 넣고, `docker/`에서 `docker compose -f compose.yaml -f compose.update.yaml --profile tunnel up -d`를 실행하세요. 기존 `compose.override.yaml`이 있으면 `-f compose.update.yaml` 바로 앞에 `-f compose.override.yaml`을 넣으세요.
 4. **강력 권장**: Cloudflare Access로 회사 이메일이나 IdP 조건을 걸어 GitHub 로그인 앞에 한 겹 더 잠그세요.
 5. **위험**: 로그인한 사람은 채팅 에이전트로 컨테이너 안에서 명령을 실행할 수 있어요.
 - 상태는 **설정 → 고급 → 외부 공개**(TP_ADMINS만)에서 봐요: 터널 연결 여부, 공개 주소. 토큰과 도메인은 화면에서 받지 않아요.
@@ -216,7 +216,7 @@ staging 열차 레포와 `pr_into_staging` 레포는 티켓 브랜치를 staging
   시각을 갱신하고, 새 버전이면 릴리즈 노트와 업데이트 버튼이, 업데이트할 수 없는 상태(`main` 아님, 수정된 파일)면 그 이유가
   나옵니다. 사이드바 항목도 바로 바뀝니다. 가져오기에 실패하면 그 이유를 보여 줍니다.
 - 터미널에서는 `bin/tp update`(또는 `--to <태그|sha>`). checkout이 `main`이고 추적 파일에 수정이 없어야 합니다. 다운그레이드는 지원하지 않아요.
-- Docker 모드에서는 호스트의 설치 저장소에서 새 버전을 가져온 뒤 `python3 -m ticket_pilot.docker_update_manager install`을 한 번 실행하세요.
+- 새 Docker 설치는 설치 명령이 업데이트 관리자도 등록합니다. 이미 Docker로 실행 중이고 관리자가 없다면 호스트의 설치 저장소에서 새 버전을 가져온 뒤 `python3 -m ticket_pilot.docker_update_manager install`을 한 번 실행하세요.
   기존 에이전트와 dev 서버가 끝난 뒤 설치하세요. macOS의 launchd 또는 Linux의 사용자 systemd 서비스로 관리자를 시작합니다.
   설치 후 `TP_ADMINS` 계정으로 **업데이트**를 누르면 관리자가 GHCR에서 새 릴리즈를 받아 기존 볼륨과 사용자 ID를 유지하며 `tp`를 교체합니다.
   실행 중인 작업이 있으면 완료될 때까지 기다렸다 다시 누르세요. 새 대시보드가 뜨지 않으면 이전 이미지로 돌아갑니다.

@@ -44,22 +44,38 @@ def main():
     os.environ["COMPOSE_PROJECT_NAME"] = "tp-update-ci"
     os.environ["TP_PORT"] = "3032"
     manager = updater.Manager()
-    manager.prepare()
     env_file = manager.docker_dir / ".env"
-    # This script is meant for a fresh CI checkout.
+    override = manager.docker_dir / "compose.override.yaml"
+    # This script is meant for a fresh CI checkout. Use the production installer with custom image ownership.
     with env_file.open("x") as f:
         f.write("TP_ADMINS=ci-admin\nTP_ORG=ci-org\n")
+    with override.open("x") as f:
+        f.write("""services:
+  tp:
+    build:
+      args:
+        TP_RELEASE_VERSION: v0.0.1
+        TP_UID: "1001"
+        TP_GID: "1002"
+""")
     registry_container = "tp-update-ci-registry"
     try:
         updater._run(manager.docker, "run", "--rm", "-d", "--name", registry_container,
                      "-p", "127.0.0.1::5000", "registry:2")
         address = updater._run(manager.docker, "port", registry_container, "5000/tcp")
         registry_image = address + "/toothpaste"
-        manager.compose("build", "--build-arg", "TP_RELEASE_VERSION=v0.0.1",
-                        "--build-arg", "TP_UID=1001", "--build-arg", "TP_GID=1002", "tp", timeout=900)
-        manager.compose("up", "-d", "--no-build", "tp")
-        manager.wait("v0.0.1")
-        original = manager.container()
+        # CI exercises the real Compose startup. The user service is validated separately with systemd-analyze.
+        with patch.object(updater, "install_service") as registration:
+            updater.install(manager)
+            registration.assert_called_once_with(manager)
+            original = manager.container()
+            assert manager.exec(original, "python3", "-c", updater.PROBE) == "v0.0.1"
+            assert manager.exec(original, "printenv", "TP_DOCKER_UPDATE_DIR") == "/run/tp-update"
+            assert manager.exec(original, "test", "-w", "/run/tp-update/requests") == ""
+            registration.reset_mock()
+            updater.install(manager)
+            registration.assert_called_once_with(manager)
+            assert manager.container() == original
         admin, visitor = manager.exec(original, "python3", "-c", """
 from pathlib import Path
 from ticket_pilot import core, lan
@@ -143,6 +159,7 @@ con.commit()
         finally:
             subprocess.run([manager.docker, "rm", "-f", registry_container], capture_output=True)
             env_file.unlink()
+            override.unlink()
 
 
 if __name__ == "__main__":
