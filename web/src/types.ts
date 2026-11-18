@@ -439,6 +439,7 @@ export type GitHubStatus = { connected: boolean; login?: string; scopes?: string
 /** /api/github/device (TP-143): the code to enter at verification_uri; the device_code stays on the server */
 export type GitHubDevice = { user_code: string; verification_uri: string; expires_in: number; interval: number };
 export type AsanaStatus = {
+  enabled?: boolean;
   connected: boolean; name?: string; email?: string; env?: boolean; error?: string;
   workspaces?: { gid: string; name: string }[]; workspace?: string; // TP-148: workspaces of the PAT, the chosen gid
 };

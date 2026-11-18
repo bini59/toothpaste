@@ -237,7 +237,7 @@ export function AsanaConnect({ onStatus }: { onStatus?: (ready: boolean) => void
   const [busy, setBusy] = useState(false);
   const [replacing, setReplacing] = useState(false);
   const load = useCallback(() => {
-    getJson<AsanaStatus>("/api/asana/status").then((x) => { setSt(x); onStatus?.(x.connected && !!x.workspace); }, (e: Error) => setErr(e.message));
+    getJson<AsanaStatus>("/api/asana/status").then((x) => { setSt(x); onStatus?.(x.enabled === false || (x.connected && !!x.workspace)); }, (e: Error) => setErr(e.message));
   }, [onStatus]);
   useEffect(load, [load]);
   const act = async (path: string, body: unknown) => {
@@ -255,22 +255,28 @@ export function AsanaConnect({ onStatus }: { onStatus?: (ready: boolean) => void
       setBusy(false);
     }
   };
-  const form = !st?.connected || replacing;
+  const enabled = st?.enabled !== false;
+  const form = enabled && (!st?.connected || replacing);
   return (
-    <Section title="Asana 연결" desc="tp는 이 PAT로 Asana 티켓을 읽고, 배포가 끝난 티켓을 완료로 바꿔요. 저장하면 다음 scan부터 써요."
-      aside={st?.connected && !replacing && (
-        <div className="flex gap-2">
+    <Section title="Asana 연결" desc="선택 사항이에요. Asana를 끄면 GitHub 이슈만 동기화하고 저장된 연결 정보는 유지해요."
+      aside={st && (
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" variant="secondary" disabled={busy} onClick={() => void act("/api/config", { scope: "global", value: { asana_enabled: !enabled } })}>{enabled ? "Asana 사용 안 함" : "Asana 사용"}</Button>
+          {enabled && st.connected && !replacing && <>
           <Button size="sm" variant="secondary" onClick={() => setReplacing(true)}>교체</Button>
           <ConfirmButton size="sm" variant="secondary" confirmLabel="연결 해제" onConfirm={() => act("/api/asana/disconnect", {})}
             message="연결을 해제하면 Asana 단계(티켓 가져오기, 완료 처리)가 PAT를 다시 등록할 때까지 멈춰요.">
             연결 해제
           </ConfirmButton>
+          </>}
         </div>
       )}>
       <Block>
       <div className="flex flex-wrap items-center gap-2 text-sm text-text-main">
         {!st ? (
           <span className="text-text-muted">확인하는 중…</span>
+        ) : !enabled ? (
+          <><Badge status="draft">사용 안 함</Badge><span className="text-text-muted">Asana 연결을 통한 동기화와 요청을 중지했어요.</span></>
         ) : st.connected ? (
           <>
             <Badge status={st.error ? "warning" : "success"}>연결됨</Badge>
@@ -282,7 +288,7 @@ export function AsanaConnect({ onStatus }: { onStatus?: (ready: boolean) => void
         ) : (
           <>
             <Badge status="draft">연결 안 됨</Badge>
-            <span className="text-text-muted">등록하기 전에는 tp가 Asana 단계에서 멈춰요.</span>
+            <span className="text-text-muted">Asana 없이도 GitHub 이슈를 동기화할 수 있어요.</span>
           </>
         )}
       </div>

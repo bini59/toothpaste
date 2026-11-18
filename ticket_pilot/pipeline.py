@@ -282,20 +282,12 @@ def sync_issues(con, ts: str, new_tagged: list) -> None:
                 con.execute(f"UPDATE tickets SET {col} WHERE gid=?", (row["gid"],))
 
 
-def sync(log=print) -> dict:
-    st = settings()
-    con = db()
-    load_map(con)
-    con.commit()
-    mapped = {r["project_gid"] for r in con.execute("SELECT project_gid FROM project_map WHERE repo IS NOT NULL")}
-    names = {r["project_gid"]: r["project_name"] for r in con.execute("SELECT project_gid, project_name FROM project_map")}
-    hidden = list(project_map().get("hidden_projects") or {})
+def _sync_asana(con, st, mapped, names, hidden, ts, new_tagged):
     tasks = asana_all("/tasks", {
         "assignee": "me", "workspace": asana_workspace(), "completed_since": "now", "opt_fields": TASK_FIELDS,
     })
     dep_cache: dict[str, dict] = {}
-    seen, new_tagged = set(), []
-    ts = now()
+    seen = set()
     for t in tasks:
         if t.get("completed"):
             continue
@@ -335,15 +327,10 @@ def sync(log=print) -> dict:
               section, parent.get("gid"), parent.get("name"), t.get("due_on"), t.get("notes"), json.dumps(tags),
               has_tag, json.dumps(deps), sum(1 for d in deps if not d["completed"]), t.get("modified_at"), ts, ts, in_ms))
         seen.add(t["gid"])
-    sync_issues(con, ts, new_tagged)
-    # hidden projects: drop already-stored tickets from every view (assigned=1 comes back if unhidden)
-    con.executemany("UPDATE tickets SET assigned=0 WHERE completed=0 AND project_gid=?", [(g,) for g in hidden])
-    # tickets that dropped out of the "incomplete & assigned to me" list
-    # (ms:<gid>:<repo> = milestone tickets, made by milestone.py, not Asana tasks)
     gone = [r["gid"] for r in con.execute("SELECT gid FROM tickets WHERE completed=0 AND assigned=1 "
                                           "AND gid NOT LIKE 'gh:%' AND gid NOT LIKE 'ms:%'")
             if r["gid"] not in seen]
-    me = asana("GET", "/users/me", {"opt_fields": "gid"})["data"]["gid"]
+    me = asana("GET", "/users/me", {"opt_fields": "gid"})["data"]["gid"] if gone else None
     for gid in gone:
         try:
             d = asana("GET", f"/tasks/{gid}", {"opt_fields": "completed,assignee"})["data"]
@@ -353,12 +340,40 @@ def sync(log=print) -> dict:
                 con.execute("UPDATE tickets SET assigned=0 WHERE gid=?", (gid,))
         except AsanaError:
             con.execute("UPDATE tickets SET assigned=0 WHERE gid=?", (gid,))
+    return len(seen), len(gone)
+
+
+def sync(log=print) -> dict:
+    st = settings()
+    con = db()
+    load_map(con)
+    con.commit()
+    mapped = {r["project_gid"] for r in con.execute("SELECT project_gid FROM project_map WHERE repo IS NOT NULL")}
+    names = {r["project_gid"]: r["project_name"] for r in con.execute("SELECT project_gid, project_name FROM project_map")}
+    hidden = list(project_map().get("hidden_projects") or {})
+    con.executemany("UPDATE tickets SET assigned=0 WHERE completed=0 AND project_gid=?", [(g,) for g in hidden])
+    ts, new_tagged = now(), []
+    incomplete, dropped, asana_error = 0, 0, None
+    if st.get("asana_enabled", True):
+        con.execute("SAVEPOINT asana_sync")
+        try:
+            incomplete, dropped = _sync_asana(con, st, mapped, names, hidden, ts, new_tagged)
+            con.execute("RELEASE asana_sync")
+        except (AsanaError, OSError, ValueError) as e:
+            con.execute("ROLLBACK TO asana_sync")
+            con.execute("RELEASE asana_sync")
+            new_tagged.clear()
+            asana_error = str(e)
+            event(con, "error", f"Asana 동기화: {asana_error}")
+    sync_issues(con, ts, new_tagged)
     for k in new_tagged:
-        event(con, "tagged", f"{k} tagged '{st['asana_tag']}'")
+        event(con, "tagged", f"{k} tagged")
     restage(con)
     meta_set(con, "last_sync", ts)
     con.commit()
-    res = {"incomplete": len(seen), "dropped": len(gone), "new_tagged": new_tagged}
+    res = {"incomplete": incomplete, "dropped": dropped, "new_tagged": new_tagged}
+    if asana_error:
+        res["asana_error"] = asana_error
     log(f"sync: {res}")
     return res
 
