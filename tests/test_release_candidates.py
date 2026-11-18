@@ -27,12 +27,13 @@ class ReleaseCandidatesTest(unittest.TestCase):
            gid=None, release_id=None, prod_at=None):
         gid = gid or f"T-{number}"
         url = f"https://github.com/o/{repo}/pull/{number}"
-        self.con.execute("INSERT INTO tickets(gid,key,name,stage,assigned,completed) VALUES (?,?,?,?,1,0)",
+        self.con.execute("""INSERT INTO tickets(gid,key,name,stage,assigned,completed) VALUES (?,?,?,?,1,0)
+                            ON CONFLICT(gid) DO NOTHING""",
                          (gid, gid, gid, stage))
-        self.con.execute("""INSERT INTO prs(url,ticket_gid,repo,github,number,state,base,merged_at,merge_sha,release_id,prod_at)
-                            VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+        self.con.execute("""INSERT INTO prs(url,ticket_gid,repo,github,number,state,base,merged_at,head_sha,merge_sha,release_id,prod_at)
+                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                          (url, gid, repo, f"o/{repo}", number, state, base, f"2026-11-{number:02d}",
-                          f"merge{number}", release_id, prod_at))
+                          f"head{number}", f"merge{number}", release_id, prod_at))
         return url
 
     def test_same_train_and_deploy_candidates_as_staged_tickets(self):
@@ -66,6 +67,54 @@ class ReleaseCandidatesTest(unittest.TestCase):
         self.assertEqual([p["url"] for p in deploy.staged_prs(self.con, "api")], [regular, milestone])
         self.assertEqual(server._state(self.con)["staged_pr_urls"], {"api": [regular, milestone], "store": [manual]})
 
+    def test_state_includes_every_staging_pr_and_its_ticket(self):
+        first = self.pr(1)
+        second = self.pr(9, gid="T-1")
+        self.pr(10, gid="T-1", state="OPEN")
+        self.con.execute("UPDATE tickets SET stage='done', completed=1, assigned=0 WHERE gid='T-1'")
+        state = server._state(self.con)
+        self.assertEqual(state["staged_pr_urls"], {"api": [first, second]})
+        self.assertEqual([t["gid"] for t in state["tickets"]], ["T-1"])
+
+    def test_promote_records_selected_older_pr_when_latest_run_has_an_open_pr(self):
+        first = self.pr(1, stage="reviewed")
+        second = self.pr(9, gid="T-1")
+        latest = self.pr(10, gid="T-1", state="OPEN")
+        for url in (first, second, latest):
+            run_id = self.con.execute("INSERT INTO runs(ticket_gid,repo,state) VALUES ('T-1','api','active')").lastrowid
+            self.con.execute("UPDATE prs SET run_id=? WHERE url=?", (run_id, url))
+        self.assertEqual([p["url"] for p in deploy.staged_prs(self.con, "api")], [first, second])
+        with mock.patch.object(deploy, "db", return_value=self.con):
+            with self.assertRaisesRegex(SystemExit, "머지된 PR이 아니에요"):
+                deploy.request_deploy("promote", ticket="T-1")
+            rel_id = deploy.request_deploy("promote", ticket="T-1", pr_url=first)
+            with self.assertRaisesRegex(SystemExit, "이미 배포 중"):
+                deploy.request_deploy("promote", ticket="T-1", pr_url=second)
+        row = self.con.execute("SELECT * FROM releases WHERE id=?", (rel_id,)).fetchone()
+        self.assertEqual((row["repo"], row["status"], row["mode"], row["ticket_gid"]), ("api", "requested", "promote", "T-1"))
+        [pr] = json.loads(row["prs_json"])
+        self.assertEqual((pr["url"], pr["head_sha"], pr["merge_sha"]), (first, "head1", "merge1"))
+
+    def test_promote_rejects_prs_outside_the_tickets_staging_candidates(self):
+        staged = self.pr(1)
+        other_ticket = self.pr(2)
+        open_pr = self.pr(3, gid="T-1", state="OPEN")
+        other_base = self.pr(4, gid="T-1", base="main")
+        released = self.pr(5, gid="T-1", release_id=1)
+        live = self.pr(6, gid="T-1", prod_at="2026-11-08")
+        for url, repo, message in (
+            (other_ticket, None, "지정한 PR을 찾을 수 없어요"),
+            (staged, "store", "지정한 PR이 이 레포에 없어요"),
+            (open_pr, None, "머지된 PR이 아니에요"),
+            (other_base, None, "머지된 PR이 아니에요"),
+            (released, None, "이미 프로덕션에 반영됐어요"),
+            (live, None, "이미 프로덕션에 반영됐어요"),
+        ):
+            with self.subTest(url=url, repo=repo), mock.patch.object(deploy, "db", return_value=self.con):
+                with self.assertRaisesRegex(SystemExit, message):
+                    deploy.request_deploy("promote", ticket="T-1", repo=repo, pr_url=url)
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM releases").fetchone()[0], 0)
+
     def test_train_skips_repo_when_only_milestones_awaiting_another_round_remain(self):
         milestone = self.pr(1, gid="ms:P1:api")
         self.con.execute("UPDATE tickets SET parent_gid='P1' WHERE gid='ms:P1:api'")
@@ -77,7 +126,7 @@ class ReleaseCandidatesTest(unittest.TestCase):
         self.assertEqual(release.staged_pr_urls(self.con), {"api": [milestone]})
         state = server._state(self.con)
         self.assertTrue(next(p for p in state["prs"] if p["url"] == milestone)["awaiting_milestone_round"])
-        target, error = deploy.deploy_target(self.con, "promote", ticket="ms:P1:api")
+        target, error = deploy.deploy_target(self.con, "promote", ticket="ms:P1:api", pr_url=milestone)
         self.assertIsNone(target)
         self.assertIn("다음 마일스톤 PR", error)
         with mock.patch.object(release, "db", return_value=self.con), \

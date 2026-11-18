@@ -55,20 +55,22 @@ def state() -> dict:
 
 def _state(con) -> dict:
     rows = lambda q, *a: [dict(r) for r in con.execute(q, a)]  # noqa: E731
-    tickets = rows("""SELECT gid,key,name,url,project_gid,project_name,section,parent_gid,parent_name,due_on,tags,has_tag,
+    rules = repo_rules()
+    staged_pr_urls = R.staged_pr_urls(con, list(rules))
+    staged_urls = {url for urls in staged_pr_urls.values() for url in urls}
+    prs = rows("SELECT * FROM prs")
+    staged_gids = {p["ticket_gid"] for p in prs if p["url"] in staged_urls}
+    tickets = rows(f"""SELECT gid,key,name,url,project_gid,project_name,section,parent_gid,parent_name,due_on,tags,has_tag,
                       deps_json,open_deps,completed,assigned,stage,repo_override,skip,first_seen,last_seen,
                       approve_requested_at,approve_error,reply,check_override,check_override_sha,in_milestone,ms_done_at,
                       review_override,review_override_sha,done_at,asana_modified_at
-                      FROM tickets WHERE (completed=0 AND assigned=1) OR gid IN (SELECT ticket_gid FROM runs)""")
+                      FROM tickets WHERE (completed=0 AND assigned=1) OR gid IN (SELECT ticket_gid FROM runs)
+                      OR gid IN ({','.join('?' for _ in staged_gids)})""", *staged_gids)
     for t in tickets:
         if t["open_deps"]:  # deps merged into the feature base no longer block (TP-20)
             deps = P.deps_status(con, t)
             t["deps_json"] = json.dumps(deps, ensure_ascii=False)
             t["open_deps"] = sum(1 for d in deps if not d["completed"] and not d["landed"])
-    rules = repo_rules()
-    staged_pr_urls = R.staged_pr_urls(con, list(rules))
-    staged_urls = {url for urls in staged_pr_urls.values() for url in urls}
-    prs = rows("SELECT * FROM prs")
     for p in prs:
         # tp checks of the open head (checks.py): state none|pending|pass|fail|error, rows, and the approval gate text
         if p["state"] == "OPEN":
@@ -958,7 +960,7 @@ class H(BaseHTTPRequestHandler):
                 R.override_checks(body["ticket"], body.get("reason") or "")
             elif self.path == "/api/deploy":
                 # only records the request; the host prechecks (every 5 min) run it
-                D.request_deploy(body["mode"], body.get("ticket") or None, body.get("repo") or None)
+                D.request_deploy(body["mode"], body.get("ticket") or None, body.get("repo") or None, pr_url=body.get("pr_url"))
             elif self.path == "/api/deploy-cancel":
                 D.cancel_deploy(int(body["id"]))
             elif self.path == "/api/view":

@@ -273,6 +273,10 @@ export interface StagingDiff {
   note_at: string | null;
 }
 export type Mode = "staging" | "direct" | "promote" | "all" | "preview";
+export type DeployRequest =
+  | { mode: "staging" | "direct" | "preview"; ticket: string }
+  | { mode: "promote"; ticket: string; pr_url: string }
+  | { mode: "all"; repo: string };
 export interface Rule {
   staging: { branch: string; pipeline?: string } | null;
   prod: { branch: string; pipeline?: string; workflow?: string; release?: boolean; ecs?: unknown; smoke?: string[] };

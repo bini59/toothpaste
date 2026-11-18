@@ -6,7 +6,7 @@ import { StageBadge } from "../components/StageBadge";
 import { Table } from "../components/Table";
 import { LIVE_RELEASE, ago, latestPr, liveReleaseOf, pendingItems, type Status } from "../lib";
 import { md } from "./ProjectChat";
-import type { DiffItem, Mode, PR, Release as Rel, Rule, StagingDiff, State, Ticket } from "../types";
+import type { DeployRequest, DiffItem, Mode, PR, Release as Rel, Rule, StagingDiff, State, Ticket } from "../types";
 
 const REL_STATUS: Record<Rel["status"], [string, Status]> = {
   requested: ["요청됨", "info"],
@@ -22,7 +22,7 @@ const REL_STATUS: Record<Rel["status"], [string, Status]> = {
 const MODE_HELP: [Mode, string][] = [
   ["staging", "리뷰 끝난 PR을 staging(테스트 서버)에 머지. staging 브랜치가 없고 preview_label이 있는 저장소는 프리뷰 슬롯"],
   ["direct", "staging을 건너뛰고 티켓을 바로 프로덕션으로"],
-  ["promote", "이미 staging에 있는 티켓 하나만 프로덕션으로 (커밋 cherry-pick)"],
+  ["promote", "이미 staging에 있는 PR 하나를 프로덕션으로 (커밋 cherry-pick)"],
   ["all", "staging에 쌓인 것 전체를 프로덕션으로"],
 ];
 const DIFF_VERDICT: Record<StagingDiff["verdict"], [string, Status]> = {
@@ -47,7 +47,7 @@ const Code = ({ children }: { children: React.ReactNode }) => (
 interface Props {
   s: State;
   onHold: (hold: boolean) => void;
-  onDeploy: (mode: Mode, ticket?: string, repo?: string) => void;
+  onDeploy: (request: DeployRequest) => void;
   onCancelDeploy: (id: number) => void;
 }
 
@@ -102,8 +102,8 @@ export function Release({ s, onHold, onDeploy, onCancelDeploy }: Props) {
   const history = s.releases.filter((r) => !LIVE_RELEASE.includes(r.status));
   const trainRepos = Object.entries(rules).filter(([, r]) => r.train).map(([n]) => n);
   const stagedCount = (name: string) => s.staged_pr_urls[name]?.length ?? 0;
-  const stagedUrls = new Set(Object.values(s.staged_pr_urls).flat());
-  const tk = (gid: string | null) => s.tickets.find((t) => t.gid === gid);
+  const tickets = new Map(s.tickets.map((t) => [t.gid, t]));
+  const prsByUrl = new Map(s.prs.map((pr) => [pr.url, pr]));
   const diffs = (s.staging_diffs ?? []).filter((d) => d.verdict !== "none");
   const allButton = (name: string, r: Rule, label = "staging 전체 → prod") => {
     if (!r.modes.includes("all") || !r.staging) return null;
@@ -117,24 +117,26 @@ export function Release({ s, onHold, onDeploy, onCancelDeploy }: Props) {
             {r.staging.pipeline ? `${r.staging.pipeline}가 초록일 때만 시작해요.` : ""}
           </>
         }
-        confirmLabel="전체 배포" onConfirm={() => onDeploy("all", undefined, name)}>
+        confirmLabel="전체 배포" onConfirm={() => onDeploy({ mode: "all", repo: name })}>
         {label}
       </ConfirmButton>
     );
   };
 
-  // tickets that can be shipped from here: AI-approved open PRs and PRs sitting in a staging branch
-  const cands = s.tickets
-    .flatMap((t) => {
-      const pr = latestPr(s, t.gid);
-      if (!pr || !rules[pr.repo]) return [];
-      const staged = stagedUrls.has(pr.url);
-      const approved = !t.completed && t.stage === "reviewed" && pr.state === "OPEN"
-        && s.reviews.find((v) => v.pr_url === pr.url && v.head_sha === pr.head_sha)?.verdict === "approve";
-      return staged || approved ? [{ t, pr, staged }] : [];
-    })
-    // ready-for-review PRs first, then what sits in staging; grouped by repo
-    .sort((a, b) => Number(a.staged) - Number(b.staged) || a.pr.repo.localeCompare(b.pr.repo) || b.pr.number - a.pr.number);
+  const reviewed = s.tickets.flatMap((t) => {
+    if (t.completed || t.stage !== "reviewed") return [];
+    const pr = latestPr(s, t.gid);
+    const approved = pr?.state === "OPEN" && rules[pr.repo]
+      && s.reviews.find((v) => v.pr_url === pr.url && v.head_sha === pr.head_sha)?.verdict === "approve";
+    return approved ? [{ t, pr, staged: false }] : [];
+  });
+  const staged = Object.values(s.staged_pr_urls).flat().flatMap((url) => {
+    const pr = prsByUrl.get(url);
+    const t = pr && tickets.get(pr.ticket_gid);
+    return pr && t ? [{ t, pr, staged: true }] : [];
+  });
+  const cands = [...reviewed, ...staged].sort((a, b) =>
+    Number(a.staged) - Number(b.staged) || a.pr.repo.localeCompare(b.pr.repo) || b.pr.number - a.pr.number);
 
   const ticketButtons = (t: Ticket, pr: PR, staged: boolean) => {
     const r = rules[pr.repo];
@@ -145,7 +147,7 @@ export function Release({ s, onHold, onDeploy, onCancelDeploy }: Props) {
         out.push(
           <ConfirmButton key="stg" size="sm" variant="secondary" disabled={busy}
             message={<>PR #{pr.number}을 <b>{r.staging.branch}</b>에 머지할까요? (5분 안에 머지)</>}
-            confirmLabel="staging 머지" onConfirm={() => onDeploy("staging", t.gid)}>
+            confirmLabel="staging 머지" onConfirm={() => onDeploy({ mode: "staging", ticket: t.gid })}>
             {r.staging.branch} 머지
           </ConfirmButton>,
         );
@@ -153,7 +155,7 @@ export function Release({ s, onHold, onDeploy, onCancelDeploy }: Props) {
         out.push(
           <ConfirmButton key="pv" size="sm" variant="secondary" disabled={busy}
             message={<>PR #{pr.number}에 <b>{r.preview_label}</b> 라벨을 달까요? 프리뷰 슬롯은 하나라 이전 프리뷰를 대체해요.</>}
-            confirmLabel="프리뷰 배포" onConfirm={() => onDeploy("staging", t.gid)}>
+            confirmLabel="프리뷰 배포" onConfirm={() => onDeploy({ mode: "staging", ticket: t.gid })}>
             프리뷰
           </ConfirmButton>,
         );
@@ -161,7 +163,7 @@ export function Release({ s, onHold, onDeploy, onCancelDeploy }: Props) {
         out.push(
           <ConfirmButton key="dir" size="sm" disabled={busy}
             message={<><b>프로덕션({r.prod.branch})</b>에 바로 내보낼까요? {directPlan(r, pr, "direct")}</>}
-            confirmLabel="prod 배포" onConfirm={() => onDeploy("direct", t.gid)}>
+            confirmLabel="prod 배포" onConfirm={() => onDeploy({ mode: "direct", ticket: t.gid })}>
             prod 직행
           </ConfirmButton>,
         );
@@ -171,8 +173,8 @@ export function Release({ s, onHold, onDeploy, onCancelDeploy }: Props) {
         return <span className="text-xs text-text-muted">다음 마일스톤 PR 머지 대기</span>;
       out.push(
         <ConfirmButton key="pro" size="sm" disabled={busy}
-          message={<>이 티켓만 <b>프로덕션({r.prod.branch})</b>에 내보낼까요? {directPlan(r, pr, "promote")}</>}
-          confirmLabel="prod 반영" onConfirm={() => onDeploy("promote", t.gid)}>
+          message={<>PR #{pr.number}을 <b>프로덕션({r.prod.branch})</b>에 내보낼까요? {directPlan(r, pr, "promote")}</>}
+          confirmLabel="prod 반영" onConfirm={() => onDeploy({ mode: "promote", ticket: t.gid, pr_url: pr.url })}>
           prod 반영
         </ConfirmButton>,
       );
@@ -286,15 +288,16 @@ export function Release({ s, onHold, onDeploy, onCancelDeploy }: Props) {
                   <td className="whitespace-nowrap">{r.mode ? modes[r.mode] ?? r.mode : "평일 자동 배포"}</td>
                   <td className="whitespace-nowrap">{r.repo}</td>
                   <td>
-                    {r.ticket_gid ? (
-                      <a href={tk(r.ticket_gid)?.url} target="_blank" rel="noreferrer" className={link}>{tk(r.ticket_gid)?.key ?? r.ticket_gid}</a>
-                    ) : (
-                      prs.map((p) => (
-                        <a key={p.url} href={p.url} target="_blank" rel="noreferrer" className={`mr-2 whitespace-nowrap ${link}`} title={`${p.key} ${p.title}`}>
-                          #{p.number}
-                        </a>
-                      ))
+                    {r.ticket_gid && (
+                      <a href={tickets.get(r.ticket_gid)?.url} target="_blank" rel="noreferrer" className={`mr-2 ${link}`}>
+                        {tickets.get(r.ticket_gid)?.key ?? r.ticket_gid}
+                      </a>
                     )}
+                    {(!r.ticket_gid || r.mode === "promote") && prs.map((p) => (
+                      <a key={p.url} href={p.url} target="_blank" rel="noreferrer" className={`mr-2 whitespace-nowrap ${link}`} title={`${p.key} ${p.title}`}>
+                        #{p.number}
+                      </a>
+                    ))}
                     {r.release_pr_url && (
                       <a href={r.release_pr_url} target="_blank" rel="noreferrer" className={`ml-2 ${link}`}>#{r.release_pr_url.split("/").pop()}</a>
                     )}
@@ -329,7 +332,7 @@ export function Release({ s, onHold, onDeploy, onCancelDeploy }: Props) {
         {cands.length ? (
           <Table head={["티켓", "제목", "레포", "PR", "배포"]}>
             {cands.map(({ t, pr, staged }) => (
-              <tr key={t.gid}>
+              <tr key={pr.url}>
                 <td className="whitespace-nowrap">
                   <a href={t.url} target="_blank" rel="noreferrer" className={link}>{t.key}</a>
                   <div className="mt-1"><StageBadge stage={t.stage} /></div>
@@ -345,7 +348,7 @@ export function Release({ s, onHold, onDeploy, onCancelDeploy }: Props) {
             ))}
           </Table>
         ) : (
-          <Card className="p-5 text-center text-sm text-text-muted">AI 리뷰 "괜찮음"을 받았거나 staging에 머지된 티켓이 여기에 나와요.</Card>
+          <Card className="p-5 text-center text-sm text-text-muted">AI 리뷰 "괜찮음"을 받았거나 배포를 기다리는 staging PR이 여기에 나와요.</Card>
         )}
       </section>
 
@@ -402,11 +405,12 @@ export function Release({ s, onHold, onDeploy, onCancelDeploy }: Props) {
             <p className="mt-1 text-xs text-text-muted">{hold ? "보류 중: 해제할 때까지 배포하지 않아요" : "10:00~12:00 사이 5분 주기로 시작"}</p>
           </Card>
           <Card className="px-5 py-4">
-            <p className="text-xs font-medium text-text-muted">포함될 PR (staging 머지됨)</p>
+            <p className="text-xs font-medium text-text-muted">자동 배포 레포의 staging 대기 PR</p>
             <p className="mt-1 text-2xl font-extrabold tracking-tight text-primary">
               {trainRepos.reduce((total, name) => total + stagedCount(name), 0)}
             </p>
             <p className="mt-1 text-xs text-text-muted">머지 진행 중 {s.tickets.filter((t) => t.stage === "approving").length}</p>
+            <p className="mt-1 text-xs text-text-muted">다른 배포에서 처리 중이거나 다음 마일스톤 PR을 기다리는 PR도 포함해요.</p>
           </Card>
           <Card className="flex flex-col justify-between gap-3 px-5 py-4">
             <p className="text-xs font-medium text-text-muted">배포 보류</p>
