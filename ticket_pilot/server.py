@@ -600,6 +600,12 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, {"text": GD.text()})
         if self.path == "/api/projects":
             return self._send(200, {"projects": CH.projects(), "notifications_unread": N.unread_count()})
+        if self.path.split("?", 1)[0] == "/api/chat/compactions":
+            from urllib.parse import parse_qs, urlsplit
+            period = parse_qs(urlsplit(self.path).query).get("days", ["30"])[0]
+            if period not in ("7", "30", "90", "all"):
+                return self._send(400, {"error": "기간은 7일, 30일, 90일 또는 전체로 선택해 주세요"})
+            return self._send(200, {"rows": CH.compaction_report(None if period == "all" else int(period))})
         if self.path.startswith("/api/onboard/"):
             # 프로젝트 추가 wizard (onboard.py): picker lists (?refresh=1 skips the cache) and clone job status (?id=)
             from urllib.parse import parse_qs, urlsplit

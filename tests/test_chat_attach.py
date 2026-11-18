@@ -150,6 +150,8 @@ class AttachTest(unittest.TestCase):
 
     def test_compaction_at_fifty_minutes_hands_off_to_a_new_session(self):
         self._claude_history("2026-11-18T12:00:00+00:00")
+        self.con.execute("UPDATE chat_messages SET context_tokens=100 WHERE role='assistant'")
+        self.con.commit()
         with mock.patch.object(CH, "now", return_value="2026-11-18T12:49:59+00:00"):
             CH.compact_idle(self.con)
         self.launch.assert_not_called()
@@ -164,7 +166,8 @@ class AttachTest(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "압축하는 중"):
                 CH.send(self.id, "wait")
         with mock.patch.object(CH.R, "agent_state", return_value=(False, 0)), \
-             mock.patch.object(CH.R, "compacted_summary", return_value="private handoff"):
+             mock.patch.object(CH.R, "compacted_summary", return_value="private handoff"), \
+             mock.patch.object(CH.R, "compacted_usage", return_value=(10, 20, 30, 4, 60)):
             thread = CH.messages(self.id)
         self.assertIsNone(thread["busy"])
         self.assertIsNone(thread["conversation"]["session"])
@@ -172,12 +175,25 @@ class AttachTest(unittest.TestCase):
                          ["old question", "old reply", "대화가 압축됐어요"])
         self.assertEqual(thread["messages"][-1]["role"], "compaction")
         self.assertEqual(CH.inbox()[0]["unread"], 1)
-        CH.send(self.id, "next question")
+        turn = CH.send(self.id, "next question")
         self.assertIsNone(self.launch.call_args.kwargs["resume"])
         prompt = self.launch.call_args.args[1]
         self.assertIn("private handoff", prompt)
         self.assertIn("next question", prompt)
         self.assertNotIn("old reply", prompt)
+        compact = self.con.execute("SELECT * FROM chat_messages WHERE role='compaction'").fetchone()
+        self.assertEqual((compact["before_context_tokens"], compact["input_tokens"], compact["context_tokens"]),
+                         (100, 10, 60))
+        self.assertEqual(self.con.execute("SELECT compaction_id FROM chat_messages WHERE id=?", (turn,)).fetchone()[0],
+                         compact["id"])
+        with mock.patch.object(CH.R, "agent_state", return_value=(False, 0)), \
+             mock.patch.object(CH.R, "last_message", return_value="answer"), \
+             mock.patch.object(CH.R, "session", return_value=("claude", "new")):
+            CH.messages(self.id)
+        second = CH.send(self.id, "one more")
+        self.assertEqual(self.launch.call_args.kwargs["resume"], "new")
+        self.assertEqual(self.con.execute("SELECT compaction_id FROM chat_messages WHERE id=?", (second,)).fetchone()[0],
+                         compact["id"])
 
     def test_compaction_without_summary_leaves_existing_session_resumable(self):
         self._claude_history("2026-11-18T12:00:00+00:00")
@@ -190,6 +206,56 @@ class AttachTest(unittest.TestCase):
             self.assertEqual([m["role"] for m in CH.messages(self.id)["messages"]], ["user", "assistant"])
         CH.send(self.id, "try again")
         self.assertEqual(self.launch.call_args.kwargs["resume"], "old")
+
+    def test_compaction_report_follows_the_session_established_by_a_successful_retry(self):
+        compact = self.con.execute("""INSERT INTO chat_messages(conversation_id,role,text,finished_at,before_context_tokens,
+                                      input_tokens,cache_read_input_tokens,cache_creation_input_tokens,output_tokens)
+                                      VALUES(?,'compaction','handoff',?,200,100,0,0,0)""", (self.id, CH.now())).lastrowid
+        self.con.commit()
+
+        def finish(session, context, *, code=0):
+            with mock.patch.object(CH.R, "agent_state", return_value=(False, code)), \
+                 mock.patch.object(CH.R, "last_message", return_value="answer"), \
+                 mock.patch.object(CH.R, "session", return_value=("claude", session)), \
+                 mock.patch.object(CH.R, "claude_turn_usage", return_value=(context, 0, 0, 5, context)):
+                return CH.messages(self.id)["conversation"]["session"]
+
+        failed = CH.send(self.id, "first attempt")
+        self.assertIsNone(finish("abandoned", 40, code=1))
+        self.assertEqual(tuple(self.con.execute("SELECT compaction_id, context_tokens FROM chat_messages WHERE id=?",
+                                                (failed,)).fetchone()), (compact, 40))
+        report = CH.compaction_report(None)[0]
+        self.assertEqual((report["continued"], report["first_context_tokens"], report["turns"],
+                          report["net_savings_tokens"]), (False, None, 0, -100))
+
+        CH.send(self.id, "retry")
+        self.assertIsNone(self.launch.call_args.kwargs["resume"])
+        self.assertIn("Earlier chat summary (background only):\nhandoff", self.launch.call_args.args[1])
+        self.assertEqual(finish("adopted", 80), "adopted")
+        report = CH.compaction_report(None)[0]
+        self.assertEqual((report["continued"], report["first_context_tokens"], report["turns"], report["measured"],
+                          report["net_savings_tokens"]), (True, 80, 1, 1, 20))
+
+        CH.send(self.id, "follow up")
+        self.assertEqual(self.launch.call_args.kwargs["resume"], "adopted")
+        self.assertEqual(finish("adopted", 90, code=1), "adopted")
+        report = CH.compaction_report(None)[0]
+        self.assertEqual((report["first_context_tokens"], report["turns"], report["measured"],
+                          report["net_savings_tokens"]), (80, 2, 2, 130))
+
+    def test_compaction_baseline_includes_failed_resumed_turn_with_usage(self):
+        self._claude_history("2026-11-18T12:00:00+00:00")
+        self.con.execute("UPDATE chat_messages SET context_tokens=100 WHERE role='assistant'")
+        self.con.execute("""INSERT INTO chat_messages(conversation_id,role,text,failed,handle,context_tokens)
+                            VALUES(?,'assistant','stopped',1,'1 /tmp/stop.log',140)""", (self.id,))
+        self.con.execute("""INSERT INTO chat_messages(conversation_id,role,text,failed)
+                            VALUES(?,'assistant','failed to launch',1)""", (self.id,))
+        self.con.commit()
+        with mock.patch.object(CH, "now", return_value="2026-11-18T12:50:00+00:00"), \
+             mock.patch.object(CH.R, "session", return_value=("claude", "old")):
+            CH.compact_idle(self.con)
+        self.assertEqual(self.con.execute("SELECT before_context_tokens FROM chat_messages WHERE role='compaction'").fetchone()[0],
+                         140)
 
 
 class CodexImageTest(unittest.TestCase):

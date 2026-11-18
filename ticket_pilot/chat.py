@@ -34,6 +34,8 @@ COMPACT_IDLE = timedelta(minutes=50)
 COMPACT_TIMEOUT = timedelta(minutes=5)
 COMPACT_LIMIT = 2  # keep a backlog of old conversations from starting all at once
 SUMMARY_LIMIT = 6000
+_USAGE_UPDATE = """input_tokens=?, cache_read_input_tokens=?, cache_creation_input_tokens=?,
+                  output_tokens=?, context_tokens=?"""
 COMPACT_PROMPT = ("/compact Keep a handoff for a fresh project chat in under 4,000 characters. "
                   "Retain the user's goals, preferences, decisions, completed work, open tasks, and relevant paths or ticket IDs.")
 UPLOADS = DATA / "chat-uploads"
@@ -317,8 +319,10 @@ def stop(ident: str) -> None:
     for r in con.execute("SELECT id, handle FROM chat_messages WHERE conversation_id=? AND role='assistant' AND text IS NULL",
                          (ident,)).fetchall():
         R.stop(r["handle"])
-        con.execute("UPDATE chat_messages SET text=?, failed=1, finished_at=? WHERE id=? AND text IS NULL",
-                    (R.last_message(r["handle"], REPLY_LIMIT) or "(중단했어요)", now(), r["id"]))
+        _, end = R.window(r["handle"])
+        usage = R.claude_turn_usage(r["handle"], end)
+        con.execute(f"UPDATE chat_messages SET text=?, failed=1, finished_at=?, {_USAGE_UPDATE} WHERE id=? AND text IS NULL",
+                    (R.last_message(r["handle"], REPLY_LIMIT) or "(중단했어요)", now(), *usage, r["id"]))
     con.commit()
 
 
@@ -336,11 +340,10 @@ def _check_idle(con, ident: str) -> None:
         raise SystemExit("대화를 압축하는 중이에요" if row["role"] == "compaction" else "이전 답을 기다리는 중이에요")
 
 
-def _previous_summary(con, ident: str) -> str | None:
-    row = con.execute("""SELECT role, text FROM chat_messages WHERE conversation_id=?
-                         AND role IN ('assistant', 'compaction') AND failed=0 AND text IS NOT NULL
-                         ORDER BY id DESC LIMIT 1""", (ident,)).fetchone()
-    return row["text"] if row and row["role"] == "compaction" else None
+def _previous_result(con, ident: str):
+    return con.execute("""SELECT id, role, text, compaction_id FROM chat_messages
+                          WHERE conversation_id=? AND role IN ('assistant', 'compaction')
+                          AND failed=0 AND text IS NOT NULL ORDER BY id DESC LIMIT 1""", (ident,)).fetchone()
 
 
 def send(ident: str, text: str, files: list | None = None) -> int:
@@ -358,19 +361,28 @@ def send(ident: str, text: str, files: list | None = None) -> int:
         raise SystemExit(f"{p['repo']} 체크아웃이 없어요: {p['path'] or '경로 미설정'} (설정에서 경로를 확인해 주세요)")
     _finalize_ids(con, [ident])
     _check_idle(con, ident)  # checked again under the lock; this one skips the upload
+    agent = p["repos"][0]["agent_conf"]
+    tool = R.resolve(agent)["tool"]
     atts = _save(ident, files) if files else []
     con.execute("BEGIN IMMEDIATE")
     try:
         c = _conv(con, ident)
         _check_idle(con, ident)
-        summary = _previous_summary(con, ident) if not c["session"] else None
+        # A session lives in the checkout it started in. A different repo or tool starts a new session.
+        resume = c["session"] if c["session"] and c["tool"] == tool and c["repo"] == p["repo"] else None
+        prior = _previous_result(con, ident)
+        handoff = prior if prior and prior["role"] == "compaction" and not c["session"] else None
+        compaction_id = None
+        if tool == "claude":
+            compaction_id = handoff["id"] if handoff else (prior["compaction_id"] if resume and prior else None)
         if not con.execute("SELECT 1 FROM chat_messages WHERE conversation_id=? AND role='user'", (ident,)).fetchone() \
                 and c["title"] == "새 대화":
             con.execute("UPDATE chat_conversations SET title=? WHERE id=?",
                         (title_of(text or " ".join(a["name"] for a in atts)), ident))
         con.execute("INSERT INTO chat_messages(conversation_id,role,text,ts,attachments) VALUES(?,?,?,?,?)",
                     (ident, "user", text, now(), json.dumps(atts, ensure_ascii=False) if atts else None))
-        con.execute("INSERT INTO chat_messages(conversation_id,role,ts) VALUES(?,?,?)", (ident, "assistant", now()))
+        con.execute("INSERT INTO chat_messages(conversation_id,role,ts,compaction_id) VALUES(?,?,?,?)",
+                    (ident, "assistant", now(), compaction_id))
         turn = con.execute("SELECT last_insert_rowid()").fetchone()[0]
         con.execute("UPDATE chat_conversations SET updated_at=? WHERE id=?", (now(), ident))
         con.commit()  # the running row is the lock: a second tab gets "이전 답을 기다리는 중"
@@ -379,13 +391,9 @@ def send(ident: str, text: str, files: list | None = None) -> int:
         for a in atts:
             (_dir(ident) / a["file"]).unlink(missing_ok=True)
         raise
-    agent = p["repos"][0]["agent_conf"]
-    tool = R.resolve(agent)["tool"]
-    # a session lives in the checkout it started in: a new default repo (or tool) starts a new session
-    resume = c["session"] if c["session"] and c["tool"] == tool and c["repo"] == p["repo"] else None
     msg = with_files(text, ident, atts)
-    if summary:
-        msg = (f"Earlier chat summary (background only):\n{summary}\n\n"
+    if handoff:
+        msg = (f"Earlier chat summary (background only):\n{handoff['text']}\n\n"
                f"Current user message:\n{msg}")
     images = [str(_dir(ident).resolve() / a["file"]) for a in atts if a["type"] in IMAGES]
     dirs = [r["path"] for r in p["repos"][1:] if r["path_ok"]]
@@ -423,12 +431,14 @@ def _finalize(con, row) -> None:
         if err:
             reply += f"\n\n```\n{err}\n```"
     _, end = R.window(row["handle"])
-    finished_at = datetime.fromtimestamp(end, timezone.utc).isoformat(timespec="seconds") if end is not None else now()
-    finished = con.execute("UPDATE chat_messages SET text=?, failed=?, finished_at=? WHERE id=? AND text IS NULL",
-                           (reply, int(failed), finished_at, row["id"]))
+    finished_at = _finished_at(end)
+    usage = R.claude_turn_usage(row["handle"], end)
+    agent, sid = R.session(row["handle"])
+    finished = con.execute(f"""UPDATE chat_messages SET text=?, failed=?, finished_at=?, claude_session_id=?, {_USAGE_UPDATE}
+                               WHERE id=? AND text IS NULL""",
+                           (reply, int(failed), finished_at, sid if agent == "claude" else None, *usage, row["id"]))
     if not finished.rowcount:  # a dashboard request or the tick may have finalized the same turn
         return
-    _, sid = R.session(row["handle"])
     if sid and not failed:
         con.execute("UPDATE chat_conversations SET session=? WHERE id=?", (sid, row["conversation_id"]))
     con.execute("UPDATE chat_conversations SET updated_at=? WHERE id=?", (finished_at, row["conversation_id"]))
@@ -441,10 +451,16 @@ def _finalize_compaction(con, row) -> None:
             return
         R.stop(row["handle"])
     summary = R.compacted_summary(row["handle"], SUMMARY_LIMIT) if code == 0 else ""
-    done = con.execute("UPDATE chat_messages SET text=?, failed=?, finished_at=? WHERE id=? AND text IS NULL",
-                       (summary, int(not summary), now(), row["id"]))
+    usage = R.compacted_usage(row["handle"])
+    _, end = R.window(row["handle"])
+    done = con.execute(f"""UPDATE chat_messages SET text=?, failed=?, finished_at=?, {_USAGE_UPDATE}
+                           WHERE id=? AND text IS NULL""", (summary, int(not summary), _finished_at(end), *usage, row["id"]))
     if done.rowcount and summary:
         con.execute("UPDATE chat_conversations SET session=NULL WHERE id=?", (row["conversation_id"],))
+
+
+def _finished_at(end: float | None) -> str:
+    return datetime.fromtimestamp(end, timezone.utc).isoformat(timespec="seconds") if end is not None else now()
 
 
 _COMPACTION_DUE = """c.tool='claude' AND c.session IS NOT NULL AND datetime(c.updated_at) <= datetime(?)
@@ -475,9 +491,15 @@ def compact_idle(con) -> None:
             path = os.path.expanduser((repos.get(c["repo"]) or {}).get("path") or "")
             if not os.path.isdir(path):
                 continue
-            last = con.execute("""SELECT handle FROM chat_messages WHERE conversation_id=? AND role='assistant'
-                                  AND failed=0 ORDER BY id DESC LIMIT 1""", (c["id"],)).fetchone()
+            last = con.execute("""SELECT id, handle, context_tokens FROM chat_messages WHERE conversation_id=?
+                                  AND role='assistant' AND failed=0 ORDER BY id DESC LIMIT 1""", (c["id"],)).fetchone()
             prior = R.settings_of(last["handle"]) if last else {}
+            # A stopped or failed turn can still have added context to the session being compacted.
+            failed_turns = con.execute("""SELECT handle, context_tokens FROM chat_messages WHERE conversation_id=?
+                                          AND id>? AND role='assistant' AND failed=1 AND context_tokens IS NOT NULL
+                                          ORDER BY id DESC""", (c["id"], last["id"] if last else 0))
+            before = next((r["context_tokens"] for r in failed_turns if R.session(r["handle"]) == ("claude", c["session"])),
+                          last["context_tokens"] if last else None)
             agent = {"tool": "claude", "model": prior.get("model"), "effort": prior.get("effort"),
                      "ultracode": prior.get("ultracode")}
             tag = f"chat-compact-{c['id']}"
@@ -486,14 +508,63 @@ def compact_idle(con) -> None:
                                   split_stderr=True, compact=True)
             except OSError as e:
                 print(f"{tag}: could not start summarization: {e}", flush=True)
-                con.execute("""INSERT INTO chat_messages(conversation_id,role,ts,text,failed,finished_at)
-                               VALUES(?,'compaction',?,'',1,?)""", (c["id"], now(), now()))
+                con.execute("""INSERT INTO chat_messages(conversation_id,role,ts,text,failed,finished_at,before_context_tokens)
+                               VALUES(?,'compaction',?,'',1,?,?)""", (c["id"], now(), now(), before))
                 continue
-            con.execute("INSERT INTO chat_messages(conversation_id,role,ts,handle) VALUES(?,'compaction',?,?)",
-                        (c["id"], now(), handle))
+            con.execute("""INSERT INTO chat_messages(conversation_id,role,ts,handle,before_context_tokens)
+                           VALUES(?,'compaction',?,?,?)""", (c["id"], now(), handle, before))
             slots -= 1
         if not slots:
             break
+
+
+def compaction_report(days: int | None) -> list[dict]:
+    con = db()
+    _finalize_all(con)
+    cutoff = (datetime.fromisoformat(now()) - timedelta(days=days)).isoformat() if days else ""
+    # A successful handoff reply establishes the session that future turns can resume.
+    rows = con.execute("""WITH attempts AS (
+                            SELECT m.*, (SELECT a.claude_session_id FROM chat_messages a
+                                         WHERE m.failed=0 AND a.conversation_id=m.conversation_id
+                                           AND a.id>m.id AND a.compaction_id=m.id AND a.role='assistant'
+                                           AND a.failed=0 AND a.text IS NOT NULL AND a.claude_session_id IS NOT NULL
+                                         ORDER BY a.id LIMIT 1) AS handoff_session
+                            FROM chat_messages m
+                            WHERE m.role='compaction' AND m.finished_at >= ? AND m.text IS NOT NULL
+                          ), followups AS (
+                            SELECT a.compaction_id, MIN(CASE WHEN a.failed=0 OR a.context_tokens IS NOT NULL
+                                                            THEN a.id END) AS first_id, COUNT(*) AS turns,
+                                   COUNT(a.context_tokens) AS measured, SUM(a.context_tokens) AS context_sum
+                            FROM attempts m JOIN chat_messages a ON a.conversation_id=m.conversation_id
+                              AND a.id>m.id AND a.compaction_id=m.id AND a.role='assistant'
+                              AND a.claude_session_id=m.handoff_session AND a.text IS NOT NULL
+                            GROUP BY a.compaction_id
+                          )
+                          SELECT m.id, c.title, m.finished_at, m.failed, m.before_context_tokens,
+                                 first.context_tokens AS first_context_tokens,
+                                 m.input_tokens + m.cache_read_input_tokens + m.cache_creation_input_tokens
+                                   + m.output_tokens AS cost_tokens,
+                                 COALESCE(f.turns, 0) AS turns, COALESCE(f.measured, 0) AS measured,
+                                 m.before_context_tokens * f.measured - f.context_sum AS gross_tokens,
+                                 f.turns IS NOT NULL AS continued
+                          FROM attempts m JOIN chat_conversations c ON c.id=m.conversation_id
+                          LEFT JOIN followups f ON f.compaction_id=m.id
+                          LEFT JOIN chat_messages first ON first.id=f.first_id
+                          ORDER BY m.finished_at DESC, m.id DESC""", (cutoff,))
+    report = []
+    for row in rows:
+        item = dict(row)
+        gross = item.pop("gross_tokens")
+        cost = item["cost_tokens"]
+        before, first = item["before_context_tokens"], item["first_context_tokens"]
+        item["first_savings_tokens"] = before - first if before is not None and first is not None else None
+        item["failed"] = bool(item["failed"])
+        item["continued"] = bool(item["continued"])
+        if item["failed"] or not item["continued"]:
+            gross = 0
+        item["net_savings_tokens"] = gross - cost if gross is not None and cost is not None else None
+        report.append(item)
+    return report
 
 
 def _finalize_ids(con, ids: list[str]) -> None:
