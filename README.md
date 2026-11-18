@@ -132,16 +132,17 @@ paths with a dot folder):
 
 The default stays the host install above. `docker/Dockerfile` (Debian slim, Node LTS, python3, git, gh, pnpm / yarn via
 corepack, `claude`, `codex`; `web/dist` built in the image; runs as the non-root user `node`; no secrets in the image) and
-`docker/compose.yaml` run the dashboard and a tick every minute in one process, `tp run`:
+`docker/compose.yaml` run the dashboard and a tick every minute in one process, `tp run`. On a Mac or a Linux host
+with Docker Compose and Python 3.11+, the installer starts the dashboard and registers the update manager together:
 
 ```bash
 gh repo clone bini59/toothpaste tp && cd tp
-cd docker                               # compose then also loads compose.override.yaml (tp mode docker writes it)
-cp .env.example .env                    # set TP_ADMINS=<your GitHub login>[,<more>] and/or TP_ORG=<org>
-docker compose up -d --build
-open http://127.0.0.1:3032              # GitHub login (TP_PORT in .env changes the host port)
-docker compose exec tp git config --global user.name "<name>"   # and user.email, for agent commits
+cp docker/.env.example docker/.env      # set TP_ADMINS=<your GitHub login>[,<more>] and/or TP_ORG=<org>
+python3 -m ticket_pilot.docker_update_manager install
+(cd docker && docker compose exec tp git config --global user.name "<name>") # and user.email, for agent commits
 ```
+
+Open `http://127.0.0.1:3032` and sign in with GitHub. `TP_PORT` in `docker/.env` changes the host port.
 
 Then 시작하기 as above. Its 에이전트 로그인 step (the same card as 설정 → 에이전트 → 활성 계정) logs `codex` in with
 Device Flow and `claude` with `claude setup-token` (or a pasted token / API key) from the browser, no terminal needed.
@@ -158,9 +159,9 @@ Device Flow and `claude` with `claude setup-token` (or a pasted token / API key)
 - **`tp run`**: a tick every minute like launchd / systemd (skipped while the last one still runs; agents in their own
   sessions). `docker compose stop` (SIGTERM) waits for the running tick (`stop_grace_period: 5m`).
 - **Off in Docker mode**: `tp setup`, `tp migrate`, `tp update` and 로컬망 공유 ("Docker 모드에서는 쓰지 않아요"), 시스템 자동화.
-- **Update from the dashboard**: wait for agents and dev servers to finish, then run
-  `git pull --ff-only && python3 -m ticket_pilot.docker_update_manager install` once from the install checkout on the host
-  (macOS launchd or Linux user systemd). Users in `TP_ADMINS` can then use **설정 → 고급 → 업데이트**.
+- **Update from the dashboard**: users in `TP_ADMINS` can use **설정 → 고급 → 업데이트** after installation.
+  For an existing Docker deployment without the manager, wait for agents and dev servers to finish, then run
+  `git pull --ff-only && python3 -m ticket_pilot.docker_update_manager install` once from the host install checkout.
   The host manager downloads the published GHCR image and replaces only `tp`. It refuses to interrupt active work.
   For manual maintenance of a managed install, run Compose with `-f compose.yaml`, the existing `-f compose.override.yaml`
   if present, and `-f compose.update.yaml` from `docker/`. Use a host-only install checkout when migrating bind mounts.
@@ -176,7 +177,9 @@ stays on 127.0.0.1.
 
 1. Cloudflare Zero Trust → Networks → Tunnels → create a tunnel (cloudflared) → copy its token into `docker/.env` as `TUNNEL_TOKEN`.
 2. Public hostname: `tp.example.com` → service `http://tp:3032` (the compose network name of the dashboard).
-3. `TP_PUBLIC_URL=https://tp.example.com` in `docker/.env`, then `docker compose -f docker/compose.yaml --profile tunnel up -d`.
+3. Set `TP_PUBLIC_URL=https://tp.example.com` in `docker/.env`. From `docker/`, run
+   `docker compose -f compose.yaml -f compose.update.yaml --profile tunnel up -d`. Include `-f compose.override.yaml`
+   before `-f compose.update.yaml` if the installation has a Compose override.
 4. **Strongly recommended**: a Cloudflare Access application on that hostname (company email domain or your IdP) as a
    second lock in front of the GitHub login.
 5. **Risk**: whoever logs in can run commands inside the container through the chat agents (and use every token in it).
