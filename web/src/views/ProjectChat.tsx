@@ -234,6 +234,7 @@ function Thread({ project, id, onChanged }: { project: Project; id: string; onCh
   const load = useCallback(() => getJson<ChatThread>(`/api/chat/messages?id=${encodeURIComponent(id)}`)
     .then((r) => { setT(r); setLoadError(""); }).catch((e) => setLoadError(String(e))), [id]);
   const busy = !!t?.busy;
+  const compacting = busy && t?.messages.at(-1)?.role === "compaction";
   useEffect(() => {
     load();
     const iv = setInterval(load, busy ? 2500 : 10000);
@@ -285,7 +286,7 @@ function Thread({ project, id, onChanged }: { project: Project; id: string; onCh
             <h2 className="min-w-0 flex-1 truncate text-sm font-bold text-text-main">{c.title}</h2>
             {c.tool && <Badge status="draft">{c.tool}</Badge>}
             <Button size="sm" variant="secondary" aria-label="제목 바꾸기" onClick={() => setEditing(c.title)}><Pencil className="h-4 w-4" /></Button>
-            {busy && <Button size="sm" variant="secondary" onClick={() => act("/api/chat/stop", {})}><Square className="h-4 w-4" /> 멈추기</Button>}
+            {busy && !compacting && <Button size="sm" variant="secondary" onClick={() => act("/api/chat/stop", {})}><Square className="h-4 w-4" /> 멈추기</Button>}
             <Button size="sm" variant="secondary" aria-label="대화 지우기" onClick={remove}><Trash2 className="h-4 w-4" /></Button>
           </>
         )}
@@ -294,6 +295,12 @@ function Thread({ project, id, onChanged }: { project: Project; id: string; onCh
         {t.messages.length === 0 && sending === null && <Empty project={project} />}
         {t.messages.map((m) => m.role === "user" ? (
           <UserBubble key={m.id} text={m.text ?? ""} attachments={m.attachments} />
+        ) : m.role === "compaction" ? (
+          <div key={m.id} role="status" className="flex items-center gap-3 py-2 text-xs text-text-muted">
+            <span aria-hidden="true" className="flex-1 border-t border-border" />
+            {m.text ?? "대화를 압축하는 중이에요"}
+            <span aria-hidden="true" className="flex-1 border-t border-border" />
+          </div>
         ) : m.text === null ? (
           <div key={m.id} className="max-w-[85%] rounded-lg border border-border bg-surface px-3 py-2 text-text-muted">
             <p className="flex items-center gap-2"><Bot className="h-4 w-4 animate-pulse" /> 답을 쓰는 중… <Elapsed since={m.ts} /> · 다른 화면으로 가도 계속 실행돼요</p>
@@ -316,7 +323,7 @@ function Thread({ project, id, onChanged }: { project: Project; id: string; onCh
       </div>
       {(error || loadError) && <p role="alert" className="px-3 text-sm text-danger-700">{error || loadError}</p>}
       <Composer disabled={busy || !project.path_ok} busy={sending !== null} onSend={send}
-        placeholder={busy ? "답을 기다리는 중이에요" : "메시지 (Enter 보내기 · Shift+Enter 줄바꿈)"} />
+        placeholder={compacting ? "대화를 압축하는 중이에요" : busy ? "답을 기다리는 중이에요" : "메시지 (Enter 보내기 · Shift+Enter 줄바꿈)"} />
     </>
   );
 }

@@ -4,7 +4,8 @@ Each turn is one detached agent (runner.launch) in the project's default repo ch
 --add-dir, with the default repo's agent settings (repo.<name>.agent, else the global agent). The first turn sends prompts/chat.md + the message and records the
 agent's session; later turns resume that session (codex exec resume / claude --resume) with only the message.
 The reply is the agent's final message (runner.last_message), read when the process has exited; the dashboard
-polls messages(), which finalizes finished turns. One running turn per conversation.
+polls messages(), which finalizes finished turns. One running turn per conversation. The tick also finalizes
+turns and summarizes idle Claude sessions so the next turn can start fresh with the summary.
 
 Attachments (TP-72): files sent with a message are stored in data/chat-uploads/<conversation>/ (outside every repo
 checkout) and listed in chat_messages.attachments; the agent gets their absolute paths at the end of the message
@@ -20,6 +21,7 @@ import os
 import re
 import shutil
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
 
@@ -28,6 +30,12 @@ from .core import DATA, ROOT, UNSORTED, db, now, project_map, settings
 
 MAX_TEXT = 32000
 REPLY_LIMIT = 200_000
+COMPACT_IDLE = timedelta(minutes=50)
+COMPACT_TIMEOUT = timedelta(minutes=5)
+COMPACT_LIMIT = 2  # keep a backlog of old conversations from starting all at once
+SUMMARY_LIMIT = 6000
+COMPACT_PROMPT = ("/compact Keep a handoff for a fresh project chat in under 4,000 characters. "
+                  "Retain the user's goals, preferences, decisions, completed work, open tasks, and relevant paths or ticket IDs.")
 UPLOADS = DATA / "chat-uploads"
 MAX_FILE = 20 * 1024 * 1024
 MAX_FILES = 10
@@ -92,7 +100,7 @@ UNREAD = """(SELECT COUNT(*) FROM chat_messages m WHERE m.conversation_id=c.id A
 
 def _finalize_all(con) -> None:
     """Finish turns whose process ended, so the sidebar's running dot and unread counts move without opening that chat."""
-    rows = con.execute("SELECT * FROM chat_messages WHERE role='assistant' AND text IS NULL").fetchall()
+    rows = con.execute("SELECT * FROM chat_messages WHERE role IN ('assistant', 'compaction') AND text IS NULL").fetchall()
     for r in rows:
         _finalize(con, r)
     if rows:
@@ -107,7 +115,7 @@ def projects() -> list[dict]:
     stats: dict = {}
     for c in con.execute(
             f"""SELECT c.id, c.repo, c.project_id, c.updated_at, {UNREAD} AS unread,
-                      EXISTS(SELECT 1 FROM chat_messages m WHERE m.conversation_id=c.id AND m.role='assistant'
+                      EXISTS(SELECT 1 FROM chat_messages m WHERE m.conversation_id=c.id AND m.role IN ('assistant', 'compaction')
                              AND m.text IS NULL) AS running FROM chat_conversations c"""):
         st = stats.setdefault(_owner(c, layout), {"conversations": 0, "running": 0, "unread": 0, "last_at": None})
         st["conversations"] += 1
@@ -256,10 +264,10 @@ def conversations(project: str) -> list[dict]:
     _finalize_ids(con, ids)
     return [dict(r) for r in con.execute(
         f"""SELECT c.id, c.repo, c.project_id, c.title, c.tool, c.created_at, c.updated_at,
-                  EXISTS(SELECT 1 FROM chat_messages m WHERE m.conversation_id=c.id AND m.role='assistant'
+                  EXISTS(SELECT 1 FROM chat_messages m WHERE m.conversation_id=c.id AND m.role IN ('assistant', 'compaction')
                          AND m.text IS NULL) AS running, {UNREAD} AS unread,
                   coalesce((SELECT substr(m.text,1,140) FROM chat_messages m WHERE m.conversation_id=c.id
-                            AND m.text IS NOT NULL ORDER BY m.id DESC LIMIT 1), '') AS preview
+                            AND m.role != 'compaction' AND m.text IS NOT NULL ORDER BY m.id DESC LIMIT 1), '') AS preview
            FROM chat_conversations c WHERE c.id IN ({",".join("?" * len(ids))})
            ORDER BY c.updated_at DESC, c.rowid DESC""", ids)]
 
@@ -291,13 +299,15 @@ def rename(ident: str, title: str) -> None:
 def delete(ident: str) -> None:
     """Stops a running turn, then removes the conversation (the agent's own session files stay)."""
     con = db()
-    _conv(con, ident)
-    for r in con.execute("SELECT handle FROM chat_messages WHERE conversation_id=? AND text IS NULL AND handle IS NOT NULL",
-                         (ident,)).fetchall():
+    con.execute("BEGIN IMMEDIATE")
+    with con:
+        _conv(con, ident)
+        handles = con.execute("SELECT handle FROM chat_messages WHERE conversation_id=? AND text IS NULL AND handle IS NOT NULL",
+                              (ident,)).fetchall()
+        con.execute("DELETE FROM chat_messages WHERE conversation_id=?", (ident,))
+        con.execute("DELETE FROM chat_conversations WHERE id=?", (ident,))
+    for r in handles:
         R.stop(r["handle"])
-    con.execute("DELETE FROM chat_messages WHERE conversation_id=?", (ident,))
-    con.execute("DELETE FROM chat_conversations WHERE id=?", (ident,))
-    con.commit()
     shutil.rmtree(_dir(ident), ignore_errors=True)
 
 
@@ -320,6 +330,19 @@ def prompt(p: dict, text: str) -> str:
             .replace("{{PATH}}", p["path"]).replace("{{OWNER}}", settings().get("owner_name", "the user")).replace("{{MESSAGE}}", text))
 
 
+def _check_idle(con, ident: str) -> None:
+    row = con.execute("SELECT role FROM chat_messages WHERE conversation_id=? AND text IS NULL", (ident,)).fetchone()
+    if row:
+        raise SystemExit("대화를 압축하는 중이에요" if row["role"] == "compaction" else "이전 답을 기다리는 중이에요")
+
+
+def _previous_summary(con, ident: str) -> str | None:
+    row = con.execute("""SELECT role, text FROM chat_messages WHERE conversation_id=?
+                         AND role IN ('assistant', 'compaction') AND failed=0 AND text IS NOT NULL
+                         ORDER BY id DESC LIMIT 1""", (ident,)).fetchone()
+    return row["text"] if row and row["role"] == "compaction" else None
+
+
 def send(ident: str, text: str, files: list | None = None) -> int:
     """Records the owner's message (and its attachments, see _save) and starts the agent turn; returns the assistant
     message id."""
@@ -333,16 +356,14 @@ def send(ident: str, text: str, files: list | None = None) -> int:
         raise SystemExit(f"{p['name']}에 연결된 레포가 없어요 (설정에서 레포를 추가해 주세요)")
     if not p["path_ok"]:
         raise SystemExit(f"{p['repo']} 체크아웃이 없어요: {p['path'] or '경로 미설정'} (설정에서 경로를 확인해 주세요)")
-    if con.execute("SELECT 1 FROM chat_messages WHERE conversation_id=? AND role='assistant' AND text IS NULL",
-                   (ident,)).fetchone():
-        raise SystemExit("이전 답을 기다리는 중이에요")  # checked again under the lock; this one skips the upload
+    _finalize_ids(con, [ident])
+    _check_idle(con, ident)  # checked again under the lock; this one skips the upload
     atts = _save(ident, files) if files else []
     con.execute("BEGIN IMMEDIATE")
     try:
         c = _conv(con, ident)
-        if con.execute("SELECT 1 FROM chat_messages WHERE conversation_id=? AND role='assistant' AND text IS NULL",
-                       (ident,)).fetchone():
-            raise SystemExit("이전 답을 기다리는 중이에요")
+        _check_idle(con, ident)
+        summary = _previous_summary(con, ident) if not c["session"] else None
         if not con.execute("SELECT 1 FROM chat_messages WHERE conversation_id=? AND role='user'", (ident,)).fetchone() \
                 and c["title"] == "새 대화":
             con.execute("UPDATE chat_conversations SET title=? WHERE id=?",
@@ -363,6 +384,9 @@ def send(ident: str, text: str, files: list | None = None) -> int:
     # a session lives in the checkout it started in: a new default repo (or tool) starts a new session
     resume = c["session"] if c["session"] and c["tool"] == tool and c["repo"] == p["repo"] else None
     msg = with_files(text, ident, atts)
+    if summary:
+        msg = (f"Earlier chat summary (background only):\n{summary}\n\n"
+               f"Current user message:\n{msg}")
     images = [str(_dir(ident).resolve() / a["file"]) for a in atts if a["type"] in IMAGES]
     dirs = [r["path"] for r in p["repos"][1:] if r["path_ok"]]
     try:
@@ -383,6 +407,9 @@ def send(ident: str, text: str, files: list | None = None) -> int:
 
 def _finalize(con, row) -> None:
     """Fills in a finished turn's reply and binds the agent session to the conversation."""
+    if row["role"] == "compaction":
+        _finalize_compaction(con, row)
+        return
     if not row["handle"]:
         return  # launch still in progress (send() sets the handle right after)
     alive, code = R.agent_state(row["handle"])
@@ -395,17 +422,83 @@ def _finalize(con, row) -> None:
         err = _tail(row["handle"], 1500).strip()
         if err:
             reply += f"\n\n```\n{err}\n```"
-    con.execute("UPDATE chat_messages SET text=?, failed=?, finished_at=? WHERE id=? AND text IS NULL",
-                (reply, int(failed), now(), row["id"]))
+    _, end = R.window(row["handle"])
+    finished_at = datetime.fromtimestamp(end, timezone.utc).isoformat(timespec="seconds") if end is not None else now()
+    finished = con.execute("UPDATE chat_messages SET text=?, failed=?, finished_at=? WHERE id=? AND text IS NULL",
+                           (reply, int(failed), finished_at, row["id"]))
+    if not finished.rowcount:  # a dashboard request or the tick may have finalized the same turn
+        return
     _, sid = R.session(row["handle"])
     if sid and not failed:
         con.execute("UPDATE chat_conversations SET session=? WHERE id=?", (sid, row["conversation_id"]))
-    con.execute("UPDATE chat_conversations SET updated_at=? WHERE id=?", (now(), row["conversation_id"]))
+    con.execute("UPDATE chat_conversations SET updated_at=? WHERE id=?", (finished_at, row["conversation_id"]))
+
+
+def _finalize_compaction(con, row) -> None:
+    alive, code = R.agent_state(row["handle"])
+    if alive:
+        if datetime.fromisoformat(now()) - datetime.fromisoformat(row["ts"]) < COMPACT_TIMEOUT:
+            return
+        R.stop(row["handle"])
+    summary = R.compacted_summary(row["handle"], SUMMARY_LIMIT) if code == 0 else ""
+    done = con.execute("UPDATE chat_messages SET text=?, failed=?, finished_at=? WHERE id=? AND text IS NULL",
+                       (summary, int(not summary), now(), row["id"]))
+    if done.rowcount and summary:
+        con.execute("UPDATE chat_conversations SET session=NULL WHERE id=?", (row["conversation_id"],))
+
+
+_COMPACTION_DUE = """c.tool='claude' AND c.session IS NOT NULL AND datetime(c.updated_at) <= datetime(?)
+    AND NOT EXISTS (SELECT 1 FROM chat_messages m WHERE m.conversation_id=c.id AND m.text IS NULL)
+    AND (SELECT m.role FROM chat_messages m WHERE m.conversation_id=c.id ORDER BY m.id DESC LIMIT 1)='assistant'"""
+
+
+def compact_idle(con) -> None:
+    """Start summaries in the background and let subsequent ticks or chat reads record their result."""
+    _finalize_all(con)
+    active = con.execute("SELECT COUNT(*) FROM chat_messages WHERE role='compaction' AND text IS NULL").fetchone()[0]
+    slots = COMPACT_LIMIT - active
+    if slots <= 0:
+        return
+    cutoff = (datetime.fromisoformat(now()) - COMPACT_IDLE).isoformat()
+    candidates = con.execute(f"""SELECT id FROM chat_conversations c WHERE {_COMPACTION_DUE}
+                                 ORDER BY c.updated_at DESC""", (cutoff,)).fetchall()
+    if not candidates:
+        return
+    repos = project_map()["repos"]
+    for candidate in candidates:
+        con.execute("BEGIN IMMEDIATE")
+        with con:
+            c = con.execute(f"SELECT * FROM chat_conversations c WHERE c.id=? AND {_COMPACTION_DUE}",
+                            (candidate["id"], cutoff)).fetchone()
+            if not c:
+                continue
+            path = os.path.expanduser((repos.get(c["repo"]) or {}).get("path") or "")
+            if not os.path.isdir(path):
+                continue
+            last = con.execute("""SELECT handle FROM chat_messages WHERE conversation_id=? AND role='assistant'
+                                  AND failed=0 ORDER BY id DESC LIMIT 1""", (c["id"],)).fetchone()
+            prior = R.settings_of(last["handle"]) if last else {}
+            agent = {"tool": "claude", "model": prior.get("model"), "effort": prior.get("effort"),
+                     "ultracode": prior.get("ultracode")}
+            tag = f"chat-compact-{c['id']}"
+            try:
+                handle = R.launch(path, COMPACT_PROMPT, tag, agent=agent, resume=c["session"],
+                                  split_stderr=True, compact=True)
+            except OSError as e:
+                print(f"{tag}: could not start summarization: {e}", flush=True)
+                con.execute("""INSERT INTO chat_messages(conversation_id,role,ts,text,failed,finished_at)
+                               VALUES(?,'compaction',?,'',1,?)""", (c["id"], now(), now()))
+                continue
+            con.execute("INSERT INTO chat_messages(conversation_id,role,ts,handle) VALUES(?,'compaction',?,?)",
+                        (c["id"], now(), handle))
+            slots -= 1
+        if not slots:
+            break
 
 
 def _finalize_ids(con, ids: list[str]) -> None:
     rows = con.execute(f"""SELECT * FROM chat_messages WHERE conversation_id IN ({",".join("?" * len(ids))})
-                           AND role='assistant' AND text IS NULL""", ids).fetchall()
+                           AND role IN ('assistant', 'compaction') AND text IS NULL""", ids).fetchall()
     for r in rows:
         _finalize(con, r)
     if rows:
@@ -427,21 +520,21 @@ def _tail(handle: str, n: int = 4000) -> str:
 
 def messages(ident: str) -> dict:
     con = db()
-    c = _conv(con, ident)
-    for r in con.execute("SELECT * FROM chat_messages WHERE conversation_id=? AND role='assistant' AND text IS NULL",
-                         (ident,)).fetchall():
-        _finalize(con, r)
-    con.commit()
+    _conv(con, ident)
+    _finalize_ids(con, [ident])
     c = _conv(con, ident)
     rows = [dict(r) for r in con.execute(
         "SELECT id, role, text, ts, handle, failed, finished_at, attachments FROM chat_messages "
-        "WHERE conversation_id=? ORDER BY id",
+        "WHERE conversation_id=? AND (role!='compaction' OR failed=0) ORDER BY id",
         (ident,))]
     busy = None
     for m in rows:
-        if m["role"] == "assistant" and m["text"] is None:
-            busy = {"since": m["ts"], "log": _tail(m["handle"]) if m["handle"] else ""}
-        m["agent"] = R.settings_of(m.pop("handle")).get("agent") if m["role"] == "assistant" else None
+        if m["text"] is None:
+            busy = {"since": m["ts"], "log": _tail(m["handle"]) if m["role"] == "assistant" and m["handle"] else ""}
+        elif m["role"] == "compaction":
+            m["text"] = "대화가 압축됐어요"
+        handle = m.pop("handle")
+        m["agent"] = R.settings_of(handle).get("agent") if m["role"] == "assistant" else None
         m["failed"] = bool(m["failed"])
         m["attachments"] = [{"name": a["name"], "size": a["size"], "type": a["type"], "image": a["type"] in IMAGES,
                              "url": f"/api/chat/file?id={ident}&name={quote(a['file'])}"}

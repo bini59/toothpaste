@@ -531,7 +531,8 @@ CREATE TABLE IF NOT EXISTS releases (
 CREATE TABLE IF NOT EXISTS chat_conversations (
   id TEXT PRIMARY KEY, repo TEXT, title TEXT, session TEXT, tool TEXT, created_at TEXT, updated_at TEXT
 );
--- one row per message; an assistant row with text NULL is the turn still running (handle = runner handle)
+-- one row per message or compaction. A NULL text marks a running process (handle = runner handle).
+-- A finished compaction stores the handoff in text, which chat.messages displays as a divider.
 CREATE TABLE IF NOT EXISTS chat_messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id TEXT, role TEXT, text TEXT, ts TEXT,
   handle TEXT, failed INTEGER DEFAULT 0, finished_at TEXT

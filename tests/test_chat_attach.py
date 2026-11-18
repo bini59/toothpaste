@@ -139,6 +139,58 @@ class AttachTest(unittest.TestCase):
             CH.send(self.id, "second", [{"name": "a.txt", "data": b64(b"x")}])
         self.assertFalse((CH.UPLOADS / self.id).exists())
 
+    def _claude_history(self, at):
+        self.con.execute("UPDATE chat_conversations SET session='old', tool='claude', updated_at=? WHERE id=?",
+                         (at, self.id))
+        self.con.execute("INSERT INTO chat_messages(conversation_id,role,text,ts) VALUES(?,'user','old question',?)",
+                         (self.id, at))
+        self.con.execute("INSERT INTO chat_messages(conversation_id,role,text,ts) VALUES(?,'assistant','old reply',?)",
+                         (self.id, at))
+        self.con.commit()
+
+    def test_compaction_at_fifty_minutes_hands_off_to_a_new_session(self):
+        self._claude_history("2026-11-18T12:00:00+00:00")
+        with mock.patch.object(CH, "now", return_value="2026-11-18T12:49:59+00:00"):
+            CH.compact_idle(self.con)
+        self.launch.assert_not_called()
+        with mock.patch.object(CH, "now", return_value="2026-11-18T12:50:00+00:00"):
+            CH.compact_idle(self.con)
+            CH.compact_idle(self.con)
+            self.launch.assert_called_once()
+            self.assertTrue(self.launch.call_args.kwargs["compact"])
+            self.assertEqual(self.launch.call_args.kwargs["resume"], "old")
+            self.assertTrue(self.launch.call_args.args[1].startswith("/compact "))
+            self.assertIsNotNone(CH.messages(self.id)["busy"])
+            with self.assertRaisesRegex(SystemExit, "압축하는 중"):
+                CH.send(self.id, "wait")
+        with mock.patch.object(CH.R, "agent_state", return_value=(False, 0)), \
+             mock.patch.object(CH.R, "compacted_summary", return_value="private handoff"):
+            thread = CH.messages(self.id)
+        self.assertIsNone(thread["busy"])
+        self.assertIsNone(thread["conversation"]["session"])
+        self.assertEqual([m["text"] for m in thread["messages"]],
+                         ["old question", "old reply", "대화가 압축됐어요"])
+        self.assertEqual(thread["messages"][-1]["role"], "compaction")
+        self.assertEqual(CH.inbox()[0]["unread"], 1)
+        CH.send(self.id, "next question")
+        self.assertIsNone(self.launch.call_args.kwargs["resume"])
+        prompt = self.launch.call_args.args[1]
+        self.assertIn("private handoff", prompt)
+        self.assertIn("next question", prompt)
+        self.assertNotIn("old reply", prompt)
+
+    def test_compaction_without_summary_leaves_existing_session_resumable(self):
+        self._claude_history("2026-11-18T12:00:00+00:00")
+        with mock.patch.object(CH, "now", return_value="2026-11-18T12:50:00+00:00"):
+            CH.compact_idle(self.con)
+        with mock.patch.object(CH.R, "agent_state", return_value=(False, 0)), \
+             mock.patch.object(CH.R, "compacted_summary", return_value=""):
+            CH.compact_idle(self.con)
+            self.launch.assert_called_once()  # no automatic retry for the same conversation activity
+            self.assertEqual([m["role"] for m in CH.messages(self.id)["messages"]], ["user", "assistant"])
+        CH.send(self.id, "try again")
+        self.assertEqual(self.launch.call_args.kwargs["resume"], "old")
+
 
 class CodexImageTest(unittest.TestCase):
     def test_image_flag_does_not_swallow_prompt(self):
