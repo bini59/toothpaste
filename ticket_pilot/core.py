@@ -596,7 +596,8 @@ _COLUMNS = {
     # chat.py (TP-72): JSON list of {name, file, size, type} of a user message's files in data/chat-uploads/<conv>/
     "chat_messages": {"attachments": "TEXT", "input_tokens": "INTEGER", "cache_read_input_tokens": "INTEGER",
                       "cache_creation_input_tokens": "INTEGER", "output_tokens": "INTEGER",
-                      "context_tokens": "INTEGER", "before_context_tokens": "INTEGER", "compaction_id": "INTEGER"},
+                      "context_tokens": "INTEGER", "before_context_tokens": "INTEGER", "compaction_id": "INTEGER",
+                      "claude_session_id": "TEXT"},
     # TP-152: who did it (dashboard request: GitHub login of a LAN user, owner_name on 127.0.0.1; NULL = tp itself)
     "events": {"actor": "TEXT"},
     # TP-91: conversations belong to a project (several repos), not a repo

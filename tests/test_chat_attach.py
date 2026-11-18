@@ -207,6 +207,42 @@ class AttachTest(unittest.TestCase):
         CH.send(self.id, "try again")
         self.assertEqual(self.launch.call_args.kwargs["resume"], "old")
 
+    def test_compaction_report_follows_the_session_established_by_a_successful_retry(self):
+        compact = self.con.execute("""INSERT INTO chat_messages(conversation_id,role,text,finished_at,before_context_tokens,
+                                      input_tokens,cache_read_input_tokens,cache_creation_input_tokens,output_tokens)
+                                      VALUES(?,'compaction','handoff',?,200,100,0,0,0)""", (self.id, CH.now())).lastrowid
+        self.con.commit()
+
+        def finish(session, context, *, code=0):
+            with mock.patch.object(CH.R, "agent_state", return_value=(False, code)), \
+                 mock.patch.object(CH.R, "last_message", return_value="answer"), \
+                 mock.patch.object(CH.R, "session", return_value=("claude", session)), \
+                 mock.patch.object(CH.R, "claude_turn_usage", return_value=(context, 0, 0, 5, context)):
+                return CH.messages(self.id)["conversation"]["session"]
+
+        failed = CH.send(self.id, "first attempt")
+        self.assertIsNone(finish("abandoned", 40, code=1))
+        self.assertEqual(tuple(self.con.execute("SELECT compaction_id, context_tokens FROM chat_messages WHERE id=?",
+                                                (failed,)).fetchone()), (compact, 40))
+        report = CH.compaction_report(None)[0]
+        self.assertEqual((report["continued"], report["first_context_tokens"], report["turns"],
+                          report["net_savings_tokens"]), (False, None, 0, -100))
+
+        CH.send(self.id, "retry")
+        self.assertIsNone(self.launch.call_args.kwargs["resume"])
+        self.assertIn("Earlier chat summary (background only):\nhandoff", self.launch.call_args.args[1])
+        self.assertEqual(finish("adopted", 80), "adopted")
+        report = CH.compaction_report(None)[0]
+        self.assertEqual((report["continued"], report["first_context_tokens"], report["turns"], report["measured"],
+                          report["net_savings_tokens"]), (True, 80, 1, 1, 20))
+
+        CH.send(self.id, "follow up")
+        self.assertEqual(self.launch.call_args.kwargs["resume"], "adopted")
+        self.assertEqual(finish("adopted", 90, code=1), "adopted")
+        report = CH.compaction_report(None)[0]
+        self.assertEqual((report["first_context_tokens"], report["turns"], report["measured"],
+                          report["net_savings_tokens"]), (80, 2, 2, 130))
+
     def test_compaction_baseline_includes_failed_resumed_turn_with_usage(self):
         self._claude_history("2026-11-18T12:00:00+00:00")
         self.con.execute("UPDATE chat_messages SET context_tokens=100 WHERE role='assistant'")

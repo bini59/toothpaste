@@ -372,7 +372,9 @@ def send(ident: str, text: str, files: list | None = None) -> int:
         resume = c["session"] if c["session"] and c["tool"] == tool and c["repo"] == p["repo"] else None
         prior = _previous_result(con, ident)
         handoff = prior if prior and prior["role"] == "compaction" and not c["session"] else None
-        compaction_id = handoff["id"] if handoff else (prior["compaction_id"] if resume and prior else None)
+        compaction_id = None
+        if tool == "claude":
+            compaction_id = handoff["id"] if handoff else (prior["compaction_id"] if resume and prior else None)
         if not con.execute("SELECT 1 FROM chat_messages WHERE conversation_id=? AND role='user'", (ident,)).fetchone() \
                 and c["title"] == "새 대화":
             con.execute("UPDATE chat_conversations SET title=? WHERE id=?",
@@ -431,11 +433,12 @@ def _finalize(con, row) -> None:
     _, end = R.window(row["handle"])
     finished_at = _finished_at(end)
     usage = R.claude_turn_usage(row["handle"], end)
-    finished = con.execute(f"""UPDATE chat_messages SET text=?, failed=?, finished_at=?, {_USAGE_UPDATE}
-                               WHERE id=? AND text IS NULL""", (reply, int(failed), finished_at, *usage, row["id"]))
+    agent, sid = R.session(row["handle"])
+    finished = con.execute(f"""UPDATE chat_messages SET text=?, failed=?, finished_at=?, claude_session_id=?, {_USAGE_UPDATE}
+                               WHERE id=? AND text IS NULL""",
+                           (reply, int(failed), finished_at, sid if agent == "claude" else None, *usage, row["id"]))
     if not finished.rowcount:  # a dashboard request or the tick may have finalized the same turn
         return
-    _, sid = R.session(row["handle"])
     if sid and not failed:
         con.execute("UPDATE chat_conversations SET session=? WHERE id=?", (sid, row["conversation_id"]))
     con.execute("UPDATE chat_conversations SET updated_at=? WHERE id=?", (finished_at, row["conversation_id"]))
@@ -519,16 +522,22 @@ def compaction_report(days: int | None) -> list[dict]:
     con = db()
     _finalize_all(con)
     cutoff = (datetime.fromisoformat(now()) - timedelta(days=days)).isoformat() if days else ""
+    # A successful handoff reply establishes the session that future turns can resume.
     rows = con.execute("""WITH attempts AS (
-                            SELECT * FROM chat_messages
-                            WHERE role='compaction' AND finished_at >= ? AND text IS NOT NULL
+                            SELECT m.*, (SELECT a.claude_session_id FROM chat_messages a
+                                         WHERE m.failed=0 AND a.conversation_id=m.conversation_id
+                                           AND a.id>m.id AND a.compaction_id=m.id AND a.role='assistant'
+                                           AND a.failed=0 AND a.text IS NOT NULL AND a.claude_session_id IS NOT NULL
+                                         ORDER BY a.id LIMIT 1) AS handoff_session
+                            FROM chat_messages m
+                            WHERE m.role='compaction' AND m.finished_at >= ? AND m.text IS NOT NULL
                           ), followups AS (
                             SELECT a.compaction_id, MIN(CASE WHEN a.failed=0 OR a.context_tokens IS NOT NULL
                                                             THEN a.id END) AS first_id, COUNT(*) AS turns,
                                    COUNT(a.context_tokens) AS measured, SUM(a.context_tokens) AS context_sum
                             FROM attempts m JOIN chat_messages a ON a.conversation_id=m.conversation_id
                               AND a.id>m.id AND a.compaction_id=m.id AND a.role='assistant'
-                              AND a.handle IS NOT NULL AND a.text IS NOT NULL
+                              AND a.claude_session_id=m.handoff_session AND a.text IS NOT NULL
                             GROUP BY a.compaction_id
                           )
                           SELECT m.id, c.title, m.finished_at, m.failed, m.before_context_tokens,
@@ -537,8 +546,7 @@ def compaction_report(days: int | None) -> list[dict]:
                                    + m.output_tokens AS cost_tokens,
                                  COALESCE(f.turns, 0) AS turns, COALESCE(f.measured, 0) AS measured,
                                  m.before_context_tokens * f.measured - f.context_sum AS gross_tokens,
-                                 EXISTS(SELECT 1 FROM chat_messages a WHERE a.conversation_id=m.conversation_id
-                                        AND a.id>m.id AND a.role='assistant' AND a.handle IS NOT NULL) AS continued
+                                 f.turns IS NOT NULL AS continued
                           FROM attempts m JOIN chat_conversations c ON c.id=m.conversation_id
                           LEFT JOIN followups f ON f.compaction_id=m.id
                           LEFT JOIN chat_messages first ON first.id=f.first_id

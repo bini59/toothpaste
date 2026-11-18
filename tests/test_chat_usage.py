@@ -61,9 +61,11 @@ class ClaudeUsageTest(unittest.TestCase):
         core._migrate(con)
         row = con.execute("SELECT * FROM chat_messages").fetchone()
         self.assertIsNone(row["context_tokens"])
+        self.assertIsNone(row["claude_session_id"])
         chat._finalize(con, row)
-        self.assertEqual(tuple(con.execute(f"SELECT {', '.join(chat_usage.FIELDS)}, context_tokens FROM chat_messages").fetchone()),
-                         (50, 260, 45, 25, 205))
+        usage = con.execute(f"SELECT {', '.join(chat_usage.FIELDS)}, context_tokens, claude_session_id "
+                            "FROM chat_messages").fetchone()
+        self.assertEqual(tuple(usage), (50, 260, 45, 25, 205, "session-1"))
         self.assertEqual(con.execute("SELECT session FROM chat_conversations").fetchone()[0], "session-1")
 
     def test_compaction_reads_usage_even_on_failure_and_keeps_last_context(self):
@@ -111,22 +113,25 @@ class CompactionReportTest(unittest.TestCase):
                                   VALUES(?,'compaction','',?,?,?,?,?,?,?)""",
                                (cid, failed, at, before, cost, 0, 0, 0)).lastrowid
 
-        def turn(compaction_id, context, *, cid="c", handle="handle", failed=False):
+        def turn(compaction_id, context, *, cid="c", session="first", failed=False):
             con.execute("INSERT INTO chat_messages(conversation_id,role,text) VALUES(?,'user','q')", (cid,))
-            con.execute("""INSERT INTO chat_messages(conversation_id,role,text,compaction_id,context_tokens,handle,failed)
-                           VALUES(?,'assistant','a',?,?,?,?)""", (cid, compaction_id, context, handle, failed))
+            con.execute("""INSERT INTO chat_messages(conversation_id,role,text,compaction_id,context_tokens,
+                           handle,claude_session_id,failed) VALUES(?,'assistant','a',?,?,?,?,?)""",
+                        (cid, compaction_id, context, "handle" if session else None, session, failed))
 
         first = compact("c", 200, 30)
-        turn(first, None, handle=None, failed=True)
+        turn(first, None, session=None, failed=True)
         turn(first, 50)
+        turn(first, 5, session="different")  # a compaction ID alone does not identify the resumed session
         failure = compact("c", 50, 20, failed=True)
         turn(first, 100)  # a failed compaction leaves the resumed session linked to its last successful one
         turn(first, None)
         second = compact("c", 100, 50)
-        turn(second, 130)
-        turn(None, 20)  # a new session without this handoff must not be credited to it
-        idle = compact("idle", 100, 15)
-        turn(idle, None, cid="idle", handle=None, failed=True)
+        turn(second, 130, session="second")
+        turn(None, 20, session="unlinked")
+        idle = compact("idle", 100, 12000)
+        turn(idle, None, cid="idle", session=None, failed=True)
+        turn(None, 60, cid="idle", session="unlinked")  # a reply in an unrelated session is not a continuation
         legacy = compact("legacy", None, None, at=old)
         with mock.patch.object(chat, "db", return_value=con), mock.patch.object(chat, "now", return_value=recent):
             rows = {row["id"]: row for row in chat.compaction_report(7)}
@@ -136,7 +141,8 @@ class CompactionReportTest(unittest.TestCase):
                           rows[first]["measured"], rows[first]["turns"], rows[first]["net_savings_tokens"]),
                          (50, 150, 2, 3, 220))
         self.assertEqual((rows[failure]["failed"], rows[failure]["net_savings_tokens"]), (True, -20))
-        self.assertEqual((rows[idle]["continued"], rows[idle]["net_savings_tokens"]), (False, -15))
+        self.assertEqual((rows[idle]["continued"], rows[idle]["turns"], rows[idle]["net_savings_tokens"]),
+                         (False, 0, -12000))
         self.assertEqual(rows[second]["net_savings_tokens"], -80)
 
 
