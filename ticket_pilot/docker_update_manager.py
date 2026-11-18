@@ -267,6 +267,25 @@ USER node
                 time.sleep(POLL_SECONDS)
 
 
+def systemd_unit(root: Path, args: list[str], env: dict[str, str]) -> str:
+    def quoted(value):
+        return '"' + value.translate(str.maketrans({"\\": r"\\", '"': r'\"', "%": "%%", "\n": r"\n", "\r": r"\r"})) + '"'
+
+    # systemd parses WorkingDirectory as a literal absolute path, including spaces, with specifier expansion.
+    # In contrast, ExecStart and Environment use quoted tokens.
+    workdir = str(root).replace("%", "%%")
+    if "\n" in workdir or "\r" in workdir or workdir != workdir.rstrip():
+        raise RuntimeError("설치 경로 끝의 공백이나 줄바꿈은 systemd 작업 경로에 쓸 수 없어요")
+    return "\n".join([
+        "[Unit]", "Description=Toothpaste Docker update manager", "[Service]",
+        f"WorkingDirectory={workdir}",
+        "ExecStart=" + " ".join(quoted(arg.replace("$", "$$")) for arg in args),
+        "Restart=always", "RestartSec=10",
+        *[f"Environment={quoted(key + '=' + value)}" for key, value in env.items()],
+        "[Install]", "WantedBy=default.target", "",
+    ])
+
+
 def install(manager):
     manager.prepare()
     manager.image_name()  # check the install checkout before starting a host service
@@ -303,18 +322,7 @@ def install(manager):
         units.mkdir(parents=True, exist_ok=True)
         unit = f"ticket-pilot-docker-updater-{key}.service"
 
-        def quoted(value):
-            return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("\n", "\\n") + '"'
-
-        service = [
-            "[Unit]", "Description=Toothpaste Docker update manager", "[Service]",
-            f"WorkingDirectory={quoted(str(manager.root))}",
-            "ExecStart=" + " ".join(quoted(a.replace("$", "$$")) for a in args),
-            "Restart=always", "RestartSec=10",
-            *[f"Environment={quoted(k + '=' + v)}" for k, v in env.items()],
-            "[Install]", "WantedBy=default.target",
-        ]
-        (units / unit).write_text("\n".join(service) + "\n")
+        (units / unit).write_text(systemd_unit(manager.root, args, env))
         _run("systemctl", "--user", "daemon-reload")
         _run("systemctl", "--user", "enable", unit)
         _run("systemctl", "--user", "restart", unit)
