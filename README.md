@@ -164,6 +164,7 @@ Device Flow and `claude` with `claude setup-token` (or a pasted token / API key)
   The host manager downloads the published GHCR image and replaces only `tp`. It refuses to interrupt active work.
   For manual maintenance of a managed install, run Compose with `-f compose.yaml`, the existing `-f compose.override.yaml`
   if present, and `-f compose.update.yaml` from `docker/`. Use a host-only install checkout when migrating bind mounts.
+  The first GHCR publication creates a package that the repository owner must make public for anonymous downloads.
 - **Limits**: manually stopping or rebuilding the container ends the agents running in it. Repos whose agents need Docker do not work (no Docker socket in the container); Docker Desktop on a Mac has
   slow file I/O in volumes, so installs and builds in worktrees are slower than on the host.
 

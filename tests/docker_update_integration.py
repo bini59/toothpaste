@@ -35,7 +35,6 @@ def wait_until_idle(manager):
 
 
 def local_variant(manager, base, body):
-    # The PR exercises replacement using local images. Publishing to GHCR is a release workflow operation.
     with tempfile.TemporaryDirectory() as context:
         return updater._run(manager.docker, "build", "--quiet", "-f", "-", context,
                             input=f"FROM {base}\n{body}\n", timeout=120)
@@ -50,8 +49,14 @@ def main():
     # This script is meant for a fresh CI checkout.
     with env_file.open("x") as f:
         f.write("TP_ADMINS=ci-admin\nTP_ORG=ci-org\n")
+    registry_container = "tp-update-ci-registry"
     try:
-        manager.compose("build", "--build-arg", "TP_RELEASE_VERSION=v0.0.1", "tp", timeout=900)
+        updater._run(manager.docker, "run", "--rm", "-d", "--name", registry_container,
+                     "-p", "127.0.0.1::5000", "registry:2")
+        address = updater._run(manager.docker, "port", registry_container, "5000/tcp")
+        registry_image = address + "/toothpaste"
+        manager.compose("build", "--build-arg", "TP_RELEASE_VERSION=v0.0.1",
+                        "--build-arg", "TP_UID=1001", "--build-arg", "TP_GID=1002", "tp", timeout=900)
         manager.compose("up", "-d", "--no-build", "tp")
         manager.wait("v0.0.1")
         original = manager.container()
@@ -66,9 +71,13 @@ for login in ('ci-admin', 'ci-member'):
     print(lan.new_session(login, 'ci-org', '127.0.0.1'))
 (Path.home() / 'tp-work' / 'update-test-marker').write_text('preserved')
 """).splitlines()
-        base = manager.image_name()
-        next_image = local_variant(manager, base, "ENV TP_RELEASE_VERSION=v0.0.2")
-        broken_image = local_variant(manager, base, 'ENV TP_RELEASE_VERSION=v0.0.3\nCMD ["/bin/false"]')
+        base = "ticket-pilot:ci"  # native release-style image built by the previous step
+        for version, cmd in (("v0.0.2", ""), ("v0.0.3", 'CMD ["/bin/false"]')):
+            image = local_variant(manager, base, f"ENV TP_RELEASE_VERSION={version}\n{cmd}")
+            ref = f"{registry_image}:{version}"
+            updater._run(manager.docker, "image", "tag", image, ref)
+            updater._run(manager.docker, "push", ref)
+            updater._run(manager.docker, "image", "rm", ref)
 
         def request(version):
             manager.publish(state="idle")
@@ -83,11 +92,13 @@ for login in ('ci-admin', 'ci-member'):
         wait_until_idle(manager)
         job = request("v0.0.2")
         with patch.object(updater, "latest_release", return_value=job["tag"]), \
-             patch.object(manager, "pull", return_value=next_image):
+             patch.object(updater.channel, "REGISTRY_IMAGE", registry_image):
             manager.apply(job)
         assert manager.snapshot()["state"] == "done", manager.snapshot()
         updated = manager.container()
         assert original != updated
+        assert manager.exec(updated, "id", "-u") == "1001"
+        assert manager.exec(updated, "id", "-g") == "1002"
         assert api("GET", admin)[1]["current"] == "v0.0.2"
         assert manager.exec(updated, "cat", "/home/node/tp-work/update-test-marker") == "preserved"
         assert manager.exec(updated, "python3", "-c",
@@ -101,7 +112,7 @@ con.commit()
         wait_until_idle(manager)
         job = request("v0.0.3")
         with patch.object(updater, "latest_release", return_value=job["tag"]), \
-             patch.object(manager, "pull", return_value=broken_image), patch.object(updater, "PROBE_SECONDS", 15):
+             patch.object(updater.channel, "REGISTRY_IMAGE", registry_image), patch.object(updater, "PROBE_SECONDS", 25):
             manager.apply(job)
         state = manager.snapshot()
         assert state["state"] == "failed" and "복구" in state["message"], state
@@ -112,6 +123,7 @@ con.commit()
             print(manager.compose("logs", "--tail=30", "tp"), flush=True)
             manager.compose("down", "-v")
         finally:
+            subprocess.run([manager.docker, "rm", "-f", registry_container], capture_output=True)
             env_file.unlink()
 
 

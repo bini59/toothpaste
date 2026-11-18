@@ -174,8 +174,10 @@ class Manager:
             return image
         if not re.fullmatch(r"[0-9]{1,10}", uid) or not re.fullmatch(r"[0-9]{1,10}", gid) or int(uid) == 0:
             raise RuntimeError("기존 tp 컨테이너의 사용자 ID를 유지할 수 없어요")
-        digest = _run(self.docker, "image", "inspect", "--format", "{{index .RepoDigests 0}}", ref)
-        if not re.fullmatch(re.escape(channel.REGISTRY_IMAGE) + r"@sha256:[0-9a-f]{64}", digest):
+        digests = json.loads(_run(self.docker, "image", "inspect", "--format", "{{json .RepoDigests}}", ref))
+        pattern = re.compile(re.escape(channel.REGISTRY_IMAGE) + r"@sha256:[0-9a-f]{64}")
+        digest = next((value for value in digests or [] if pattern.fullmatch(value)), None)
+        if digest is None:
             raise RuntimeError("내려받은 릴리즈 이미지의 주소를 확인할 수 없어요")
         # Only the node account and image-owned files are adjusted. Existing volumes keep their owners.
         dockerfile = f"""FROM {digest}
