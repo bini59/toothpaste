@@ -65,6 +65,8 @@ jobs:
           docker exec tp claude --version
           docker stop tp
           docker logs tp 2>&1 | grep "tp run: stopped"
+      - name: update button replaces tp and rolls back a failed image
+        run: PYTHONPATH=. python3 tests/docker_update_integration.py
   mode:
     # TP-165: a host install -> tp mode docker --apply -> the container sees the DB and the worktree folder at the same
     # path -> tp mode host --apply brings the DB back (no systemd units on the runner: the service steps are skipped)

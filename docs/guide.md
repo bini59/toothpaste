@@ -44,7 +44,7 @@ Docker 모드 외부 공개(선택, Cloudflare Tunnel). 모든 접속이 GitHub 
 3. `bin/tp mode docker --apply`: 실행 중인 에이전트, 자동화, 채팅, dev 서버, tp check가 없을 때만 해요. DB 백업 → Docker volume, 토큰 이전, 저장소와 `~/.claude`, `~/.codex`를 같은 경로로 연결, 서비스 멈춤 → 컨테이너 시작. 끝나면 같은 주소에서 GitHub로 로그인해요. 호스트 DB는 읽기 전용 백업으로 남아요.
 4. 돌아가기: 호스트에서 `bin/tp mode host --apply`(컨테이너 안에서는 못 해요).
 
-Docker로 바꾼 동안에는 `tp update`, `tp setup`, `tp migrate`가 멈춰요(launchd 서비스를 다시 켜면 tick이 둘이 돼요). main에 머지돼 배포가 돌아도 마찬가지예요. 업데이트는 `git pull && (cd docker && docker compose up -d --build)`.
+Docker로 바꾼 동안에는 호스트 설치용 `tp update`, `tp setup`, `tp migrate`가 멈춰요. Docker 대시보드에서 업데이트하려면 아래 **업데이트** 항목의 관리자 설치를 한 번 진행하세요.
 - 실패하면 끝난 단계와 되돌리는 방법을 보여 줘요. 고친 뒤 같은 명령을 다시 실행하면 이어서 해요(기록: `~/tp-work/mode-state.json`).
 - 맥에서 컨테이너는 keychain의 Claude 로그인을 못 봐요. 컨테이너에서 claude 인증이 실패하면 **설정 → 에이전트 → 활성 계정**에서 claude에 로그인하세요.
 
@@ -210,13 +210,17 @@ staging 열차 레포와 `pr_into_staging` 레포는 티켓 브랜치를 staging
 - tp tick이 **확인 주기**(설정 `update.check_min`, 기본 360분, 최소 10분)마다 태그를 확인하고, 새 릴리즈가 있으면 사이드바에 **업데이트 vX.Y.Z**가 나옵니다. 그 화면에서 릴리즈 노트를 보고
   업데이트 버튼을 누르면 `tp update`가 돌고 대시보드가 다시 뜰 때까지 기다립니다.
 - **새 릴리즈 자동 적용**(설정 → 고급 → 업데이트, `update.auto`, 기본 꺼짐)을 켜면 tick이 새 릴리즈를 찾았을 때 업데이트 버튼과
-  같은 `tp update`를 직접 실행해요(릴리즈마다 한 번). 업데이트할 수 없는 상태(`main` 아님, 수정된 파일, Docker 모드)면 건너뛰고
-  수신함에 알려요.
+  같은 `tp update`를 직접 실행해요(릴리즈마다 한 번). 호스트에서 업데이트할 수 없는 상태(`main` 아님, 수정된 파일)면 건너뛰고
+  수신함에 알려요. Docker 모드에서는 관리자가 버튼으로 시작합니다.
 - 확인 주기를 기다리지 않으려면 **설정 → 고급 → 업데이트**(또는 업데이트 화면)에서 **지금 확인**을 누릅니다. 바로 태그를 가져와 마지막 확인
   시각을 갱신하고, 새 버전이면 릴리즈 노트와 업데이트 버튼이, 업데이트할 수 없는 상태(`main` 아님, 수정된 파일)면 그 이유가
   나옵니다. 사이드바 항목도 바로 바뀝니다. 가져오기에 실패하면 그 이유를 보여 줍니다.
 - 터미널에서는 `bin/tp update`(또는 `--to <태그|sha>`). checkout이 `main`이고 추적 파일에 수정이 없어야 합니다. 다운그레이드는 지원하지 않아요.
-- 로그: `~/tp-work/logs/update.log`.
+- Docker 모드에서는 호스트의 설치 저장소에서 새 버전을 가져온 뒤 `python3 -m ticket_pilot.docker_update_manager install`을 한 번 실행하세요.
+  기존 에이전트와 dev 서버가 끝난 뒤 설치하세요. macOS의 launchd 또는 Linux의 사용자 systemd 서비스로 관리자를 시작합니다.
+  설치 후 `TP_ADMINS` 계정으로 **업데이트**를 누르면 관리자가 GHCR에서 새 릴리즈를 받아 기존 볼륨과 사용자 ID를 유지하며 `tp`를 교체합니다.
+  실행 중인 작업이 있으면 완료될 때까지 기다렸다 다시 누르세요. 새 대시보드가 뜨지 않으면 이전 이미지로 돌아갑니다.
+- 호스트 설치 로그는 `~/tp-work/logs/update.log`에 있어요. Docker 진행 상태는 업데이트 화면에서, 관리자 로그는 macOS의 `docker/.update/manager.log` 또는 Linux의 사용자 systemd 저널에서 볼 수 있어요.
 
 ## lan · 로컬망 공유
 사내 팀원이 GitHub 로그인으로 이 맥의 대시보드를 같이 쓰기.

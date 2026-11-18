@@ -20,6 +20,10 @@ export function Update({ onDone }: { onDone: () => void }) {
   const [lines, setLines] = useState<string[]>([]);
   const [result, setResult] = useState<"" | "ok" | "fail">("");
   const [checking, setChecking] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const [job, setJob] = useState<string | null>(null);
+  const dockerUpdate = info?.docker_update;
+  const dockerRunning = !!job || ["queued", "pulling", "switching"].includes(dockerUpdate?.state ?? "");
 
   const load = useCallback(() => getJson<UpdateInfo>("/api/update").then((d) => { setInfo(d); setErr(""); }).catch((e) => setErr(String(e))), []);
   useEffect(() => { load(); }, [load]);
@@ -39,9 +43,38 @@ export function Update({ onDone }: { onDone: () => void }) {
     return () => clearInterval(id);
   }, [since, result, onDone]);
 
+  useEffect(() => {
+    if (!dockerRunning) return;
+    const id = setInterval(() => {
+      getJson<UpdateInfo>("/api/update").then((d) => {
+        if (job && d.docker_update?.id !== job) return;
+        setInfo(d);
+        const state = d.docker_update?.state;
+        if (state === "done" || state === "failed") {
+          setJob(null);
+          onDone();
+        }
+      }).catch(() => {}); // the dashboard is restarting
+    }, POLL_MS);
+    const timeout = setTimeout(() => {
+      setJob(null);
+      setInfo((prev) => prev && { ...prev, docker_update: {} });
+      setErr("Docker 업데이트 상태를 확인하지 못했어요. 잠시 뒤 페이지를 새로고침해 주세요.");
+    }, 45 * 60 * 1000);
+    return () => { clearInterval(id); clearTimeout(timeout); };
+  }, [dockerRunning, job, onDone]);
+
   const start = () => {
-    setErr(""); setLines([]); setResult("");
-    postJson<{ since: number }>("/api/update", {}).then((r) => setSince(r.since)).catch((e) => setErr((e as Error).message));
+    setErr(""); setLines([]); setResult(""); setStarting(true);
+    postJson<{ since?: number; job?: { id: string; tag: string } }>("/api/update", {}).then((r) => {
+      if (r.job) {
+        const started = r.job;
+        setJob(started.id);
+        setInfo((prev) => prev && { ...prev, docker_update: { ...started, state: "queued", message: "업데이트를 요청했어요." } });
+      } else if (r.since !== undefined) {
+        setSince(r.since);
+      }
+    }).catch((e) => setErr((e as Error).message)).finally(() => setStarting(false));
   };
 
   const check = () => {
@@ -60,8 +93,8 @@ export function Update({ onDone }: { onDone: () => void }) {
       </Card>
     </div>
   );
-  const running = since != null && !result;
-  const hasNew = !!info.latest && info.notes.length > 0;
+  const running = starting || dockerRunning || (since != null && !result);
+  const hasNew = info.available;
   return (
     <div className="flex max-w-3xl flex-col gap-4">
       <Card className="p-5">
@@ -82,17 +115,22 @@ export function Update({ onDone }: { onDone: () => void }) {
           <p className="mt-3 text-sm text-danger-700">업데이트하지 못했어요: {lines.at(-1) ?? "update.log에 기록이 없어요"}</p>
         )}
         {err && <p className="mt-3 text-sm text-danger-700">{err}</p>}
+        {dockerUpdate?.message && (
+          <p role="status" className={dockerUpdate.state === "failed" ? "mt-3 text-sm text-danger-700" : "mt-3 text-sm text-text-main"}>
+            {dockerUpdate.message}
+          </p>
+        )}
         {hasNew && !result && (
           info.command
             ? <div className="mt-3 text-sm text-text-main">
-                Docker 모드에서는 호스트의 저장소 폴더에서 이 명령으로 업데이트해요.
+                호스트에서 Docker 업데이트 관리자를 한 번 설치하면 이 화면에서 업데이트할 수 있어요.
                 <pre className="mt-2 overflow-x-auto rounded-lg border border-border bg-grey-50 p-3 font-mono text-xs">{info.command}</pre>
               </div>
-            : info.blocked
+            : info.blocked && !dockerRunning
             ? <p className="mt-3 text-sm text-warning-700">업데이트할 수 없어요: {info.blocked}</p>
             : <Button className="mt-3" onClick={start} loading={running}>업데이트</Button>
         )}
-        {result === "ok" && <Button className="mt-3" variant="secondary" onClick={() => location.reload()}>새로고침</Button>}
+        {(result === "ok" || dockerUpdate?.state === "done") && <Button className="mt-3" variant="secondary" onClick={() => location.reload()}>새로고침</Button>}
       </Card>
       {lines.length > 0 && (
         <Card className="p-5">
@@ -100,7 +138,7 @@ export function Update({ onDone }: { onDone: () => void }) {
           <pre className="overflow-x-auto whitespace-pre-wrap text-xs text-text-muted">{lines.join("\n")}</pre>
         </Card>
       )}
-      {hasNew && !result && (
+      {hasNew && info.notes.length > 0 && !result && (
         <Card className="p-5">
           <h3 className="mb-2 text-sm font-bold text-text-main">릴리즈 노트</h3>
           {info.notes.map((n) => (

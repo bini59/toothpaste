@@ -73,7 +73,7 @@ class DockerAuthTest(unittest.TestCase):
         self.assertEqual(self.call("POST", "/api/lan/sessions/delete", {"id": bob}, ip=LOCAL, cookie=admin)[0], 200)
         self.assertEqual(self.call("GET", "/api/state", ip=LOCAL, cookie=member)[0], 401)
 
-    def test_lan_share_and_update_are_off(self):
+    def test_unmanaged_install_points_to_updater_setup(self):
         sid = self.session("admin1")
         code, out, _ = self.call("POST", "/api/lan/share", {"enabled": True, "org": "x"}, ip=LOCAL, cookie=sid)
         self.assertEqual((code, out["error"]), (400, core.DOCKER_OFF))
@@ -81,7 +81,7 @@ class DockerAuthTest(unittest.TestCase):
             code, out, _ = self.call("POST", "/api/update", {}, ip=LOCAL, cookie=sid)
         popen.assert_not_called()
         self.assertEqual(code, 400)
-        self.assertIn("docker compose", out["error"])
+        self.assertIn("docker_update_manager install", out["error"])
         with mock.patch.object(S.UP, "current", return_value="v1.0.0"), mock.patch.object(S.UP, "blocked", return_value=None):
             info = self.call("GET", "/api/update", ip=LOCAL, cookie=sid)[1]
         self.assertEqual(info["command"], S.DOCKER_UPDATE)

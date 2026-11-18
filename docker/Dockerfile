@@ -35,9 +35,11 @@ RUN groupmod -o -g "$TP_GID" node && usermod -o -u "$TP_UID" -g "$TP_GID" node \
 COPY --chown=node:node . /opt/tp
 COPY --from=web --chown=node:node /web/dist /opt/tp/web/dist
 
+ARG TP_RELEASE_VERSION
 USER node
 WORKDIR /opt/tp
-ENV TP_MODE=docker \
+ENV TP_RELEASE_VERSION=$TP_RELEASE_VERSION \
+    TP_MODE=docker \
     TP_HOST=0.0.0.0 \
     TP_PORT=3032 \
     TP_LOG_DIR=/opt/tp/data/logs \

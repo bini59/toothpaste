@@ -1,6 +1,7 @@
 """Local dashboard: http://127.0.0.1:<port> (read-mostly view over the SQLite DB)."""
 from __future__ import annotations
 
+import fcntl
 import json
 import mimetypes
 import os
@@ -17,6 +18,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from . import deploy as D
+from . import docker_update as DU
 from . import chat as CH
 from . import checks as K
 from . import codex_usage as CU
@@ -95,7 +97,7 @@ def version(con) -> dict:
     return {"current": UP.current(), "update": tag if tag and UP.newer(ROOT, tag) else None}
 
 
-def update_info(since: int | None) -> dict:
+def update_info(since: int | None, admin: bool = True) -> dict:
     """업데이트 page: versions, release notes, why it cannot run; with since (update.log size when the run started)
     the log lines written after it."""
     con = db()
@@ -104,9 +106,20 @@ def update_info(since: int | None) -> dict:
     finally:
         con.close()
     tag = chk.get("latest")
-    out = {"current": UP.current(), "latest": tag, "checked_at": chk.get("at"), "blocked": UP.blocked(),
-           "command": DOCKER_UPDATE if docker() else None,
-           "notes": UP.notes(ROOT, "HEAD", tag) if since is None and tag and UP.newer(ROOT, tag) else []}
+    docker_update = DU.status() if docker() else {}
+    managed = bool(DU.directory()) if docker() else False
+    why = UP.blocked() if not docker() else None
+    if docker() and not admin:
+        why = "Docker 업데이트는 TP_ADMINS에 등록된 관리자만 실행할 수 있어요"
+    elif managed and not docker_update.get("ready"):
+        why = "호스트의 Docker 업데이트 관리자가 응답하지 않아요"
+    available = bool(tag and UP.newer(ROOT, tag))
+    out = {"current": UP.current(), "latest": tag, "checked_at": chk.get("at"), "blocked": why,
+           "available": available,
+           "command": DOCKER_UPDATE if docker() and admin and not managed else None,
+           "notes": UP.notes(ROOT, "HEAD", tag) if since is None and tag and available else []}
+    if managed:
+        out["docker_update"] = {k: docker_update[k] for k in ("id", "tag", "state", "message") if k in docker_update}
     if since is not None:
         try:
             with open(UP.log_path(), "rb") as f:
@@ -117,7 +130,7 @@ def update_info(since: int | None) -> dict:
     return out
 
 
-def check_update() -> dict:
+def check_update(admin: bool = True) -> dict:
     """POST /api/update/check (지금 확인, TP-153): fetch the tags now, then update_info(). Checks run one at a time: a
     click during another check waits for it, then fetches itself (so its error reaches it too). Raises UpdateError
     when the fetch fails."""
@@ -128,11 +141,10 @@ def check_update() -> dict:
             con.commit()
         finally:
             con.close()
-    return update_info(None)
+    return update_info(None, admin=admin)
 
 
-# cd docker: compose then also loads the compose.override.yaml `tp mode docker` writes (TP-165)
-DOCKER_UPDATE = "git pull && (cd docker && docker compose up -d --build)"
+DOCKER_UPDATE = "git pull --ff-only && python3 -m ticket_pilot.docker_update_manager install"
 
 
 def start_update() -> int:
@@ -533,6 +545,12 @@ class H(BaseHTTPRequestHandler):
         return self._deny(401, "로그인이 필요해요")
 
     def do_GET(self):
+        if docker() and self.path == "/api/update/health" and self.client_address[0] == "127.0.0.1":
+            # The host manager probes via docker exec. Keep the candidate off SQLite until it is accepted.
+            ready = (ROOT / "web" / "dist" / "index.html").is_file()
+            return self._send(200 if ready else 503, {"ready": ready})
+        if docker() and DU.maintenance():
+            return self._send(503, {"error": "Docker 업데이트 중이에요. 잠시 뒤 다시 시도하세요"})
         if not self._gate():
             return
         if self.path == "/api/lan/me":
@@ -673,7 +691,7 @@ class H(BaseHTTPRequestHandler):
                 since = int(q["since"][0]) if q.get("since") else None
             except ValueError:
                 return self._send(400, {"error": "since"})
-            return self._send(200, update_info(since))
+            return self._send(200, update_info(since, admin=self.admin))
         if self.path == "/api/automations":
             # snapshot `tp tick` writes every minute (launchd)
             con = db()
@@ -739,6 +757,9 @@ class H(BaseHTTPRequestHandler):
         return self._send(200, {"ok": True})
 
     def do_POST(self):
+        if docker() and DU.maintenance():
+            self._deny(503, "Docker 업데이트 중이에요. 잠시 뒤 다시 시도하세요")
+            return
         if not self._gate():
             return
         # same-origin guard on 127.0.0.1 (as before TP-152; LAN requests passed the stricter check in _gate)
@@ -752,6 +773,15 @@ class H(BaseHTTPRequestHandler):
             # chat attachments arrive base64 in the JSON body (chat.MAX_FILES x MAX_FILE is checked per file there)
             return self._send(413, {"error": f"요청이 너무 커요 ({n / 1048576:.0f}MB, 한 번에 {MAX_BODY // 1048576}MB까지)"})
         body = json.loads(self.rfile.read(n) or b"{}")
+        if docker() and DU.directory():
+            with (DATA / "docker-update.lock").open("a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_SH)
+                if DU.maintenance():
+                    return self._send(503, {"error": "Docker 업데이트 중이에요. 잠시 뒤 다시 시도하세요"})
+                return self._post(body)
+        return self._post(body)
+
+    def _post(self, body):
         try:
             if self.path in ("/api/config", "/api/config/import"):
                 # 설정 page: dry_run returns the changes for the confirm step; invalid values come back as errors
@@ -803,6 +833,21 @@ class H(BaseHTTPRequestHandler):
                 con.commit()
                 return self._send(200, {"ok": True, "since": since})
             if self.path == "/api/update":
+                if docker():
+                    if not self.admin:
+                        raise Forbidden("Docker 업데이트는 TP_ADMINS에 등록된 관리자만 실행할 수 있어요")
+                    if DU.directory():
+                        con = db()
+                        try:
+                            tag = (meta_get(con, "update_check") or {}).get("latest")
+                            job = DU.request(tag)
+                            event(con, "update", f"Docker 업데이트 요청: {job['tag']}")
+                            con.commit()
+                        except UP.UpdateError as e:
+                            return self._send(409, {"error": str(e)})
+                        finally:
+                            con.close()
+                        return self._send(200, {"ok": True, "job": job})
                 since = start_update()
                 con = db()
                 event(con, "update", "업데이트 실행 (tp update)")
@@ -810,7 +855,7 @@ class H(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True, "since": since})
             if self.path == "/api/update/check":
                 try:
-                    return self._send(200, check_update())
+                    return self._send(200, check_update(admin=self.admin))
                 except UP.UpdateError as e:
                     return self._send(502, {"error": str(e)})
             m = AGENT_LOGIN_PATH.fullmatch(self.path)

@@ -145,6 +145,10 @@ def cmd_tick(a):
     except BlockingIOError:
         print("tick: another tick is running")
         return
+    if docker():
+        from .docker_update import maintenance
+        if maintenance():
+            return
     con = db()
     snap = meta_get(con, "automations") or {}
     prev = {x["id"]: x for x in snap.get("automations", [])}
@@ -203,8 +207,9 @@ def cmd_tick(a):
         # every update.check_min: fetch the tags, keep the latest release for the dashboard's 업데이트 item
         chk = U.check_latest(con)
         con.commit()
-        from .server import start_update
-        U.auto_update(con, chk, start_update)
+        if not docker():
+            from .server import start_update
+            U.auto_update(con, chk, start_update)
         con.commit()
     except Exception as e:  # noqa: BLE001
         print(f"update check: {e}", file=sys.stderr, flush=True)
@@ -544,7 +549,9 @@ def main(argv=None):
     rl.add_argument("--sha", required=True)
     rl.add_argument("--repo", required=True)
     rl.add_argument("--version", help="vX.Y.Z instead of the PR label bump (workflow_dispatch)")
-    rl.set_defaults(fn=lambda a: U.release(a.sha, a.repo, version=a.version))
+    rl.add_argument("--print-version", action="store_true", help=argparse.SUPPRESS)
+    rl.set_defaults(fn=lambda a: print(U.release_plan(a.sha, a.repo, a.version)[0]) if a.print_version
+                    else U.release(a.sha, a.repo, version=a.version))
     sv = sp.add_parser("serve")
     sv.add_argument("--port", type=int)
     sv.set_defaults(fn=lambda a: __import__("ticket_pilot.server", fromlist=["serve"]).serve(a.port))

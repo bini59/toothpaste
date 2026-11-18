@@ -70,6 +70,9 @@ def latest_tag(root=ROOT) -> str | None:
 
 def current(root=ROOT) -> str:
     """`git describe --tags` (v0.4.1, v0.4.1-3-gabc1234), or the short sha before the first tag."""
+    version = os.environ.get("TP_RELEASE_VERSION", "")
+    if Path(root) == ROOT and TAG.fullmatch(version):
+        return version
     return _git(root, "describe", "--tags", "--match", "v*", "--always", check=False)
 
 
@@ -86,6 +89,9 @@ def blocked(root=ROOT) -> str | None:
 def newer(root=ROOT, tag: str | None = None) -> bool:
     """True when the tag is not in this checkout yet."""
     tag = tag or latest_tag(root)
+    version = os.environ.get("TP_RELEASE_VERSION", "")
+    if Path(root) == ROOT and TAG.fullmatch(version):
+        return bool(tag and tag != version and latest([tag, version]) == tag)
     return bool(tag) and subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor", tag, "HEAD"],
                                         capture_output=True).returncode == 1
 
@@ -292,28 +298,36 @@ def main(to: str | None = None, build=False) -> int:
     return 0
 
 
-def release(sha: str, repo: str, root=ROOT, version: str | None = None) -> str | None:
-    """release.yml (deploy.yml's release job in the old repository): tag + GitHub Release for the commit, bumped by its
-    PR's label (major / minor, else patch; no PR = a direct push = patch) unless `version` is given (workflow_dispatch),
-    with this checkout's built web/dist attached as ASSET. Skips a commit that already has a v* tag (re-runs)."""
-    if version and not TAG.match(version):
-        raise UpdateError(f"버전은 vX.Y.Z 형식이어야 해요: {version}")
-    def gh(*args):
-        p = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=120)
-        if p.returncode:
-            raise UpdateError(f"gh {' '.join(args)}: {p.stderr.strip()[-300:]}")
-        return p.stdout
+def _release_gh(*args):
+    p = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=120)
+    if p.returncode:
+        raise UpdateError(f"gh {' '.join(args)}: {p.stderr.strip()[-300:]}")
+    return p.stdout
 
-    refs = json.loads(gh("api", "--paginate", "--slurp", f"repos/{repo}/git/matching-refs/tags/v"))
-    refs = [r for page in refs for r in page]
-    tags = {r["ref"].removeprefix("refs/tags/"): r["object"]["sha"] for r in refs}
-    have = [t for t, s in tags.items() if s == sha and TAG.match(t)]
+
+def release_plan(sha: str, repo: str, version: str | None = None) -> tuple[str, bool, list, list]:
+    """Resolve the version before publishing an image. Retries reuse the commit's existing tag."""
+    if version and not TAG.fullmatch(version):
+        raise UpdateError(f"버전은 vX.Y.Z 형식이어야 해요: {version}")
+    pages = json.loads(_release_gh("api", "--paginate", "--slurp", f"repos/{repo}/git/matching-refs/tags/v"))
+    tags = {r["ref"].removeprefix("refs/tags/"): r["object"]["sha"] for page in pages for r in page}
+    have = latest([t for t, s in tags.items() if s == sha])
     if have:
-        print(f"{sha[:7]} already has {have[0]}, skipping")
-        return None
-    pulls = json.loads(gh("api", f"repos/{repo}/commits/{sha}/pulls"))
+        return have, True, [], []
+    pulls = json.loads(_release_gh("api", f"repos/{repo}/commits/{sha}/pulls"))
     labels = [lb["name"] for lb in (pulls[0]["labels"] if pulls else [])]
-    v = version or bump(latest(tags), labels)
+    tag = version or bump(latest(tags), labels)
+    if tag in tags:
+        raise UpdateError(f"{tag} 태그가 다른 커밋에 이미 있어요")
+    return tag, False, pulls, labels
+
+
+def release(sha: str, repo: str, root=ROOT, version: str | None = None) -> str | None:
+    """Create a GitHub Release and attach the web build. An already tagged commit is skipped."""
+    v, exists, pulls, labels = release_plan(sha, repo, version)
+    if exists:
+        print(f"{sha[:7]} already has {v}, skipping")
+        return None
     # checked before tagging: a re-run skips a tagged commit, so a release without the asset would stay that way
     root = Path(root)
     head = _git(root, "rev-parse", "HEAD")
@@ -321,13 +335,13 @@ def release(sha: str, repo: str, root=ROOT, version: str | None = None) -> str |
         raise UpdateError(f"web/dist는 {head[:7]}에서 빌드됐어요 ({sha[:7]} 아님): 릴리즈 안 만듦")
     if not (root / "web" / "dist" / "index.html").is_file():
         raise UpdateError("web/dist/index.html이 없어요: 릴리즈 안 만듦")
-    gh("release", "create", v, "--repo", repo, "--target", sha, "--generate-notes")
+    _release_gh("release", "create", v, "--repo", repo, "--target", sha, "--generate-notes")
     print(f"{v} ({'PR #' + str(pulls[0]['number']) if pulls else 'no PR'}, labels {labels or '-'})")
     with tempfile.TemporaryDirectory() as d:
         f = Path(d) / ASSET
         with tarfile.open(f, "w:gz") as t:
             t.add(root / "web" / "dist", arcname=".")
-        gh("release", "upload", v, str(f), "--repo", repo)
+        _release_gh("release", "upload", v, str(f), "--repo", repo)
     print(f"{ASSET} attached")
     return v
 

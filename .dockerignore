@@ -6,3 +6,5 @@ docker/compose.override.yaml
 config/settings.json
 config/project_map.json
 **/__pycache__
+
+docker/.update

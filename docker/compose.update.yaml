@@ -1,0 +1,18 @@
+# Opt in via the host update manager. No Docker API or database mount is given to the manager's request channel.
+services:
+  tp:
+    image: ${COMPOSE_PROJECT_NAME:-ticket-pilot}-managed:local
+    environment:
+      TP_DOCKER_UPDATE_DIR: /run/tp-update
+    volumes:
+      - type: bind
+        source: .update/requests
+        target: /run/tp-update/requests
+        bind:
+          create_host_path: false
+      - type: bind
+        source: .update/state
+        target: /run/tp-update/state
+        read_only: true
+        bind:
+          create_host_path: false

@@ -656,8 +656,15 @@ export interface UpdateInfo {
   latest: string | null;
   checked_at: string | null;
   blocked: string | null;
-  /** Docker mode: the host command that updates instead of the button */
+  available: boolean;
+  /** Docker installs without the host manager display the setup command. */
   command: string | null;
+  docker_update?: {
+    id?: string;
+    tag?: string;
+    state?: "idle" | "queued" | "pulling" | "switching" | "failed" | "done";
+    message?: string;
+  };
   notes: { tag: string; items: string[] }[];
   log?: string[];
 }
