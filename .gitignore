@@ -14,3 +14,5 @@ web/dist/
 docker/.env
 # tp mode docker (TP-165) writes the host's mounts here
 docker/compose.override.yaml
+
+docker/.update/

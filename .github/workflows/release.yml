@@ -26,9 +26,10 @@ jobs:
         (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
         (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'))
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 60
     permissions:
       contents: write
+      packages: write
       pull-requests: read  # the merged PR's labels
     env:
       SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
@@ -36,6 +37,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.SHA }}
+          fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -47,8 +50,36 @@ jobs:
       - name: build web/dist (attached as web-dist.tar.gz)
         working-directory: web
         run: npm ci --no-audit --no-fund && npm run build
-      - name: tag and release
+      - name: resolve release version
+        id: image
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
-        run: bin/tp release-tag --sha "$SHA" --repo "$GITHUB_REPOSITORY" ${VERSION:+--version "$VERSION"}
+        run: |
+          tag=$(bin/tp release-tag --sha "$SHA" --repo "$GITHUB_REPOSITORY" --print-version ${VERSION:+--version "$VERSION"})
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: publish release image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/bini59/toothpaste:${{ steps.image.outputs.tag }}
+          build-args: TP_RELEASE_VERSION=${{ steps.image.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.SHA }}
+            org.opencontainers.image.version=${{ steps.image.outputs.tag }}
+      - name: tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.image.outputs.tag }}
+        run: bin/tp release-tag --sha "$SHA" --repo "$GITHUB_REPOSITORY" --version "$VERSION"

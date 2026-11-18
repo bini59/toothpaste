@@ -158,10 +158,13 @@ Device Flow and `claude` with `claude setup-token` (or a pasted token / API key)
 - **`tp run`**: a tick every minute like launchd / systemd (skipped while the last one still runs; agents in their own
   sessions). `docker compose stop` (SIGTERM) waits for the running tick (`stop_grace_period: 5m`).
 - **Off in Docker mode**: `tp setup`, `tp migrate`, `tp update` and 로컬망 공유 ("Docker 모드에서는 쓰지 않아요"), 시스템 자동화.
-  설정 → 업데이트 still checks for new versions but shows the command instead of the button:
-  `git pull && (cd docker && docker compose up -d --build)` (on the host, in this checkout).
-- **Limits**: stopping or rebuilding the container (`stop`, the update command) ends the agents running in it; update
-  when the board shows nothing 작업 중. Repos whose agents need Docker do not work (no Docker socket in the container); Docker Desktop on a Mac has
+- **Update from the dashboard**: wait for agents and dev servers to finish, then run
+  `git pull --ff-only && python3 -m ticket_pilot.docker_update_manager install` once from the install checkout on the host
+  (macOS launchd or Linux user systemd). Users in `TP_ADMINS` can then use **설정 → 고급 → 업데이트**.
+  The host manager downloads the published GHCR image and replaces only `tp`. It refuses to interrupt active work.
+  For manual maintenance of a managed install, run Compose with `-f compose.yaml`, the existing `-f compose.override.yaml`
+  if present, and `-f compose.update.yaml` from `docker/`. Use a host-only install checkout when migrating bind mounts.
+- **Limits**: manually stopping or rebuilding the container ends the agents running in it. Repos whose agents need Docker do not work (no Docker socket in the container); Docker Desktop on a Mac has
   slow file I/O in volumes, so installs and builds in worktrees are slower than on the host.
 
 #### 외부 공개: Cloudflare Tunnel (optional, TP-166)
@@ -213,7 +216,7 @@ bin/tp mode host [--apply]                 # back (run on the host; the containe
 - Progress: `~/tp-work/mode-state.json`; a failure prints the finished steps and how to undo them. The dashboard's run
   logs to `~/tp-work/logs/mode.log`. 설정 → 실행 방식 is 127.0.0.1 only on the host; in Docker it shows the host command.
 - While switched to Docker, `tp update` / `tp setup` / `tp migrate` on the host refuse (so a deploy of `main` fails
-  instead of starting a second tick through launchd); update with `git pull && (cd docker && docker compose up -d --build)`.
+  instead of starting a second tick through launchd). The host Docker update manager described above handles dashboard updates.
 
 ### 고급
 
