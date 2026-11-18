@@ -24,6 +24,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+from . import chat_usage
 from .asana_write import rules as asana_rules
 from .core import DATA, ROOT, gh_env, run, settings
 
@@ -191,7 +192,8 @@ def command(a: dict, log: Path) -> list[str]:
             if a["ultracode"]:
                 config["ultracode"] = True
             cmd = ["claude", "-p", "--resume", a["session"], "--no-session-persistence",
-                   "--setting-sources", "", "--strict-mcp-config", "--no-chrome", "--settings", json.dumps(config)]
+                   "--output-format", "json", "--setting-sources", "", "--strict-mcp-config", "--no-chrome",
+                   "--settings", json.dumps(config)]
         cmd += [f"--add-dir={d}" for d in dirs]
         if a["model"]:
             cmd += ["--model", a["model"]]
@@ -230,7 +232,7 @@ def launch(cwd: str, prompt: str, tag: str, setup: str | None = None, repo_path:
     a["add_dirs"] = add_dirs
     a["compact"] = compact
     LOGS.mkdir(parents=True, exist_ok=True)
-    log = LOGS / f"{re.sub(r'[^A-Za-z0-9._-]+', '-', tag)}-{datetime.now():%Y%m%d-%H%M%S}.log"
+    log = LOGS / f"{re.sub(r'[^A-Za-z0-9._-]+', '-', tag)}-{datetime.now():%Y%m%d-%H%M%S-%f}.log"
     prompt_file = log.with_suffix(".prompt.md")
     # briefs call ticket-pilot's CLI from inside the target repo's worktree; {{ASANA}} = the agent's Asana rules
     prompt_file.write_text(prompt.replace("{{ASANA}}", asana_rules()).replace("{{TP}}", str(ROOT / "bin" / "tp"))
@@ -241,6 +243,8 @@ def launch(cwd: str, prompt: str, tag: str, setup: str | None = None, repo_path:
     meta = {"agent": a["tool"], "model": a["model"], "effort": a["effort"], "ultracode": a["ultracode"],
             "session": a.get("session") or resume, "cmd": cmd, "cwd": cwd, "started": time.time()}
     Path(f"{log}.json").write_text(json.dumps(meta))
+    if compact:
+        cmd = [sys.executable, chat_usage.__file__, str(log), *cmd]
     script = ('if [ -n "$TP_SETUP" ]; then echo "--- worktree setup"; sh -c "$TP_SETUP" < /dev/null '
               '|| echo "--- worktree setup failed ($?), starting the agent anyway"; echo "--- agent"; fi; '
               '"$@" < "$TP_PROMPT"; echo $? > "$TP_EXIT"')
@@ -391,6 +395,23 @@ def compacted_summary(handle: str | None, limit: int) -> str:
             return f.read(limit).strip()
     except OSError:
         return ""
+
+
+def compacted_usage(handle: str | None) -> tuple:
+    _, log = _parts(handle)
+    return chat_usage.compaction(log) if log else (None,) * 5
+
+
+def claude_turn_usage(handle: str | None, end: float | None) -> tuple:
+    _, log = _parts(handle)
+    if log:
+        try:
+            meta = json.loads(Path(f"{log}.json").read_text())
+            if meta["agent"] == "claude" and meta["session"]:
+                return chat_usage.transcript(meta["cwd"], meta["session"], meta["started"], end)
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
+    return (None,) * 5
 
 
 def last_message(handle: str | None, limit: int = 4000) -> str:
