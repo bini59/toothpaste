@@ -25,7 +25,7 @@ from . import checks as K
 from . import milestone as M
 from . import notifications as N
 from .core import asana, current_actor, db, event, gh_json, meta_get, now, repo_rules, run, settings, train_repos
-from .pipeline import VIOLATION, active_deploy, latest_run, restage, review_overridden, run_pr
+from .pipeline import VIOLATION, active_deploy, active_release_pr_urls, latest_run, restage, review_overridden, run_pr
 
 
 def cfg() -> dict:
@@ -300,15 +300,26 @@ def process_approvals(log=print) -> int:
 # ---------------------------------------------------------------- release train
 
 def staged_by_repo(con, repos: list[str] | None = None) -> dict[str, list]:
-    """Staged PRs per repo (default: the weekday train repos)."""
+    """PRs merged into each repo's staging branch and still awaiting production."""
+    rules = repo_rules()
     repos = train_repos() if repos is None else repos
-    rows = con.execute("""SELECT p.*, t.key, t.name tname, t.gid tgid FROM prs p JOIN tickets t ON t.gid=p.ticket_gid
-                          WHERE t.stage='staged' ORDER BY p.merged_at""").fetchall()
     out: dict[str, list] = {}
-    for p in rows:
-        if p["repo"] in repos:
-            out.setdefault(p["repo"], []).append(p)
+    for name in repos:
+        rule = rules.get(name)
+        if not rule or not rule["staging"]:
+            continue
+        rows = con.execute("""SELECT p.*, t.key, t.name tname, t.gid tgid FROM prs p
+                              JOIN tickets t ON t.gid=p.ticket_gid
+                              WHERE p.repo=? AND p.base=? AND p.state='MERGED'
+                                AND p.release_id IS NULL AND p.prod_at IS NULL
+                              ORDER BY p.merged_at""", (name, rule["staging"]["branch"])).fetchall()
+        if rows:
+            out[name] = rows
     return out
+
+
+def staged_pr_urls(con, repos: list[str] | None = None) -> dict[str, list[str]]:
+    return {name: [pr["url"] for pr in prs] for name, prs in staged_by_repo(con, repos).items()}
 
 
 def _today() -> str:
@@ -361,7 +372,11 @@ def release_tick(log=print, force: bool = False) -> str:
         if not force and (not due or meta_get(con, "release_hold", False)):
             return "not due" if not due else "on hold"
         groups = staged_by_repo(con)
-        order = [n for n in train_repos() if n in groups]
+        active_urls = active_release_pr_urls(con)
+        for name, prs in groups.items():
+            groups[name] = [p for p in prs if p["url"] not in active_urls]
+        order = [name for name in train_repos()
+                 if any(not M.awaiting_next_round(con, p["ticket_gid"]) for p in groups.get(name, []))]
         if not order:
             con.execute("INSERT INTO releases(day,repo,status,reason,started_at,finished_at) VALUES(?,?,?,?,?,?)",
                         (day, "", "empty", "staging에 머지된 승인 PR이 없어요", now(), now()))
@@ -400,6 +415,8 @@ def _start(con, rel, log) -> str:
             return "aborted"
         allowed = set()
         for p in prs:
+            if M.awaiting_next_round(con, p.get("ticket_gid")):
+                continue
             info = gh_json(["pr", "view", p["url"], "--json", "commits,mergeCommit"])
             allowed |= {x["oid"] for x in info.get("commits", [])}
             if info.get("mergeCommit"):
@@ -554,12 +571,19 @@ def verify_deploy(con, rel, log=print) -> str:
     return "done"
 
 
-def complete_asana(con, ticket_gid: str) -> str | None:
+def complete_asana(con, ticket_gid: str, *, pr_url: str | None = None) -> str | None:
     """(2026-10-19): complete the Asana task once its change is verified in production. Returns an error or None.
-    GitHub issue tickets (gid gh:<repo>#<n>) get the issue closed instead."""
+    GitHub issue tickets (gid gh:<repo>#<n>) get the issue closed instead. An older PR can ship while the ticket
+    still has work in its latest run."""
     from .pipeline import issue_ref
     if M.is_ms(ticket_gid):
-        return M.complete(con, ticket_gid)  # milestone ticket: its subtasks and, at the end, the Asana parent
+        return M.complete(con, ticket_gid, pr_url=pr_url)  # milestone ticket: its subtasks and, at the end, the Asana parent
+    if pr_url is not None:
+        latest = latest_run(con, ticket_gid)
+        if latest:
+            current = run_pr(con, latest["id"])
+            if not current or current["url"] != pr_url:
+                return None
     try:
         ref = issue_ref(ticket_gid)
         if ref:
@@ -578,7 +602,7 @@ def finalize(con, rel):
     for p in json.loads(rel["prs_json"] or "[]"):
         con.execute("UPDATE prs SET release_id=?, prod_at=COALESCE(prod_at, ?) WHERE url=?", (rel["id"], now(), p["url"]))
         if p.get("ticket_gid"):
-            err = complete_asana(con, p["ticket_gid"])
+            err = complete_asana(con, p["ticket_gid"], pr_url=p["url"])
             if err:
                 asana_errors.append(f"{p.get('key')}: {err}")
     note = (rel["reason"] + " / ") if rel["reason"] else ""

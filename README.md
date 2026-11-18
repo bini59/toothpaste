@@ -405,8 +405,8 @@ Only repos with a feature base (train repos, `pr_into_staging` repos) take part.
    the Asana parent are completed.
 5. Subtasks added later: while the milestone PR is open, a subtask still in progress puts the milestone ticket back in
    `collecting` (no AI review, no staging approval) until it is in the branch. A subtask merged after the milestone PR
-   starts the next round: right away when that PR is only on staging (2026-11-10; the ticket leaves `staged`, so
-   the train / 배포 page stop on its staging commits until the next milestone PR is merged), or once it went live
+   starts the next round: right away when that PR is only on staging (2026-11-10; the train holds its staging commits
+   until the next milestone PR is merged), or once it went live
    (tick reopens the ticket). The next milestone PR ships them; each round completes only the subtasks it carried.
 
 **dev 서버** (`ticket_pilot/devserver.py`, 2026-11-04): the milestone page has a dev server panel per repo to try

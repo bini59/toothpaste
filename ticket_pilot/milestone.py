@@ -169,10 +169,18 @@ def stage(con, t, pr) -> str | None:
     if pr["state"] == "OPEN":
         return "collecting" if busy else None if done else "ms_hold"
     # a subtask merged after the milestone PR (live or only on staging) starts the next round (2026-11-10).
-    # Until that round reaches staging this ticket is not staged, so the train / 배포 page stop on its staging commits.
     if pr["state"] == "MERGED" and (busy or merged_since(con, t["gid"], pr["merged_at"])):
         return "collecting" if busy or done else "ms_hold"
     return None
+
+
+def awaiting_next_round(con, gid: str | None) -> bool:
+    """The train waits for a milestone's next round to merge before shipping its staging commits."""
+    if not is_ms(gid):
+        return False
+    t = con.execute("SELECT * FROM tickets WHERE gid=?", (gid,)).fetchone()
+    pr = last_pr(con, gid)
+    return bool(t and pr and (pr["state"] != "MERGED" or stage(con, t, pr)))
 
 
 def mark_done(parent_gid: str, cancel: bool = False) -> None:
@@ -389,16 +397,22 @@ def open_pr(con, t, log=print) -> int:
 
 # ---------------------------------------------------------------- production
 
-def complete(con, gid: str) -> str | None:
+def complete(con, gid: str, *, pr_url: str | None = None) -> str | None:
     """The milestone PR is live in production: complete the milestone ticket, the subtasks merged into it, and the
     Asana parent task once every milestone ticket of it is complete. Returns errors or None."""
     from .release import complete_asana
     parent, repo = parse(gid)
     b = branch(parent)
     # only the subtasks this milestone PR carried; later ones ship with the next round
-    pr = last_pr(con, gid)
+    latest = last_pr(con, gid)
+    pr = latest
+    if pr_url is not None and (not latest or latest["url"] != pr_url):
+        pr = con.execute("SELECT * FROM prs WHERE url=? AND ticket_gid=?", (pr_url, gid)).fetchone()
+        if not pr:
+            return f"마일스톤 PR을 찾을 수 없어요 ({pr_url})"
     cut = (pr["merged_at"] if pr and pr["merged_at"] else None) or "9999"
-    con.execute("UPDATE tickets SET completed=1 WHERE gid=?", (gid,))
+    if not pr or (pr["url"] == latest["url"] and not merged_since(con, gid, pr["merged_at"])):
+        con.execute("UPDATE tickets SET completed=1 WHERE gid=?", (gid,))
     errs = []
     for s in con.execute("""SELECT DISTINCT s.gid, s.key FROM tickets s JOIN prs p ON p.ticket_gid=s.gid
                             WHERE s.parent_gid=? AND s.completed=0 AND p.state='MERGED' AND p.base=? AND p.repo=?

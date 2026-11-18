@@ -65,23 +65,29 @@ def _state(con) -> dict:
             deps = P.deps_status(con, t)
             t["deps_json"] = json.dumps(deps, ensure_ascii=False)
             t["open_deps"] = sum(1 for d in deps if not d["completed"] and not d["landed"])
+    rules = repo_rules()
+    staged_pr_urls = R.staged_pr_urls(con, list(rules))
+    staged_urls = {url for urls in staged_pr_urls.values() for url in urls}
     prs = rows("SELECT * FROM prs")
     for p in prs:
         # tp checks of the open head (checks.py): state none|pending|pass|fail|error, rows, and the approval gate text
         if p["state"] == "OPEN":
             cs = K.check_state(con, p)
             p["checks"] = {"state": cs["state"], "rows": cs["rows"], "gate": K.gate_error(con, p)}
+        elif p["url"] in staged_urls and MS.awaiting_next_round(con, p["ticket_gid"]):
+            p["awaiting_milestone_round"] = True
     return {
         "meta": {"last_sync": meta_get(con, "last_sync"), "last_scan": meta_get(con, "last_scan"),
                  "settings": settings(),
                  "release_hold": bool(meta_get(con, "release_hold", False)),
                  "next_release_at": R.next_release_at().isoformat(),
-                 "rules": repo_rules(), "modes": D.MODES, "last_diff_scan": meta_get(con, "last_diff_scan"),
+                 "rules": rules, "modes": D.MODES, "last_diff_scan": meta_get(con, "last_diff_scan"),
                  "claude_usage": U.cached(con), "codex_usage": CU.cached(con), "version": version(con)},
         "staging_diffs": rows("SELECT * FROM staging_diffs ORDER BY repo"),
         "tickets": tickets,
         "runs": rows("SELECT id,ticket_gid,repo,worktree_name,worktree_path,branch,terminal,ws_status,ws_comment,state,origin,created_at,updated_at FROM runs"),
         "prs": prs,
+        "staged_pr_urls": staged_pr_urls,
         "reviews": rows("SELECT * FROM reviews ORDER BY id DESC"),
         "repos": [{**r, **factory_repo(r["name"])} for r in rows("SELECT * FROM repos")],
         "project_map": rows("SELECT * FROM project_map"),

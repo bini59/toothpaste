@@ -61,6 +61,13 @@ def run_pr(con, run_id):
 ACTIVE_DEPLOY = ("requested", "running", "pending", "deploying")
 
 
+def active_release_pr_urls(con) -> set[str]:
+    """PRs whose production verification belongs to a running or queued release."""
+    rows = con.execute(f"SELECT prs_json FROM releases WHERE status IN ({','.join('?' * len(ACTIVE_DEPLOY))})",
+                       ACTIVE_DEPLOY)
+    return {pr["url"] for row in rows for pr in json.loads(row["prs_json"] or "[]") if pr.get("url")}
+
+
 def active_deploy(con, gid: str):
     """A dashboard deploy or the weekday train that includes this ticket and has not finished yet."""
     return con.execute(f"""SELECT * FROM releases WHERE status IN ({','.join('?' * len(ACTIVE_DEPLOY))})

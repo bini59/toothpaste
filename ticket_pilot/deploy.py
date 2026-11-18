@@ -28,10 +28,11 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from . import milestone as M
 from .core import db, event, gh_json, now, repo_rules, run
 from .pipeline import latest_run, restage, run_pr, slug
 from .release import (_execution_for, _finish, _gh, _today, deploy_timeout_min, expire_stale_train,
-                      request_approval, staging_branch, verify_deploy)
+                      request_approval, staged_by_repo, staging_branch, verify_deploy)
 
 MODES = {
     "staging": "티켓 → staging",
@@ -59,8 +60,7 @@ def _approved(con, pr) -> bool:
 
 
 def staged_prs(con, repo: str) -> list[dict]:
-    rows = con.execute("""SELECT p.*, t.key, t.name tname FROM prs p JOIN tickets t ON t.gid=p.ticket_gid
-                          WHERE t.stage='staged' AND p.repo=? ORDER BY p.merged_at""", (repo,)).fetchall()
+    rows = staged_by_repo(con, [repo]).get(repo, [])
     return [_pr_item(p, p["key"], p["tname"]) for p in rows]
 
 
@@ -124,8 +124,10 @@ def deploy_target(con, mode: str, ticket: str | None = None, repo: str | None = 
         stg = rr["staging"]["branch"] if rr["staging"] else None
         if pr["state"] != "MERGED" or not stg or pr["base"] != stg:
             return None, f"{stg or 'staging'}에 머지된 PR이 아니에요"
-        if pr["release_id"] or pr["prod_at"]:
+        if pr["release_id"] is not None or pr["prod_at"] is not None:
             return None, "이미 프로덕션에 반영됐어요"
+        if M.awaiting_next_round(con, t["gid"]):
+            return None, "다음 마일스톤 PR이 staging에 머지될 때까지 기다려 주세요"
     return {"repo": repo, "rr": rr, "t": t, "pr": pr, "prs": [_pr_item(pr, t["key"], t["name"])]}, None
 
 

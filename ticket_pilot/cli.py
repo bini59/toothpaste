@@ -508,7 +508,7 @@ def main(argv=None):
     rt.set_defaults(fn=_log_errors(lambda a: print(R.release_tick(force=a.force))))
     sp.add_parser("release-status").set_defaults(fn=lambda a: print(json.dumps({
         "next_release_at": R.next_release_at().isoformat(),
-        "staged": {k: [p["url"] for p in v] for k, v in R.staged_by_repo(db()).items()},
+        "staged": R.staged_pr_urls(db()),
         "today": [dict(r) for r in db().execute("SELECT * FROM releases WHERE day=? ORDER BY id", (R._today(),))],
     }, ensure_ascii=False, indent=1)))
 
