@@ -1,175 +1,315 @@
 import * as T from "three";
-import { artworks, type Floor, type PrintName, type Tool } from "./catalog";
+import { books, type Floor, type PrintName, type Visit } from "./catalog";
 import { createExhibitSelector } from "./exhibitSelection";
-import { atomicModels, haikuDetail, japanPrints, microscopicField } from "./exhibits";
+import { bookcase } from "./books";
+import { atomicModels, locationPlate } from "./exhibits";
 import { pigments, type World } from "./materials";
-import { constellation, earthApproach, nightSky, solarSystem } from "./space";
+import { earthApproach, milkyWay, nightSky, solarSystem } from "./space";
 
-export type SceneVisit = { tool: Tool; floor: Floor } | null;
+export type SceneVisit = (Visit & { floor: Floor; bookName?: string }) | null;
 export type Gallery = ReturnType<typeof createGallery>;
-const depthFor = (v: SceneVisit) => (!v ? 0 : { codex: 1, claude: 3, agy: 5 }[v.tool]);
-const magnification = [6.5, 6, 5.5, 5.2, 7];
-const arrivalScale = [0.22, 0.14, 0.57, 0.18, 1.65];
-const ease = (t: number) => t * t * (3 - 2 * t);
-const mix = T.MathUtils.lerp;
+export type Stage = { id: string; title: string; moving: boolean };
+const stops = [
+  ["galaxy", "우리은하"],
+  ["solar", "태양계"],
+  ["earth", "지구"],
+  ["japan", "일본 · 교토"],
+  ["city", "교토 · 가모강"],
+  ["library", "도서관 입구"],
+  ["aisle", "도서관 서가"],
+  ["shelf", "문학 책장"],
+  ["book", "펼친 책"],
+  ["letter", "활자의 잉크"],
+  ["atoms", "Gemini · 원자 모형"],
+] as const;
+const time = [0, 1.62, 3.54, 5.02, 6.91, 8.87, 10.69, 12.61, 14.28, 16.55, 19.85];
+const shelf = 7,
+  opened = 8,
+  ink = 9,
+  atoms = 10;
+function stopFor(v: SceneVisit) {
+  if (!v || (v.tool === "codex" && v.key === "Astra")) return 0;
+  if (v.tool === "codex") return 1;
+  if (v.tool === "claude") return v.book ? opened : shelf;
+  return atoms;
+}
+const smooth = T.MathUtils.smoothstep,
+  lerp = T.MathUtils.lerp;
+const zoomOut = [7, 6.0, 4.5, 6.2, 4.0, 12.0, 4.5, 1, 21.2, 95];
+const incomingSize = [0.49, 0.97, 0.95, 0.95, 0.82, 0.91, 0.81, 1, 0.9, 2.7];
 
-export function createGallery(canvas: HTMLCanvasElement) {
+export function createGallery(canvas: HTMLCanvasElement, onStage: (s: Stage) => void) {
   const renderer = new T.WebGLRenderer({ canvas, antialias: true, powerPreference: "low-power" });
   renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 1.5));
-  const scene = new T.Scene(),
-    camera = new T.PerspectiveCamera(38, 1, 0.08, 175);
-  const p = pigments(),
-    background = nightSky(p);
-  scene.background = background;
-  scene.add(new T.HemisphereLight(p.color("grey", 50), p.color("info", 800), 1.25));
-  const sun = new T.DirectionalLight(p.color("warning", 100), 2.1);
-  sun.position.set(-4, 5, 6);
+  const camera = new T.PerspectiveCamera(38, 1, 0.08, 200),
+    scene = new T.Scene(),
+    p = pigments();
+  const sky = nightSky(p),
+    paper = new T.Color(p.tone("warning", 50, "grey", 200, 0.22));
+  scene.add(new T.HemisphereLight(p.color("grey", 50), p.color("grey", 700), 1.42));
+  const sun = new T.DirectionalLight(p.color("warning", 100), 2.05);
+  sun.position.set(-6, 4, 4);
   scene.add(sun);
-  const rim = new T.DirectionalLight(p.color("info", 200), 1.05);
-  rim.position.set(5, 2, -4);
-  scene.add(rim);
-
   let frame = 0,
-    disposed = false,
     visible = true,
+    disposed = false,
     dirty = true,
-    lastPaint = 0;
-  let depth = 0,
-    from = 0,
-    to = 0,
-    started = 0,
-    duration = 0,
-    yaw = 0,
-    destination: SceneVisit = null;
-  const motion = matchMedia("(prefers-reduced-motion: reduce)");
-  function redraw() {
-    dirty = true;
-    schedule();
-  }
+    last = 0,
+    clock = 0,
+    goal = 0,
+    yaw = 0;
+  let destination: SceneVisit = null,
+    volume = "Fable",
+    wantedBook = "Fable",
+    wantedName = "Fable",
+    stageSignature = "";
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)");
   const loader = new T.TextureLoader();
-  const load = (url: string) => {
-    const map = loader.load(url, redraw);
-    map.colorSpace = T.SRGBColorSpace;
-    map.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy());
-    return map;
+  const load = (name: string) => {
+    const t = loader.load("/model-lab/" + name + ".webp", redraw);
+    t.colorSpace = T.SRGBColorSpace;
+    t.anisotropy = Math.min(6, renderer.capabilities.getMaxAnisotropy());
+    return t;
   };
-  const earthMap = load("/model-lab/earth.webp"),
-    region = load("/model-lab/japan.webp");
-  const prints = Object.fromEntries(Object.entries(artworks).map(([key, art]) => [key, load(art.image)])) as Record<
+  const earthMap = load("earth"),
+    room = load("reading-room");
+  const art = Object.fromEntries(Object.keys(books).map((k) => [k, load(k.toLowerCase())])) as Record<
     PrintName,
     T.Texture
   >;
-  const atoms = atomicModels(p),
-    micro = microscopicField(p);
+  const library = bookcase(p, load("bookcase"), art);
+  const initialMacro = library.pose("Fable", 0);
+  const macro = locationPlate(initialMacro, 0.5, 0.5, 16.5);
+  const macroMaterial = (macro.root.children[0] as T.Mesh<T.PlaneGeometry, T.MeshBasicMaterial>).material;
   const worlds = [
-    constellation(p),
-    solarSystem(p, earthMap),
+    milkyWay(p, load("galaxy")),
+    solarSystem(p, earthMap, load("planets")),
     earthApproach(p, earthMap),
-    japanPrints(p, region, prints),
-    haikuDetail(prints.Haiku),
-    atoms.world,
+    locationPlate(load("japan"), (135.768 - 122) / 32, (46 - 35.012) / 17),
+    locationPlate(load("kyoto"), 0.499, 0.607),
+    locationPlate(load("library"), 0.501, 0.703),
+    locationPlate(room, 0.502, 0.51),
+    library.world,
+    library.world,
+    macro,
+    atomicModels(p),
   ];
-  const selectors = worlds.map((w) => createExhibitSelector(w, p));
-  for (const w of worlds) {
+  const extraPlanet = createExhibitSelector(worlds[1], p),
+    extraAtom = createExhibitSelector(worlds[atoms], p, true);
+  const unique = [...new Set(worlds)];
+  for (const w of unique) {
     w.root.visible = false;
     scene.add(w.root);
   }
-
-  // Each scale uses local units. Two render targets let the camera approach an opaque object
-  // (the Earth, a print, the dewdrop) and reveal its interior without near-plane clipping or depth fights.
   const targets = [new T.WebGLRenderTarget(), new T.WebGLRenderTarget()];
   const composite = new T.Scene(),
-    screen = new T.Camera();
+    screen = new T.Camera(),
+    quad = new T.PlaneGeometry(2, 2);
   const blend = new T.ShaderMaterial({
-    uniforms: { outer: { value: targets[0].texture }, inner: { value: targets[1].texture }, amount: { value: 0 } },
-    vertexShader: "varying vec2 coord; void main(){coord=uv; gl_Position=vec4(position.xy,0.,1.);}",
+    uniforms: {
+      outer: { value: targets[0].texture },
+      inner: { value: targets[1].texture },
+      amount: { value: 0 },
+      focus: { value: new T.Vector2() },
+      aspect: { value: 1 },
+      softness: { value: 0.4 },
+      door: { value: new T.Vector2() },
+      mode: { value: 0 },
+    },
+    vertexShader: "varying vec2 coord;void main(){coord=uv;gl_Position=vec4(position.xy,0.,1.);}",
     fragmentShader: [
-      "varying vec2 coord; uniform sampler2D outer; uniform sampler2D inner; uniform float amount;",
-      "void main(){ gl_FragColor=mix(texture2D(outer,coord),texture2D(inner,coord),amount);",
+      "varying vec2 coord;uniform sampler2D outer,inner;uniform float amount,aspect,softness;uniform vec2 focus,door;uniform int mode;",
+      "void main(){vec2 d=abs(coord-focus)*vec2(aspect,1.);float dist=mix(length(d),max(d.x,d.y*.90),.48);",
+      "float edge=mix(-softness,2.5+softness,amount);float t=1.-smoothstep(edge-softness,edge+softness,dist);",
+      "vec2 inside=coord;float lift=1.;",
+      "if(mode==1){vec2 dd=abs(coord-focus)-door;float rim=max(dd.x*aspect,dd.y);t=(1.-smoothstep(-.006,.006,rim))*amount;",
+      "float fit=clamp(max(door.x,door.y)*2.,.08,1.);inside=clamp((coord-focus)/fit+.5,0.,1.);lift=mix(.32,1.,fit);}",
+      "if(mode==2){t=amount;}",
+      "gl_FragColor=mix(texture2D(outer,coord),texture2D(inner,inside)*vec4(lift,lift,lift,1.),t);",
       "#include <colorspace_fragment>",
       "}",
     ].join("\n"),
     depthTest: false,
     depthWrite: false,
   });
-  const quad = new T.PlaneGeometry(2, 2);
   composite.add(new T.Mesh(quad, blend));
-  const center = new T.Vector3();
-  function paint(w: World, scale: number, offset: T.Vector3, angle: number, buffer: T.WebGLRenderTarget | null) {
-    scene.background = w === atoms.world ? micro : background;
+  const origin = new T.Vector3(),
+    offset = new T.Vector3(),
+    focus = new T.Vector3(),
+    entry = new T.Vector3();
+  const notes = new Map<World, T.Object3D[]>();
+  for (const w of unique) {
+    const arr: T.Object3D[] = [];
+    w.root.traverse((o) => {
+      if (o.userData.annotation) arr.push(o);
+    });
+    notes.set(w, arr);
+  }
+  function paint(
+    w: World,
+    scale: number,
+    position: T.Vector3,
+    angle: number,
+    target: T.WebGLRenderTarget | null,
+    annotate: boolean
+  ) {
+    scene.background = w === worlds[atoms] ? paper : sky;
     w.root.visible = true;
     w.root.scale.setScalar(scale);
-    w.root.position.copy(offset);
+    w.root.position.copy(position);
     w.root.rotation.y = angle;
-    renderer.setRenderTarget(buffer);
+    for (const o of notes.get(w)!)
+      o.visible = annotate && (!o.userData.modelKey || o.userData.modelKey === destination?.key);
+    renderer.setRenderTarget(target);
     renderer.render(scene, camera);
     w.root.visible = false;
   }
-  const origin = new T.Vector3();
-  function render(now: number) {
-    const i = Math.floor(depth),
-      t = depth - i;
-    atoms.animate(motion.matches ? 0 : now / 1000);
-    if (t < 0.0001 || i === worlds.length - 1) {
-      paint(worlds[i], 1, origin, yaw, null);
+  for (const w of unique) for (const [key, mark] of w.marks) mark.userData.modelKey = key;
+  function poseBook(progress: number) {
+    const w = library.world;
+    w.root.position.set(0, 0, 0);
+    w.root.scale.setScalar(1);
+    w.root.rotation.y = 0;
+    w.root.updateMatrixWorld(true);
+    macroMaterial.map = library.pose(volume, progress);
+  }
+  function segment() {
+    let i = 0;
+    while (i < time.length - 1 && clock >= time[i + 1] - 0.00001) i++;
+    return { i, t: i === atoms ? 0 : T.MathUtils.clamp((clock - time[i]) / (time[i + 1] - time[i]), 0, 1) };
+  }
+  function render() {
+    const { i, t } = segment();
+    if (i >= shelf - 1 && i <= ink) poseBook(i < shelf ? 0 : i === shelf ? t : 1);
+    const spot = t > 0.54 ? Math.min(i + 1, atoms) : i,
+      moving = clock !== goal || goal !== time[stopFor(destination)];
+    const sig = spot + "/" + moving;
+    if (sig !== stageSignature) {
+      stageSignature = sig;
+      onStage({ id: stops[spot][0], title: stops[spot][1], moving });
+    }
+    if (t < 0.0001 || i === shelf || i === atoms) {
+      paint(worlds[i], 1, origin, yaw, null, true);
       return;
     }
-    const u = ease(t),
-      outer = worlds[i],
+    const outer = worlds[i],
       inner = worlds[i + 1],
-      zoom = magnification[i] ** u;
-    // At the boundary the camera is centred on the actual star, Earth, Japan, Haiku print or droplet.
-    center.copy(outer.portal).multiplyScalar(-u * zoom);
-    paint(outer, zoom, center, yaw * (1 - u), targets[0]);
-    const arrival = arrivalScale[i];
-    center.copy(outer.portal).multiplyScalar((1 - u) * 0.7);
-    if (i === 4) center.x += 4.05 * (1 - u) * arrival;
-    paint(inner, arrival ** (1 - u), center, 0, targets[1]);
-    blend.uniforms.amount.value = T.MathUtils.smoothstep(u, 0.21, 0.83);
+      pan = smooth(t, 0.01, 0.77);
+    const travel = 0.18 * t + 0.82 * smooth(t, 0.035, 0.99);
+    const z = zoomOut[i] ** (i === ink ? smooth(t, 0, 0.65) : travel);
+    focus.copy(outer.portal).multiplyScalar(1 - pan);
+    offset.copy(focus).addScaledVector(outer.portal, -z);
+    paint(outer, z, offset, yaw * (1 - pan), targets[0], t < 0.12);
+    let size = incomingSize[i] ** (1 - travel);
+    entry.set(0, 0, 0);
+    // Cross each threshold on its subject: a globe, a marked block, the open door, or one nucleus.
+    if (i === 0) entry.set(-5.15, 0.13, 0);
+    if (i === 2 || i === 4) entry.copy(inner.portal);
+    if (i === 9) entry.set(-4.0, 0.2, 0);
+    offset
+      .copy(focus)
+      .addScaledVector(entry, -size)
+      .multiplyScalar(1 - smooth(t, 0.44, 1.0));
+    if (i === opened) {
+      // The right page is 720 units across; the macro plate reproduces the same 150-unit crop.
+      size = z / 21.2;
+      offset.copy(focus);
+    } else if (i === ink) {
+      // Go inside the chosen ink stroke before pulling away from the matte hydrogen nucleus.
+      size = 43 ** (1 - smooth(t, 0.59, 1));
+      offset.copy(entry).multiplyScalar(smooth(t, 0.7, 1) - size);
+    }
+    paint(inner, size, offset, 0, targets[1], t > 0.91);
+    const f = focus.project(camera);
+    blend.uniforms.focus.value.set(0.5 + f.x * 0.5, 0.5 + f.y * 0.5);
+    blend.uniforms.amount.value = smooth(t, i === 1 ? 0.34 : 0.4, i === 1 ? 0.82 : 0.88);
+    blend.uniforms.softness.value = i === 5 ? 0.13 : i === 1 ? 0.7 : 0.41;
+    blend.uniforms.mode.value = 0;
+    if (i === 5) {
+      // Project the actual opening in the facade. Its jambs occlude the reading room until they pass the camera.
+      const corner = entry.copy(outer.portal).add(new T.Vector3(0.93, 0.98, 0));
+      outer.root.localToWorld(corner).project(camera);
+      blend.uniforms.door.value.set(Math.abs(corner.x - f.x) * 0.5, Math.abs(corner.y - f.y) * 0.5);
+      blend.uniforms.mode.value = 1;
+      blend.uniforms.amount.value = smooth(t, 0.02, 0.38);
+    } else if (i === opened || i === ink) {
+      blend.uniforms.mode.value = 2;
+      blend.uniforms.amount.value = i === opened ? smooth(t, 0.9, 0.985) : smooth(t, 0.54, 0.68);
+    }
     renderer.setRenderTarget(null);
     renderer.render(composite, screen);
   }
+  function route(immediate = false) {
+    const end = time[stopFor(destination)];
+    if (immediate) {
+      clock = goal = end;
+    }
+    if (wantedBook !== volume) {
+      if (!immediate && clock > time[shelf] + 0.00001) {
+        goal = time[shelf];
+        return;
+      }
+      library.ensure(wantedBook, wantedName);
+      volume = wantedBook;
+    }
+    goal = end;
+  }
   function tick(now: number) {
     frame = 0;
-    if (!visible || document.hidden || disposed) return;
-    const moving = depth !== to;
+    if (disposed || !visible || document.hidden) return;
+    const dt = last ? Math.max(0, (now - last) / 1000) : 0;
+    last = now;
+    const moving = clock !== goal;
     if (moving) {
-      // A queued frame can carry a timestamp just before the input event that started the trip.
-      const progress = T.MathUtils.clamp((now - started) / duration, 0, 1);
-      depth = progress === 1 ? to : mix(from, to, progress);
+      const distance = goal - clock;
+      clock += Math.sign(distance) * Math.min(Math.abs(distance), dt);
+      if (Math.abs(clock - goal) < 0.00001) {
+        clock = goal;
+        route();
+      }
     }
-    const animating = depth === 5 && !motion.matches;
-    if (dirty || moving || (animating && now - lastPaint >= 40)) {
+    if (dirty || moving) {
       dirty = false;
-      lastPaint = now;
-      render(now);
+      render();
     }
-    if (depth !== to || animating) schedule();
+    if (clock !== goal) schedule();
+    else last = 0;
   }
   function schedule() {
     if (!disposed && visible && !document.hidden && !frame) frame = requestAnimationFrame(tick);
   }
-  function visit(next: SceneVisit, immediate = false) {
-    destination = next;
-    const target = depthFor(next);
-    selectors.forEach((select, i) => select(i === target ? next?.floor : undefined));
-    if (immediate || motion.matches) {
-      depth = to = target;
-      yaw = 0;
-    } else if (to !== target) {
-      from = depth;
-      to = target;
-      started = performance.now();
-      duration = Math.max(180, Math.abs(to - from) * 1250);
-      yaw = 0;
+  function redraw() {
+    dirty = true;
+    schedule();
+  }
+  function visit(v: SceneVisit, instant = false) {
+    destination = v;
+    if (v?.tool === "claude" || v?.tool === "agy") {
+      wantedBook = v.tool === "claude" ? v.key : (v.book ?? "Fable");
+      wantedName = v.tool === "claude" ? v.floor.name : (v.bookName ?? wantedBook.replace(/^model\//, ""));
     }
+    extraPlanet(v?.tool === "codex" ? v.floor : undefined);
+    extraAtom(v?.tool === "agy" ? v.floor : undefined);
+    yaw = 0;
+    route(instant || reduced.matches);
     redraw();
   }
-  const onMotion = () => visit(destination, motion.matches);
-  motion.addEventListener("change", onMotion);
-  document.addEventListener("visibilitychange", redraw);
-  const observer = new IntersectionObserver(([entry]) => {
-    visible = entry.isIntersecting;
+  const skip = () => {
+    route(true);
+    redraw();
+  };
+  const onMotion = () => {
+    if (reduced.matches) skip();
+  };
+  const onVisibility = () => {
+    last = 0;
+    redraw();
+  };
+  reduced.addEventListener("change", onMotion);
+  document.addEventListener("visibilitychange", onVisibility);
+  const observer = new IntersectionObserver(([e]) => {
+    visible = e.isIntersecting;
+    last = 0;
     if (visible) redraw();
   });
   observer.observe(canvas);
@@ -178,60 +318,72 @@ export function createGallery(canvas: HTMLCanvasElement) {
     if (!width || !height) return;
     renderer.setSize(width, height, false);
     camera.aspect = width / height;
-    camera.position.set(0, 0, Math.max(4.05, 6.89 / camera.aspect) / Math.tan(T.MathUtils.degToRad(19)));
+    camera.position.set(0, 0, Math.max(3.95, 6.76 / camera.aspect) / Math.tan(T.MathUtils.degToRad(19)));
     camera.lookAt(0, 0, 0);
+    camera.updateMatrixWorld();
     camera.updateProjectionMatrix();
+    blend.uniforms.aspect.value = camera.aspect;
     const size = renderer.getDrawingBufferSize(new T.Vector2());
-    for (const target of targets) target.setSize(size.x, size.y);
+    targets.forEach((t) => t.setSize(size.x, size.y));
     redraw();
   });
   resize.observe(canvas);
   const ray = new T.Raycaster();
   return {
     visit,
-    turn(pixels: number) {
-      yaw = T.MathUtils.clamp(yaw - pixels * 0.004, -0.36, 0.36);
-      redraw();
+    skip,
+    turn(dx: number) {
+      if (clock === goal) {
+        yaw = T.MathUtils.clamp(yaw - dx * 0.003, -0.19, 0.19);
+        redraw();
+      }
     },
     pick(x: number, y: number): string | null {
-      if (depth !== to) return null;
-      const w = worlds[to],
+      if (clock !== goal) return null;
+      const idx = stopFor(destination),
+        w = worlds[idx],
         r = canvas.getBoundingClientRect();
-      // Picking also works if a pointer event follows a layout/visit update before the next frame.
+      if (idx === shelf || idx === opened) poseBook(idx === shelf ? 0 : 1);
       w.root.position.set(0, 0, 0);
       w.root.scale.setScalar(1);
       w.root.rotation.y = yaw;
       w.root.updateMatrixWorld(true);
-      ray.setFromCamera(new T.Vector2(((x - r.left) * 2) / r.width - 1, 1 - ((y - r.top) * 2) / r.height), camera);
-      const hits = ray.intersectObjects(w.hits.filter((object) => object.visible), true);
-      let obj: T.Object3D | null = hits.find((hit) => hit.object instanceof T.Mesh)?.object ?? null;
-      while (obj && !obj.userData.choice) obj = obj.parent;
-      return obj?.userData.choice ?? null;
+      ray.setFromCamera(new T.Vector2((2 * (x - r.left)) / r.width - 1, 1 - (2 * (y - r.top)) / r.height), camera);
+      for (const hit of ray.intersectObjects(w.hits, true)) {
+        let key: string | null = null,
+          shown = true;
+        for (let o: T.Object3D | null = hit.object; o && o !== w.root; o = o.parent) {
+          shown = shown && o.visible;
+          key = key ?? o.userData.choice ?? null;
+        }
+        if (shown && key) return key;
+      }
+      return null;
     },
     dispose() {
       disposed = true;
       cancelAnimationFrame(frame);
       resize.disconnect();
       observer.disconnect();
-      motion.removeEventListener("change", onMotion);
-      document.removeEventListener("visibilitychange", redraw);
+      reduced.removeEventListener("change", onMotion);
+      document.removeEventListener("visibilitychange", onVisibility);
       const geometry = new Set<T.BufferGeometry>(),
-        materials = new Set<T.Material>(),
-        maps = new Set<T.Texture>([background, micro, p.haze]);
-      scene.traverse((obj) => {
-        if (obj instanceof T.InstancedMesh) obj.dispose();
-        if (obj instanceof T.Mesh || obj instanceof T.Line || obj instanceof T.Sprite) {
-          if (!(obj instanceof T.Sprite)) geometry.add(obj.geometry);
-          for (const m of Array.isArray(obj.material) ? obj.material : [obj.material]) materials.add(m);
+        mats = new Set<T.Material>(),
+        maps = new Set<T.Texture>([sky]);
+      scene.traverse((o) => {
+        if (o instanceof T.Mesh || o instanceof T.Line || o instanceof T.Sprite) {
+          if (!(o instanceof T.Sprite)) geometry.add(o.geometry);
+          for (const m of Array.isArray(o.material) ? o.material : [o.material]) mats.add(m);
         }
       });
-      for (const m of materials) {
-        for (const value of Object.values(m)) if (value instanceof T.Texture) maps.add(value);
+      for (const m of mats) {
+        for (const v of Object.values(m)) if (v instanceof T.Texture) maps.add(v);
         m.dispose();
       }
-      for (const g of geometry) g.dispose();
-      for (const map of maps) map.dispose();
-      for (const target of targets) target.dispose();
+      geometry.forEach((g) => g.dispose());
+      maps.forEach((m) => m.dispose());
+      library.dispose();
+      targets.forEach((t) => t.dispose());
       quad.dispose();
       blend.dispose();
       renderer.dispose();

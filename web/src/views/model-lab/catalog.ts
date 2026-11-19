@@ -14,34 +14,66 @@ const collections = {
   codex: ["Luna", "Terra", "Sol", "Astra"],
 } as const;
 export type PrintName = (typeof collections.claude)[number];
-export const artworks: Record<PrintName, { image: string; alt: string }> = {
-  Fable: { image: "/model-lab/fable.webp", alt: "잎사귀 등불을 든 숲속 여우" },
-  Opus: { image: "/model-lab/opus.webp", alt: "가을빛 아래 고토의 현을 연주하는 손" },
-  Sonnet: { image: "/model-lab/sonnet.webp", alt: "매화 핀 강가에서 마주 보는 두루미 두 마리" },
-  Haiku: { image: "/model-lab/haiku.webp", alt: "연잎 위에 맺힌 한 방울의 이슬" },
-};
-export function printFor(key: string) {
-  return Object.hasOwn(artworks, key) ? artworks[key as PrintName] : undefined;
+export const books = {
+  Fable: {
+    genre: "우화집",
+    title: "등불을 든 여우",
+    glyph: "숲",
+    lines: ["해 질 녘 숲에서", "여우는 작은 잎 하나를 들었다.", "돌아가는 길이 그 안에 있었다."],
+    image: "/model-lab/fable.webp",
+  },
+  Opus: {
+    genre: "악보집",
+    title: "현을 위한 소품",
+    glyph: "현",
+    lines: ["고요한 현 위에", "오후의 빛이 잠시 머문다.", "손을 떼고도 울림은 남는다."],
+    image: "/model-lab/opus.webp",
+  },
+  Sonnet: {
+    genre: "소네트 시집",
+    title: "강가의 두 목소리",
+    glyph: "빛",
+    lines: [
+      "물결의 빛 아래",
+      "강은 두 목소리를 모은다.",
+      "하나는 떠나고 하나는 남아",
+      "같은 물가의 저녁을 읽는다.",
+    ],
+    image: "/model-lab/sonnet.webp",
+  },
+  Haiku: {
+    genre: "하이쿠 시집",
+    title: "비 갠 아침",
+    glyph: "비",
+    lines: ["아침 비 그쳐", "잎 하나 기울 때면", "연못에 파문"],
+    image: "/model-lab/haiku.webp",
+  },
+} as const;
+export function bookFor(key: string) {
+  return Object.hasOwn(books, key) ? books[key as PrintName] : undefined;
 }
-
 export type Sculpture = (typeof collections)[Tool][number] | "Other";
 export type Floor = { key: string; name: string; sculpture: Sculpture; models: AgentModel[] };
-export type Visit = { tool: Tool; key: string };
+/** book is the volume being read, including on the return journey from its ink. */
+export type Visit = { tool: Tool; key: string; book?: string };
 export const arrivals: Record<Tool, Visit> = {
   codex: { tool: "codex", key: "Sol" },
   claude: { tool: "claude", key: "Fable" },
-  agy: { tool: "agy", key: "Hydrogen" },
+  agy: { tool: "agy", key: "Hydrogen", book: "Fable" },
 };
-
-/** A visit is a camera destination. Only explicit confirmation writes an execution model. */
 export function zoomFrom(v: Visit | null): Visit | null {
   if (!v) return arrivals.codex;
   if (v.tool === "codex") return arrivals.claude;
-  return v.tool === "claude" && v.key === "Haiku" ? arrivals.agy : null;
+  if (v.tool === "claude") return { tool: "agy", key: "Hydrogen", book: v.key };
+  return null;
 }
-export function backFrom(tool: Tool): Visit | null {
-  if (tool === "agy") return { tool: "claude", key: "Haiku" };
-  return tool === "claude" ? { tool: "codex", key: "Terra" } : null;
+export function backFrom(v: Visit): Visit | null {
+  if (v.tool === "agy") {
+    const key = v.book ?? "Fable";
+    return { tool: "claude", key, book: key };
+  }
+  if (v.tool === "claude") return v.book ? { tool: "claude", key: v.key } : { tool: "codex", key: "Terra" };
+  return null;
 }
 export type Selection = { tool: Tool; id: string; name: string };
 export const selectionKey = "tp.lab.model";
@@ -49,9 +81,18 @@ export const selectionKey = "tp.lab.model";
 export function readSelection(value: string | null): Selection | null {
   try {
     const saved = JSON.parse(value ?? "null");
-    if (saved && tools.includes(saved.tool) && typeof saved.id === "string" && saved.id &&
-        typeof saved.name === "string" && saved.name) return { tool: saved.tool, id: saved.id, name: saved.name };
-  } catch { /* Older or incomplete browser data. */ }
+    if (
+      saved &&
+      tools.includes(saved.tool) &&
+      typeof saved.id === "string" &&
+      saved.id &&
+      typeof saved.name === "string" &&
+      saved.name
+    )
+      return { tool: saved.tool, id: saved.id, name: saved.name };
+  } catch {
+    /* Older or incomplete browser data. */
+  }
   return null;
 }
 
@@ -72,7 +113,13 @@ export function floorsFor(tool: Tool, models: AgentModel[]): Floor[] {
 }
 
 /** Claude exposes CLI aliases, while AGY and Codex list models for the connected account. */
-export function modelStatus(tool: Tool, account: AgentAccount | undefined, model: AgentModel | undefined, loading: boolean, hasCatalog: boolean) {
+export function modelStatus(
+  tool: Tool,
+  account: AgentAccount | undefined,
+  model: AgentModel | undefined,
+  loading: boolean,
+  hasCatalog: boolean
+) {
   if (loading) return "계정 확인 중";
   if (!account) return "계정 확인 필요";
   if (!account.installed) return "도구 미설치";

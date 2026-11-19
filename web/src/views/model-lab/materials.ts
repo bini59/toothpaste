@@ -26,47 +26,35 @@ export function pigments() {
   const steps = [50, 100, 200, 300, 400, 500, 600, 700, 800, 900];
   const color = (family: string, step: number) =>
     swatch(family + "-" + (reversed ? steps[9 - steps.indexOf(step)] : step));
-  const haze = texture(128, 128, (ctx) => {
-    const white = color("grey", 50),
-      g = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
-    for (const [t, alpha] of [
-      [0, "ff"],
-      [0.09, "df"],
-      [0.25, "68"],
-      [0.57, "19"],
-      [1, "00"],
-    ] as const)
-      g.addColorStop(t, white + alpha);
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, 128, 128);
-  });
-  return { color, haze };
+  function tone(a: string, step: number, b: string, other: number, amount: number) {
+    return new T.Color(color(a, step)).lerp(new T.Color(color(b, other)), amount).getStyle();
+  }
+  return { color, tone };
 }
 export type Paint = ReturnType<typeof pigments>;
-
-export function halo(parent: T.Object3D, p: Paint, color: string, size: number, opacity: number) {
-  const sprite = new T.Sprite(
-    new T.SpriteMaterial({ map: p.haze, color, opacity, blending: T.AdditiveBlending, depthWrite: false })
-  );
-  sprite.scale.set(size, size, 1);
-  parent.add(sprite);
-  return sprite;
-}
 
 export function seeded(seed: number) {
   return () => ((seed = (Math.imul(seed, 1664525) + 1013904223) | 0) >>> 0) / 4294967296;
 }
 
 export function label(
-  parent: T.Object3D, p: Paint, text: string, x: number, y: number, z: number, height = 0.48, width = 512
+  parent: T.Object3D,
+  p: Paint,
+  text: string,
+  x: number,
+  y: number,
+  z: number,
+  height = 0.48,
+  width = 512,
+  dark = false
 ) {
   const map = texture(width, 96, (ctx) => {
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.font = "600 62px system-ui, sans-serif";
+    ctx.font = "500 58px Georgia, serif";
     ctx.shadowColor = p.color("grey", 900);
-    ctx.shadowBlur = 12;
-    ctx.fillStyle = p.color("grey", 50);
+    ctx.shadowBlur = dark ? 0 : 3;
+    ctx.fillStyle = p.color("grey", dark ? 800 : 100);
   });
   function setText(value: string) {
     const ctx = map.image.getContext("2d")!;
@@ -75,10 +63,13 @@ export function label(
     map.needsUpdate = true;
   }
   setText(text);
-  const sprite = new T.Sprite(new T.SpriteMaterial({ map, depthTest: false, depthWrite: false, transparent: true }));
+  const sprite = new T.Sprite(
+    new T.SpriteMaterial({ map, depthTest: false, depthWrite: false, transparent: true })
+  );
   sprite.position.set(x, y, z);
   sprite.scale.set((height * width) / 96, height, 1);
   sprite.renderOrder = 6;
+  sprite.userData.annotation = true;
   parent.add(sprite);
   return setText;
 }
@@ -112,5 +103,6 @@ export function pickable(w: World, object: T.Object3D, key: string) {
 }
 export function highlight(w: World, key: string, mark: T.Object3D) {
   mark.visible = false;
+  mark.userData.annotation = true;
   w.marks.set(key, mark);
 }
