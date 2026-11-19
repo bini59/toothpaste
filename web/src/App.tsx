@@ -1,5 +1,5 @@
-import { forwardRef, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Armchair, CircleHelp, Flag, ArrowUpCircle, Brush, Inbox as InboxIcon, ClipboardList, FolderGit2, GitPullRequest, History as HistoryIcon, LayoutDashboard, ListChecks, Milestone, Minimize2, type LucideIcon, type LucideProps, LayoutGrid, Package, RefreshCw, Rocket, ScrollText, Search, Settings as SettingsIcon, Star, Timer, Workflow } from "lucide-react";
+import { lazy, Suspense, forwardRef, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FlaskConical, Armchair, CircleHelp, Flag, ArrowUpCircle, Brush, Inbox as InboxIcon, ClipboardList, FolderGit2, GitPullRequest, History as HistoryIcon, LayoutDashboard, ListChecks, Milestone, Minimize2, type LucideIcon, type LucideProps, LayoutGrid, Package, RefreshCw, Rocket, ScrollText, Search, Settings as SettingsIcon, Star, Timer, Workflow } from "lucide-react";
 import { Button, Header, Sidebar, cn, type BreadcrumbItem, type SidebarEntry } from "./ui";
 import { fetchState, getJson, post, postJson } from "./api";
 import { CommandPalette } from "./components/CommandPalette";
@@ -25,6 +25,8 @@ import { Tickets } from "./views/Tickets";
 import { Start } from "./views/Start";
 import { Update } from "./views/Update";
 
+const ModelLab = lazy(() => import("./views/model-lab/ModelLab"));
+
 const TABS = {
   inbox: { label: "수신함", icon: InboxIcon, group: null },
   board: { label: "보드", icon: LayoutDashboard, group: null },
@@ -42,6 +44,7 @@ const TABS = {
   jobs: { label: "시스템 자동화", icon: Timer, group: "모니터링" },
   history: { label: "설정 이력", icon: HistoryIcon, group: "모니터링" },
   "chat-compactions": { label: "채팅 압축", icon: Minimize2, group: "모니터링" },
+  "model-lab": { label: "모델 선택", icon: FlaskConical, group: "실험실" },
   settings: { label: "설정", icon: SettingsIcon, group: null },
   update: { label: "업데이트", icon: ArrowUpCircle, group: null },
   start: { label: "시작하기", icon: Flag, group: null },
@@ -246,6 +249,7 @@ export default function App({ me }: { me: LanMe }) {
     { label: "프로젝트", items: projectItems },
     { label: "티켓", items: [leaf("tickets"), leaf("map")] },
     { label: "모니터링", items: [leaf("dispatch"), leaf("reviews"), leaf("deploy"), leaf("cleanup"), leaf("log"), leaf("jobs"), leaf("history"), leaf("chat-compactions")] },
+    { label: "실험실", items: [leaf("model-lab")] },
     leaf("settings"),
     leaf("help"),
     // until the first project exists (afterwards 설정 and the ⌘K palette still open it)
@@ -329,6 +333,8 @@ export default function App({ me }: { me: LanMe }) {
             <Tickets s={s} />
           ) : tab === "map" ? (
             <RepoMap s={s} />
+          ) : tab === "model-lab" ? (
+            <Suspense fallback={<p className="text-sm text-text-muted">실험실을 여는 중…</p>}><ModelLab /></Suspense>
           ) : tab === "settings" ? (
             <Settings sub={sub} onChanged={() => { load(); loadProjects(); void loadUsage(); }} />
           ) : tab === "projects" ? (
