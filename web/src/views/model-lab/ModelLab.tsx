@@ -115,7 +115,7 @@ export default function ModelLab() {
           <figcaption className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-4 py-3 sm:px-5">
             <div className="flex min-w-0 items-start gap-3">
               <Layers3 aria-hidden className="mt-1 size-4 shrink-0 text-text-muted" />
-              <div aria-live="polite" aria-atomic="true">
+              <div aria-live="polite" aria-atomic="true" className="min-w-0 wrap-anywhere">
                 <p className="font-semibold text-text-main">{visit ? `B${index + 1} · ${floor.name}` : "입구 홀"}</p>
                 <p className="mt-0.5 text-xs text-text-muted">{visit ? captions[floor.sculpture] : "데크의 입구나 목록에서 프로바이더를 고르세요."}</p>
               </div>
