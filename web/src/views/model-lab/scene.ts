@@ -19,7 +19,8 @@ export function createGallery(canvas: HTMLCanvasElement) {
   const p = pigments(), scene = new T.Scene(), camera = new T.PerspectiveCamera(38, 1, 0.08, 80);
   const dark = new T.Color(p.color("grey", 900)).lerp(new T.Color(p.color("info", 900)), 0.24);
   scene.background = dark;
-  scene.fog = new T.Fog(dark, 11, 35);
+  const fog = new T.Fog(dark, 11, 35);
+  scene.fog = fog;
   scene.environment = studioEnvironment(p);
   scene.environmentIntensity = 0.72;
   const sky = new T.HemisphereLight(p.color("info", 100), p.color("warning", 800), 1.1);
@@ -48,7 +49,7 @@ export function createGallery(canvas: HTMLCanvasElement) {
     scene.add(d.level);
     return { ...d, model: "" };
   });
-  let tour: NonNullable<SceneVisit> | null = null;
+  let tour: SceneVisit = null, pending: SceneVisit = null;
   let depth = -1, from = -1, to = -1, start = 0, duration = 0, frame = 0, orbit = 0;
   const motion = matchMedia("(prefers-reduced-motion: reduce)");
   const proportion = (i: number) => Math.min(1, Math.max(0, i / Math.max(1, (tour?.floors.length ?? 4) - 1)));
@@ -81,6 +82,8 @@ export function createGallery(canvas: HTMLCanvasElement) {
     const { eye, aim } = pose();
     camera.position.copy(eye);
     camera.lookAt(aim);
+    const framing = Math.max(0, eye.distanceTo(aim) - 18);
+    fog.near = 11 + framing; fog.far = 35 + framing;
     const nearest = Math.max(0, Math.round(depth));
     // Keep each deck in the same slot on adjacent frames.
     for (let i = nearest - 2; i <= nearest + 2; i++) {
@@ -113,17 +116,24 @@ export function createGallery(canvas: HTMLCanvasElement) {
   function tick(time: number) {
     const t = Math.min(1, (time - start) / duration);
     depth = mix(from, to, ease(t));
-    if (t === 1 && to === -1) tour = null;
+    if (t === 1) { settle(); return; }
     render();
-    frame = t < 1 ? requestAnimationFrame(tick) : 0;
+    frame = requestAnimationFrame(tick);
   }
   function settle() {
     cancelAnimationFrame(frame); frame = 0;
     depth = to;
-    if (depth === -1) tour = null;
+    if (depth === -1) {
+      tour = null;
+      orbit = 0;
+      focus.color.set(p.color("grey", 100));
+      trim.color.set(p.color("info", 400));
+      trim.emissive.copy(trim.color);
+    }
     render();
+    if (pending) visit(pending);
   }
-  const onMotion = () => { if (motion.matches) settle(); };
+  const onMotion = () => { if (motion.matches) visit(pending ?? (to === -1 ? null : tour), true); };
   motion.addEventListener("change", onMotion);
   const resize = new ResizeObserver(() => {
     const { width, height } = canvas.getBoundingClientRect();
@@ -135,25 +145,32 @@ export function createGallery(canvas: HTMLCanvasElement) {
   });
   resize.observe(canvas);
 
+  function visit(next: SceneVisit, immediate = false) {
+    // While returning, a visitor can already choose a different gate. Finish the ascent before entering it.
+    if (tour && next && tour.tool !== next.tool && depth > -1 && !immediate && !motion.matches) {
+      pending = next;
+      if (to === -1) return;
+      next = null;
+    } else pending = null;
+    const target = next?.index ?? -1;
+    const same = tour?.tool === next?.tool && to === target;
+    if (next) {
+      tour = next;
+      focus.color.set(accent(p, next.tool));
+      trim.color.copy(focus.color); trim.emissive.copy(focus.color);
+    }
+    if (same && !immediate) { render(); return; }
+    cancelAnimationFrame(frame);
+    from = depth; to = target;
+    if (immediate || motion.matches || from === to) { settle(); return; }
+    duration = Math.min(1900, 740 + Math.abs(to - from) * 150 + (Math.min(to, from) < 0 ? 950 : 0));
+    start = performance.now();
+    frame = requestAnimationFrame(tick);
+  }
+
   const ray = new T.Raycaster();
   return {
-    visit(next: SceneVisit, immediate = false) {
-      const target = next?.index ?? -1;
-      const same = tour?.tool === next?.tool && to === target;
-      if (next) {
-        if (tour && tour.tool !== next.tool) depth = -1;
-        tour = next;
-        focus.color.set(accent(p, next.tool));
-        trim.color.copy(focus.color); trim.emissive.copy(focus.color);
-      }
-      if (same && !immediate) { render(); return; }
-      cancelAnimationFrame(frame);
-      from = depth; to = target; orbit = 0;
-      if (immediate || motion.matches || from === to) { settle(); return; }
-      duration = Math.min(1900, 740 + Math.abs(to - from) * 150 + (Math.min(to, from) < 0 ? 950 : 0));
-      start = performance.now();
-      frame = requestAnimationFrame(tick);
-    },
+    visit,
     turn(pixels: number) {
       orbit = T.MathUtils.clamp(orbit - pixels * 0.008, -0.98, 0.98);
       render();

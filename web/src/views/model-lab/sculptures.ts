@@ -193,20 +193,25 @@ function celestial(p: Paint, name: Sculpture) {
     halo(group, p, gold, 3.7, 0.37);
   } else {
     const points: XYZ[] = [[-0.94,0.34,0.14],[-0.46,-0.59,0.26],[0.03,0.04,0.03],[0.41,0.81,-0.19],[1.02,0.39,0.06],[0.69,-0.65,-0.24],[-0.58,0.96,-0.35]];
-    const colors = [blue, lilac, gold], shells = colors.map((c) => p.glass(c)), cores = colors.map((c) => p.glow(c, 1.6));
+    const colors = [blue, lilac, gold], cores = colors.map((c) => p.glow(c, 1.9));
+    const shells = colors.map((c) => {
+      const shell = p.glass(c);
+      shell.transparent = true; shell.opacity = 0.53; shell.depthWrite = false; shell.thickness = 0.16;
+      return shell;
+    });
     for (const [i, xyz] of points.entries()) {
       const star = new T.Group();
       group.add(star);
       star.position.set(...xyz);
       const r = [0.22,0.15,0.36,0.24,0.14,0.22,0.09][i];
-      mesh(star, new T.SphereGeometry(r, 32, 20), shells[i % 3]);
-      mesh(star, new T.OctahedronGeometry(r * 0.63), cores[i % 3]);
+      mesh(star, new T.IcosahedronGeometry(r, 1), shells[i % 3]);
+      mesh(star, new T.OctahedronGeometry(r * 0.65), cores[i % 3]);
       for (const roll of [0, Math.PI / 2]) {
-        const ray = mesh(star, new T.OctahedronGeometry(r * 0.22), cores[i % 3]);
-        ray.scale.y = 6.3;
+        const ray = mesh(star, new T.OctahedronGeometry(r * 0.16), cores[i % 3]);
+        ray.scale.y = 10.5;
         ray.rotation.z = roll + i * 0.13;
       }
-      halo(star, p, colors[i % 3], r * 6.5, 0.34);
+      halo(star, p, colors[i % 3], r * 8.4, 0.50);
     }
     const thread = new T.LineBasicMaterial({ color: lilac, transparent: true, opacity: 0.46 });
     for (const chain of [[0,1,2,3,4],[2,5,4],[0,6,3]]) {

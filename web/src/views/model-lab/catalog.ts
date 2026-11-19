@@ -1,4 +1,4 @@
-import type { AgentModel } from "../../types";
+import type { AgentAccount, AgentModel } from "../../types";
 
 export const providers = {
   agy: { name: "AGY", material: "금속 원소 타일" },
@@ -32,12 +32,24 @@ export function readSelection(value: string | null): Selection | null {
 export function floorsFor(tool: Tool, models: AgentModel[]): Floor[] {
   const floors: Floor[] = collections[tool].map((name) => ({ key: name, name, sculpture: name, models: [] }));
   const others: Floor[] = [];
+  const match = (text: string) => {
+    const words = text.toLowerCase().split(/[^a-z0-9]+/);
+    return floors.find((floor) => words.includes(floor.key.toLowerCase()));
+  };
   for (const model of models) {
-    const words = (text: string) => text.toLowerCase().split(/[^a-z0-9]+/);
-    const match = (tokens: string[]) => floors.find((floor) => tokens.includes(floor.key.toLowerCase()));
-    const floor = match(words(model.id)) ?? match(words(model.name));
+    const floor = match(model.id) ?? match(model.name);
     if (floor) floor.models.push(model);
     else others.push({ key: "model/" + model.id, name: model.name, sculpture: "Other", models: [model] });
   }
   return [...floors, ...others];
+}
+
+/** Claude exposes CLI aliases, while AGY and Codex list models for the connected account. */
+export function modelStatus(tool: Tool, account: AgentAccount | undefined, model: AgentModel | undefined, loading: boolean, hasCatalog: boolean) {
+  if (loading) return "계정 확인 중";
+  if (!account) return "계정 확인 필요";
+  if (!account.installed) return "도구 미설치";
+  if (!account.logged_in) return "로그인 필요";
+  if (!model) return hasCatalog ? "계정 목록에 없음" : "목록 확인 필요";
+  return tool === "claude" ? "계정 권한 미확인" : "사용 가능";
 }

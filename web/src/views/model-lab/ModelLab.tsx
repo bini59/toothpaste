@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowLeft, ArrowUp, Atom, Check, ChevronRight, CircleCheck, Layers3, Orbit, Origami } from "lucide-react";
 import { fetchConfig, getJson } from "../../api";
 import { modelsForTool } from "../../agentModels";
 import { Select } from "../../components/Select";
 import type { AgentAccounts, ConfigState } from "../../types";
 import { Badge, Button, Card, cn } from "../../ui";
-import { floorsFor, providers, readSelection, selectionKey, tools, type Sculpture, type Selection, type Tool, type Visit } from "./catalog";
+import { floorsFor, modelStatus, providers, readSelection, selectionKey, tools, type Sculpture, type Selection, type Tool, type Visit } from "./catalog";
 import { GalleryCanvas } from "./GalleryCanvas";
 
 const emblems = { agy: Atom, claude: Origami, codex: Orbit };
@@ -27,6 +27,7 @@ export default function ModelLab() {
   const [pickedId, setPickedId] = useState("");
   const [saved, setSaved] = useState<Selection | null>(() => readSelection(localStorage.getItem(selectionKey)));
   const [storageError, setStorageError] = useState(false);
+  const downButton = useRef<HTMLButtonElement>(null), floorList = useRef<HTMLElement>(null);
   const region = useRef<HTMLElement>(null), entranceButtons = useRef<Partial<Record<Tool, HTMLButtonElement | null>>>({});
   useEffect(() => {
     let active = true;
@@ -48,10 +49,19 @@ export default function ModelLab() {
   const model = floor.models.find((m) => m.id === pickedId) ??
     floor.models.find((m) => saved?.tool === tool && m.id === saved.id) ?? floor.models[0];
   const account = accounts?.tools[tool];
-  const available = !loading && !!account?.installed && account.logged_in && !!model;
-  const availability = loading ? "계정 확인 중" : !account ? "계정 확인 필요" : !account.installed ? "도구 미설치" :
-    !account.logged_in ? "로그인 필요" : available ? "사용 가능" : failed && !catalog ? "목록 확인 필요" : "계정 목록에 없음";
+  const hasCatalog = (tool === "agy" && !!account?.models) || !!catalog?.[tool];
+  const availability = modelStatus(tool, account, model, loading, hasCatalog);
+  const selectable = availability === "사용 가능" || availability === "계정 권한 미확인";
   const confirmed = !!model && saved?.tool === tool && saved.id === model.id;
+
+  useLayoutEffect(() => {
+    const nav = floorList.current, item = nav?.querySelector<HTMLButtonElement>('[aria-current="step"]');
+    if (!nav || !item) return;
+    if (nav.contains(document.activeElement)) item.focus({ preventScroll: true });
+    const list = nav.getBoundingClientRect(), row = item.getBoundingClientRect();
+    if (row.bottom > list.bottom) nav.scrollTop += row.bottom - list.bottom;
+    else if (row.top < list.top) nav.scrollTop += row.top - list.top;
+  }, [visit, index]);
 
   function enter(next: Tool) {
     setPickedId("");
@@ -65,13 +75,15 @@ export default function ModelLab() {
   function move(i: number) {
     if (i < 0) { exit(); return; }
     if (i >= floors.length) return;
+    if (i === floors.length - 1 && document.activeElement === downButton.current) region.current?.focus({ preventScroll: true });
     setPickedId("");
     setVisit({ tool, key: floors[i].key });
   }
   function confirm() {
-    if (!model || !available) return;
+    if (!model || !selectable) return;
     const selection = { tool, id: model.id, name: model.name };
     setSaved(selection);
+    region.current?.focus({ preventScroll: true });
     try { localStorage.setItem(selectionKey, JSON.stringify(selection)); setStorageError(false); }
     catch { setStorageError(true); }
   }
@@ -97,7 +109,7 @@ export default function ModelLab() {
           <strong className="break-all text-text-main">{saved ? providers[saved.tool].name + " · " + saved.name : "미선택"}</strong>
         </div>
       </header>
-      <Card className="grid overflow-hidden @min-[48rem]:grid-cols-[minmax(0,1fr)_18rem]">
+      <Card className="grid overflow-hidden @min-[54rem]:grid-cols-[minmax(0,1fr)_18rem]">
         <figure className="min-w-0 bg-background">
           <GalleryCanvas visit={sceneVisit} onEnter={enter} onStep={(d) => move(index + d)} />
           <figcaption className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-4 py-3 sm:px-5">
@@ -110,11 +122,11 @@ export default function ModelLab() {
             </div>
             {visit && <div className="flex gap-1.5">
               <Button size="sm" variant="secondary" aria-label="위층" title="위층 (↑)" onClick={() => move(index - 1)}><ArrowUp className="size-4" /></Button>
-              <Button size="sm" variant="secondary" aria-label="아래층" title="아래층 (↓)" disabled={index === floors.length - 1} onClick={() => move(index + 1)}><ArrowDown className="size-4" /></Button>
+              <Button ref={downButton} size="sm" variant="secondary" aria-label="아래층" title="아래층 (↓)" disabled={index === floors.length - 1} onClick={() => move(index + 1)}><ArrowDown className="size-4" /></Button>
             </div>}
           </figcaption>
         </figure>
-        <div className="min-w-0 border-t border-border p-4 @min-[48rem]:border-l @min-[48rem]:border-t-0 sm:p-5">
+        <div className="min-w-0 border-t border-border p-4 @min-[54rem]:border-l @min-[54rem]:border-t-0 sm:p-5">
           {!visit ? <>
             <h2 className="mb-3 text-base font-bold text-text-main">프로바이더 입구</h2>
             <div className="grid gap-2">
@@ -130,11 +142,13 @@ export default function ModelLab() {
               })}
             </div>
           </> : <>
-            <Button variant="secondary" size="sm" onClick={exit}><ArrowLeft className="size-3.5" /> 입구로</Button>
-            <h2 className="mt-4 flex items-center gap-2 text-xl font-bold text-text-main">
-              <ModelIcon aria-hidden className="size-5" />{providers[tool].name}
-            </h2>
-            <nav aria-label="모델 층" className="my-3 grid max-h-60 gap-1 overflow-y-auto">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="flex items-center gap-2 text-xl font-bold text-text-main">
+                <ModelIcon aria-hidden className="size-5" />{providers[tool].name}
+              </h2>
+              <Button variant="secondary" size="sm" onClick={exit}><ArrowLeft className="size-3.5" /> 입구로</Button>
+            </div>
+            <nav ref={floorList} aria-label="모델 층" className="my-3 grid max-h-60 grid-cols-2 gap-1 overflow-y-auto @min-[32rem]:grid-cols-4 @min-[54rem]:grid-cols-1">
               {floors.map((f, i) => (
                 <Button key={f.key} size="sm" variant="secondary" aria-current={i === index ? "step" : undefined}
                   className={cn("h-auto min-h-9 w-full justify-start gap-3 border-0 py-2 text-left", i === index ? "bg-primary-50 text-primary-800" : "text-text-muted")}
@@ -147,13 +161,14 @@ export default function ModelLab() {
             <div className="border-t border-border pt-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-xs font-semibold text-text-muted">실행 모델</span>
-                <Badge status={available ? "success" : "draft"}>{availability}</Badge>
+                <Badge status={availability === "사용 가능" ? "success" : "draft"}>{availability}</Badge>
               </div>
               {floor.models.length > 1 ? <Select aria-label="실행 모델" className="mt-2 w-full" value={model.id} onChange={(e) => setPickedId(e.target.value)}>
                 {floor.models.map((m) => <option key={m.id} value={m.id}>{m.name} ({m.id})</option>)}
               </Select> : <p className="mt-2 break-words text-sm font-semibold text-text-main">{model?.name ?? floor.name}</p>}
               {model && <p className="mt-0.5 break-all font-mono text-xs text-text-muted">{tool} / {model.id}</p>}
-              <Button className="mt-4 w-full" disabled={!available || confirmed} onClick={confirm}>
+              {selectable && tool === "claude" && <p className="mt-2 text-xs leading-relaxed text-text-muted">Claude CLI 별칭이에요. 실제 이용 권한은 계정에 따라 달라요.</p>}
+              <Button className="mt-4 w-full" disabled={!selectable || confirmed} onClick={confirm}>
                 {confirmed && <Check className="size-4" />}{confirmed ? "선택 확정됨" : "이 모델 선택"}
               </Button>
             </div>

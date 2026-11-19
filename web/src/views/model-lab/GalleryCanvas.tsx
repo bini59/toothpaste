@@ -57,9 +57,9 @@ export function GalleryCanvas({ visit, onEnter, onStep }: {
 
   const pointer = useRef<{ id: number; x: number; y: number; lastX: number; turned: boolean } | null>(null);
   return (
-    <div className="relative overflow-hidden bg-grey-900">
+    <div className="relative aspect-[1.55] w-full max-h-[min(59dvh,38rem)] min-h-52 overflow-hidden bg-grey-900">
       <canvas ref={canvas} aria-label={visit ? "모델 전시물" : "세 프로바이더의 원형 입구 데크"} role="img"
-        className="block h-[clamp(15rem,56vw,26rem)] w-full @min-[48rem]:h-[clamp(25rem,59dvh,38rem)]"
+        className="absolute inset-0 block h-full w-full"
         style={{ touchAction: visit ? "pinch-zoom" : "pan-y pinch-zoom" }}
         onPointerDown={(e) => {
           if (!e.isPrimary || e.button !== 0) return;
