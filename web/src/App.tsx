@@ -5,7 +5,7 @@ import { fetchState, getJson, post, postJson } from "./api";
 import { CommandPalette } from "./components/CommandPalette";
 import { UsageCard } from "./components/UsageCard";
 import { ROLES, ago, deployable, indexState, milestones } from "./lib";
-import type { DeployRequest, InboxNotification, LanMe, Project, State } from "./types";
+import type { AgentUsage, DeployRequest, InboxNotification, LanMe, Project, State } from "./types";
 import { Board } from "./views/Board";
 import { ChatCompactions } from "./views/ChatCompactions";
 import { Help } from "./views/Help";
@@ -97,6 +97,8 @@ export default function App({ me }: { me: LanMe }) {
   const [tab, setTab] = useState<Tab>(readTab);
   const [sub, setSub] = useState(readSub);
   const [s, setS] = useState<State | null>(null);
+  const [usage, setUsage] = useState<AgentUsage>({});
+  const usageRequest = useRef(0);
   const [error, setError] = useState("");
   const [syncing, setSyncing] = useState(false);
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem("tp.collapsed") === "1");
@@ -111,6 +113,20 @@ export default function App({ me }: { me: LanMe }) {
   const [palette, setPalette] = useState(false);
 
   const load = useCallback(() => fetchState().then((d) => { setS(d); setError(""); }).catch((e) => setError(String(e))), []);
+  const loadUsage = useCallback(async () => {
+    const request = ++usageRequest.current;
+    const next = await getJson<AgentUsage>("/api/agents/usage").catch(() => ({}));
+    if (request === usageRequest.current) setUsage(next);
+  }, []);
+  useEffect(() => {
+    void loadUsage();
+    const id = setInterval(loadUsage, 60000);
+    window.addEventListener("focus", loadUsage);
+    return () => {
+      clearInterval(id);
+      window.removeEventListener("focus", loadUsage);
+    };
+  }, [loadUsage]);
   useEffect(() => {
     load();
     // the office room shows people walking between stages, so it polls faster
@@ -261,10 +277,9 @@ export default function App({ me }: { me: LanMe }) {
         onCollapsedChange={setCollapsed}
         mobileOpen={mobileOpen}
         onMobileClose={() => setMobileOpen(false)}
-        className="pb-20"
+        footer={<UsageCard usage={usage} collapsed={collapsed} />}
       />
       <CommandPalette open={palette} onClose={() => setPalette(false)} tabs={PALETTE_TABS} />
-      <UsageCard claude={s?.meta.claude_usage} codex={s?.meta.codex_usage} collapsed={collapsed} mobileOpen={mobileOpen} />
       {/* the office room fits the viewport height: the column is exactly one screen tall and main scrolls (only when the list is open) */}
       <div className={cn("flex min-w-0 flex-1 flex-col lg:transition-[margin] lg:duration-300", tab === "office" || chatFull ? "h-dvh" : "min-h-screen", collapsed ? "lg:ml-[72px]" : "lg:ml-[260px]")}>
         <Header
@@ -315,12 +330,12 @@ export default function App({ me }: { me: LanMe }) {
           ) : tab === "map" ? (
             <RepoMap s={s} />
           ) : tab === "settings" ? (
-            <Settings sub={sub} onChanged={() => { load(); loadProjects(); }} />
+            <Settings sub={sub} onChanged={() => { load(); loadProjects(); void loadUsage(); }} />
           ) : tab === "projects" ? (
             <Projects s={s} I={I} sub={sub} onChanged={load} actions={actions} list={projects} error={projectsError}
               onReload={loadProjects} starred={starred} onStar={onStar} />
           ) : tab === "start" ? (
-            <Start projects={projects} onChanged={() => { load(); loadProjects(); }} />
+            <Start projects={projects} onChanged={() => { load(); loadProjects(); void loadUsage(); }} />
           ) : tab === "help" ? (
             <Help />
           ) : tab === "update" ? (

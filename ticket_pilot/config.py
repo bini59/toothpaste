@@ -17,6 +17,7 @@ import copy
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -31,11 +32,12 @@ from .core import ROOT, db, event, now
 MODES = ("staging", "direct", "promote", "all")
 MERGES = ("merge", "squash")
 VERSIONS = ("npm-patch",)
-AGENTS = ("codex", "claude")
+AGENTS = ("codex", "claude", "agy")
 # reasoning effort per agent CLI: claude --effort accepts these; codex models list theirs in `codex debug models`
 # (this is the union; a catalog model only takes its own levels, see agent_models)
 AGENT_EFFORTS = {"codex": ("low", "medium", "high", "xhigh", "max", "ultra"),
-                 "claude": ("low", "medium", "high", "xhigh", "max")}
+                 "claude": ("low", "medium", "high", "xhigh", "max"),
+                 "agy": ("low", "medium", "high", "xhigh", "max")}
 AGENT_KEYS = {"tool", "model", "effort", "ultracode"}
 AGENT_ROLES = ("work", "review", "check")  # global.agents cards (runner.resolve role)
 # claude has no model list command (and tp must not use its OAuth token): the aliases `claude --model` takes
@@ -875,6 +877,9 @@ def api_state() -> dict:
 
 
 def _api_state(con) -> dict:
+    from . import antigravity
+    from .runner import agent_path
+
     doc = current(con)
     v = view(doc)
     known = {str(p["asana_gid"]): p["name"] for p in doc["project_map"]["projects"] if p.get("asana_gid")}
@@ -889,10 +894,12 @@ def _api_state(con) -> dict:
             info[n]["base_ref"] = base_ref(n) if r.get("checks") else None
         except Exception:  # noqa: BLE001
             pass
+    exe = shutil.which("agy", path=agent_path())
+    models = {**agent_models(), "agy": antigravity.account(exe)["models"] if exe else []}
     return {"config": v, "read_only": list(READ_ONLY), "modes": list(MODES),
             "merges": list(MERGES), "versions": list(VERSIONS), "agents": list(AGENTS),
             "agent_efforts": {k: list(v) for k, v in AGENT_EFFORTS.items()}, "repo_info": info,
-            "agent_models": agent_models(),
+            "agent_models": models,
             "check_runs": check_runs(con), "history": history(limit=500, con=con), "projects": known,
             "imported_at": core.meta_get(con, "config_imported"),
             "backups": {"dir": str(backup_dir()), "count": len(list(backup_dir().glob("config-*.json"))) if backup_dir().is_dir() else 0}}

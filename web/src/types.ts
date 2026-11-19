@@ -176,10 +176,6 @@ export interface State {
     rules: Record<string, Rule>;
     modes: Record<Mode, string>;
     last_diff_scan: string | null;
-    /** usage.py cache; five_hour/seven_day/fetched_at are the last successful read, error the last attempt's */
-    claude_usage: ClaudeUsage | null;
-    /** codex_usage.py cache, same shape rules: buckets/fetched_at last successful, error last attempt's */
-    codex_usage: CodexUsage | null;
     /** server.version: git describe of the checkout; update = a newer release tag tp tick saw, else null (TP-140) */
     version: { current: string; update: string | null };
   };
@@ -358,7 +354,7 @@ export interface ClaudeUsage {
   five_hour?: UsageWindow;
   seven_day?: UsageWindow;
   fetched_at?: string;
-  checked_at: string;
+  checked_at?: string;
   error: string | null;
 }
 /** codex_usage.normalize: percent left in each limit window, unix seconds reset */
@@ -376,9 +372,14 @@ export interface CodexBucket {
 export interface CodexUsage {
   buckets?: CodexBucket[];
   fetched_at?: string;
-  checked_at: string;
+  checked_at?: string;
   error: string | null;
 }
+export type AntigravityUsage = { groups?: { name: string; limits: {
+  name: string; used: number | null; remaining: number | null; reset_at: string | null;
+}[] }[]; error?: string };
+/** /api/agents/usage omits tools without an installed, authenticated CLI. */
+export type AgentUsage = { claude?: ClaudeUsage | null; codex?: CodexUsage | null; agy?: AntigravityUsage };
 
 // ---------------------------------------------------------------- 설정 page (GET /api/config, ticket_pilot/config.py)
 export interface CheckCmd {
@@ -478,11 +479,11 @@ export interface ProjectConf {
   repos: { repo: string; role: string | null; default?: boolean }[];
   [k: string]: unknown;
 }
-/** /api/agents/accounts (TP-168): claude / codex install and login; account = labels only (email, plan), never a token.
- * method: what the agents use (TP-179); saved: the credential tp holds for claude; admin: may press login / logout */
+/** /api/agents/accounts returns account labels and the current Antigravity model catalog. */
 export type AgentLoginMethod = "cli" | "oauth_token" | "api_key";
+export type AgentModel = { id: string; name: string; efforts: string[]; default_effort: string | null };
 export type AgentAccount = { installed: boolean; version: string | null; logged_in: boolean; account: string[];
-  method: AgentLoginMethod | null; saved: AgentLoginMethod | null };
+  method: AgentLoginMethod | null; saved: AgentLoginMethod | null; models?: AgentModel[]; neon_reason?: string | null };
 export type AgentAccounts = { docker: boolean; admin: boolean; tools: Record<string, AgentAccount> };
 /** /api/agents/codex/login (TP-179): codex login --device-auth; code = the one-time code shown to the owner */
 export type CodexLogin = { state: "idle" | "pending" | "done" | "failed" | "expired"; url?: string; code?: string; expires_in?: number; error?: string };
@@ -528,8 +529,7 @@ export interface ConfigState {
   versions: string[];
   agents: string[];
   agent_efforts: Record<string, string[]>;
-  /** model choices per agent tool: codex from `codex debug models`, claude aliases */
-  agent_models?: Record<string, { id: string; name: string; efforts: string[]; default_effort: string | null }[]>;
+  agent_models?: Record<string, AgentModel[]>;
   repo_info: Record<string, { path_ok: boolean; review_md: boolean; base_ref: string | null }>;
   check_runs: Record<string, TrialRun>;
   history: HistoryRow[];

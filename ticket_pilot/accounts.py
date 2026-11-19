@@ -21,7 +21,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from . import usage as U
+from . import antigravity as AGY, usage as U
 from .core import docker, secret_delete, secret_get, secret_set
 from .runner import agent_path
 
@@ -75,7 +75,7 @@ def claude_cli() -> tuple[bool, list[str]]:
     return False, []
 
 
-def codex() -> tuple[bool, list[str]]:
+def codex(exe: str | None = None) -> tuple[bool, list[str]]:
     auth = _json(Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "auth.json")
     tokens = auth.get("tokens") if isinstance(auth.get("tokens"), dict) else {}
     if tokens.get("id_token") or tokens.get("access_token"):
@@ -84,6 +84,14 @@ def codex() -> tuple[bool, list[str]]:
         return True, [x for x in (c.get("email"), plan and f"ChatGPT {plan}") if x]
     if auth.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY"):
         return True, ["API 키"]
+    if exe:  # Codex also supports credentials stored only in the OS keyring.
+        try:
+            p = subprocess.run([exe, "login", "status"], capture_output=True, text=True, timeout=5)
+            status = (p.stdout + p.stderr).lower()
+            if p.returncode == 0 and "logged in using" in status:
+                return True, ["API 키"] if "api key" in status else []
+        except (OSError, subprocess.TimeoutExpired):
+            pass
     return False, []
 
 
@@ -92,17 +100,20 @@ def claude_saved() -> str | None:
     return next((k for k in (OAUTH, API_KEY) if secret_get(CLAUDE_SVC, k)), None)
 
 
-def detect() -> dict:
-    """{docker, tools: {claude|codex: {installed, version, logged_in, account: [labels], method, saved}}}.
-    method: what the agents use (cli | oauth_token | api_key | None); saved: tp's stored claude credential."""
+def detect(*, versions: bool = True) -> dict:
+    """Installed tools and their active credentials, shared by settings and the sidebar."""
     out = {}
     for tool in ("claude", "codex"):
         exe = shutil.which(tool, path=agent_path())
-        ok, acct = (claude_cli() if tool == "claude" else codex()) if exe else (False, [])
+        ok, acct = (claude_cli() if tool == "claude" else codex(exe)) if exe else (False, [])
         saved = claude_saved() if tool == "claude" else None
         method = "cli" if ok else saved if exe else None
-        out[tool] = {"installed": bool(exe), "version": _version(exe) if exe else None, "logged_in": bool(method),
+        out[tool] = {"installed": bool(exe), "version": _version(exe) if exe and versions else None, "logged_in": bool(method),
                      "account": acct, "method": method, "saved": saved}
+    exe = shutil.which("agy", path=agent_path())
+    agy = AGY.account(exe) if exe else {"method": None, "saved": None, "account": [], "models": [], "neon_reason": None}
+    out["agy"] = {**agy, "installed": bool(exe), "logged_in": bool(agy["method"]),
+                  "version": _version(exe) if exe and versions else None}
     return {"docker": docker(), "tools": out}
 
 
@@ -119,7 +130,7 @@ def agent_env(tool: str) -> dict:
 # One login per tool at a time, in memory (shortcut: a dashboard restart drops it, press 로그인 again). The CLI runs in
 # its own session (start_new_session) so cancel / expiry kill its whole process group. Codes, tokens and keys stay in
 # this process: never in a response, log, event or a command line (the CLI reads them from its stdin).
-_locks = {"claude": threading.Lock(), "codex": threading.Lock()}
+_locks = {tool: threading.Lock() for tool in ("claude", "codex", "agy")}
 _logins: dict[str, dict] = {}
 ANSI = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?<>=]*[ -/]*[@-~]|\x1b[()][0-9A-Za-z]|\x1b[78=>]")
 OSC8 = re.compile(r"\x1b\]8;[^;\x07]*;(https://[^\x07\x1b]+)")
@@ -316,6 +327,67 @@ def claude_code(code) -> str:
     return OAUTH
 
 
+GOOGLE_OAUTH_URL = re.compile(r"https://accounts\.google\.com/o/oauth2/(?:v2/)?auth\?[^\s\x1b]+")
+
+
+def agy_start() -> dict:
+    """Open the CLI's manual Google OAuth flow through the non-generating /model command."""
+    with _locks["agy"]:
+        if AGY.credentials()[0]:
+            raise RuntimeError("Gemini API 키 연결을 해제한 뒤 Google 계정으로 로그인하세요")
+        s = _pending("agy")
+        if not s:
+            _stop("agy")
+            master, slave = os.openpty()
+            try:
+                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 4000, 0, 0))
+                p = subprocess.Popen([_exe("agy"), *AGY.GOOGLE_SETTINGS, "-p", "/model"],
+                                     stdin=slave, stdout=slave, stderr=slave, start_new_session=True,
+                                     env={**_env(), "TERM": "xterm-256color"})
+            except BaseException:
+                os.close(master)
+                raise
+            finally:
+                os.close(slave)
+            s = _logins["agy"] = {"p": p, "fd": master, "out": "", "exp": time.time() + 60}
+            threading.Thread(target=_read, args=(s, master), daemon=True).start()
+            match = _wait(s, lambda out: GOOGLE_OAUTH_URL.search(ANSI.sub("", out)), START_WAIT_S)
+            if not match:
+                _stop("agy")
+                if AGY.account(_exe("agy"))["method"] == "cli":
+                    return {"state": "done"}
+                raise RuntimeError("Google 로그인 주소를 받지 못했어요. 터미널에서 agy를 실행해 로그인할 수 있어요")
+            s["url"] = match.group()
+        return {"state": "pending", "url": s["url"]}
+
+
+def agy_code(code) -> None:
+    code = code.strip() if isinstance(code, str) else ""
+    if not re.fullmatch(r"[A-Za-z0-9_./+=~-]{8,2048}", code):
+        raise RuntimeError("Google 로그인 코드를 그대로 붙여넣으세요")
+    with _locks["agy"]:
+        s = _pending("agy")
+        if not s:
+            _stop("agy")
+            raise RuntimeError("로그인 세션이 만료됐어요. 다시 로그인해 주세요")
+        try:
+            os.write(s["fd"], code.encode() + b"\r")
+            s["p"].wait(timeout=CODE_WAIT_S)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        finally:
+            _stop("agy")
+        if AGY.account(_exe("agy"))["method"] != "cli":
+            raise RuntimeError("Google 로그인을 확인하지 못했어요. 새 코드를 받아 다시 로그인해 주세요")
+
+
+def agy_save_key(key) -> None:
+    with _locks["agy"]:
+        _exe("agy")
+        AGY.save_key(key)
+        _stop("agy")
+
+
 def cancel(tool: str):
     with _locks[tool]:
         _stop(tool)
@@ -359,11 +431,17 @@ def claude_api_key(key) -> str:
 
 
 def logout(tool: str):
-    """codex: `codex logout`. claude: only tp's stored token / key; the CLI's own login is left alone."""
+    """Disconnect the tool's dashboard credential, or run codex logout for a Codex CLI account."""
+    if tool == "agy":
+        with _locks["agy"]:
+            _stop("agy")
+            secret_delete(AGY.SERVICE, AGY.API_KEY)
+        return
     cancel(tool)
     if tool == "codex":
-        p = subprocess.run([_exe("codex"), "logout"], capture_output=True, text=True, timeout=30, env=_env())
-        if p.returncode != 0 and codex()[0]:
+        exe = _exe("codex")
+        p = subprocess.run([exe, "logout"], capture_output=True, text=True, timeout=30, env=_env())
+        if p.returncode != 0 and codex(exe)[0]:
             raise RuntimeError(f"codex logout이 실패했어요: {_tail(p.stdout + p.stderr)}")
     else:
         for k in (OAUTH, API_KEY):

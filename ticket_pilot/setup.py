@@ -67,8 +67,9 @@ def precheck(which=shutil.which, run=subprocess.run, system=platform.system,
                     + " (https://cli.github.com)")
     elif run(["gh", "auth", "status"], capture_output=True, text=True).returncode:
         miss.append("gh 로그인: gh auth login")
-    if not (which("claude", path=path) or which("codex", path=path)):
-        miss.append("claude나 codex 중 하나: npm i -g @anthropic-ai/claude-code 또는 npm i -g @openai/codex")
+    if not any(which(tool, path=path) for tool in G.AGENTS):
+        miss.append("claude, codex, agy 중 하나: npm i -g @anthropic-ai/claude-code, npm i -g @openai/codex, "
+                    "또는 https://antigravity.google/docs/getting-started/")
     return miss, warn
 
 

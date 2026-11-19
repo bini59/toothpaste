@@ -6,6 +6,7 @@ import json
 import mimetypes
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -17,6 +18,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote
 
+from . import accounts as A
+from . import antigravity as AGY
 from . import deploy as D
 from . import docker_update as DU
 from . import chat as CH
@@ -43,6 +46,28 @@ from .core import (DATA, DOCKER_OFF, GITHUB_KEYCHAIN, ROOT, AsanaError, asana_to
 _sync_lock = threading.Lock()
 _check_lock = threading.Lock()
 MAX_BODY = 64 * 1024 * 1024
+
+
+def agent_usage() -> dict:
+    """Use the same current authentication check as 활성 계정 before reading any cached quota."""
+    accounts = A.detect(versions=False)["tools"]
+    out = {}
+    if accounts["agy"]["logged_in"]:
+        exe = shutil.which("agy", path=runner.agent_path())
+        if exe:
+            out["agy"] = AGY.usage(exe, accounts["agy"]["method"])
+    con = db()
+    try:
+        if accounts["claude"]["logged_in"]:
+            supported = accounts["claude"]["method"] == "cli" and not any(
+                label.startswith(("API 키", "토큰", "Amazon Bedrock", "Google Vertex AI"))
+                for label in accounts["claude"]["account"])
+            out["claude"] = U.cached(con) if supported else {"error": "unsupported_auth"}
+        if accounts["codex"]["logged_in"]:
+            out["codex"] = {"error": "unsupported_auth"} if "API 키" in accounts["codex"]["account"] else CU.cached(con)
+    finally:
+        con.close()
+    return out
 
 
 def state() -> dict:
@@ -84,7 +109,7 @@ def _state(con) -> dict:
                  "release_hold": bool(meta_get(con, "release_hold", False)),
                  "next_release_at": R.next_release_at().isoformat(),
                  "rules": rules, "modes": D.MODES, "last_diff_scan": meta_get(con, "last_diff_scan"),
-                 "claude_usage": U.cached(con), "codex_usage": CU.cached(con), "version": version(con)},
+                 "version": version(con)},
         "staging_diffs": rows("SELECT * FROM staging_diffs ORDER BY repo"),
         "tickets": tickets,
         "runs": rows("SELECT id,ticket_gid,repo,worktree_name,worktree_path,branch,terminal,ws_status,ws_comment,state,origin,created_at,updated_at FROM runs"),
@@ -460,7 +485,7 @@ class Forbidden(Exception):
 LAN_PUBLIC = ("/api/lan/me", "/api/lan/login", "/api/lan/login/poll")
 
 
-AGENT_LOGIN_PATH = re.compile(r"/api/agents/(claude|codex)/(login|login/code|login/cancel|token|apikey|logout)")
+AGENT_LOGIN_PATH = re.compile(r"/api/agents/(claude|codex|agy)/(login|login/code|login/cancel|token|apikey|logout)")
 AGENT_LOGIN_403 = "에이전트 로그인은 이 컴퓨터(127.0.0.1)에서만 할 수 있어요 (Docker 모드: TP_ADMINS의 사람만)"
 
 
@@ -575,12 +600,13 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/api/github/status":
             return self._send(200, github_status())
         if self.path == "/api/agents/accounts":
-            from . import accounts
-            d = accounts.detect()
+            d = A.detect()
             if not self.admin:  # LAN visitors: no owner email / plan
                 for v in d["tools"].values():
                     v["account"] = []
             return self._send(200, {**d, "admin": self.admin})
+        if self.path == "/api/agents/usage":
+            return self._send(200, agent_usage())
         if self.path == "/api/agents/codex/login":  # TP-179: shows the one-time code, so admins only
             if not self.admin:
                 return self._send(403, {"error": AGENT_LOGIN_403})
@@ -745,7 +771,6 @@ class H(BaseHTTPRequestHandler):
     def _agent_login(self, tool: str, act: str, body: dict):
         """TP-179 에이전트 로그인 buttons: 127.0.0.1 only (Docker mode: TP_ADMINS). Codes, tokens and keys only go
         into accounts.py; the event says who logged which tool in or out, nothing else."""
-        from . import accounts as A
         if not self.admin:
             return self._send(403, {"error": AGENT_LOGIN_403})
         try:
@@ -753,10 +778,16 @@ class H(BaseHTTPRequestHandler):
                 A.cancel(tool)
                 return self._send(200, {"ok": True})
             if act == "login":
-                return self._send(200, A.codex_start() if tool == "codex" else A.claude_start())
+                return self._send(200, {"codex": A.codex_start, "claude": A.claude_start, "agy": A.agy_start}[tool]())
             if act == "logout":
                 A.logout(tool)
                 msg = f"{tool} 로그아웃" + (" (tp에 저장한 토큰·키만 지움)" if tool == "claude" else "")
+            elif tool == "agy" and act in ("login/code", "apikey"):
+                if act == "login/code":
+                    A.agy_code(body.get("code"))
+                else:
+                    A.agy_save_key(body.get("key"))
+                msg = f"agy 로그인 ({'API 키' if act == 'apikey' else 'Google 계정'})"
             elif tool != "claude":
                 return self._send(404, {"error": "not found"})
             else:

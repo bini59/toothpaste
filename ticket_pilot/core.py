@@ -526,7 +526,7 @@ CREATE TABLE IF NOT EXISTS releases (
   finished_at TEXT
 );
 -- chat.py (프로젝트 page 채팅): the owner's conversations with a headless agent in a repo's checkout. session = the
--- codex thread / claude session the next turn resumes; tool = the agent it belongs to (a tool change starts over).
+-- conversation ID the next turn resumes; tool = the agent it belongs to (a tool change starts over).
 -- project_id (TP-91, added by _migrate) = the project it belongs to; repo = the checkout its session runs in
 CREATE TABLE IF NOT EXISTS chat_conversations (
   id TEXT PRIMARY KEY, repo TEXT, title TEXT, session TEXT, tool TEXT, created_at TEXT, updated_at TEXT

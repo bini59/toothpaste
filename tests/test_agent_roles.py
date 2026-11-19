@@ -133,7 +133,8 @@ class AccountsTest(unittest.TestCase):
         d = self.detect([{"accessToken": "SECRET-C", "subscriptionType": "max"}])
         self.assertEqual(d["tools"]["claude"]["account"], ["a@x.test", "Org", "max 플랜"])
         self.assertEqual(d["tools"]["codex"]["account"], ["b@x.test", "ChatGPT pro"])
-        self.assertTrue(all(t["logged_in"] and t["method"] == "cli" for t in d["tools"].values()))
+        self.assertEqual({tool for tool, t in d["tools"].items() if t["logged_in"] and t["method"] == "cli"},
+                         {"claude", "codex"})
         self.assertNotIn("SECRET", json.dumps(d))
 
     def test_docker_flag(self):

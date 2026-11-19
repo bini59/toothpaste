@@ -30,7 +30,7 @@ export function Start({ projects, onChanged }: { projects: Project[] | null; onC
   const steps: [string, string, boolean | null][] = [
     ["asana", "Asana 연결", asana],
     ["github", "GitHub 연결", github],
-    // TP-179: logged in from the 활성 계정 card (Docker, Linux, macOS alike); one of claude / codex is enough
+    // TP-179: logged in from the 활성 계정 card (Docker, Linux, macOS alike); one connected agent is enough
     ["agents", "에이전트 로그인", agents ? Object.values(agents.tools).some((t) => t.logged_in) : agentErr ? false : null],
     ["name", "사용자 이름", g ? named : null],
     ["project", "첫 프로젝트 추가", projects ? projects.length > 0 : null],
@@ -73,7 +73,7 @@ export function Start({ projects, onChanged }: { projects: Project[] | null; onC
       </Card>
       <div id="start-asana"><AsanaConnect onStatus={setAsana} /></div>
       <div id="start-github"><GitHubConnect onStatus={setGithub} /></div>
-      <div id="start-agents"><Accounts a={agents} error={agentErr} onRefresh={loadAgents} /></div>
+      <div id="start-agents"><Accounts a={agents} error={agentErr} onRefresh={() => { loadAgents(); onChanged(); }} /></div>
       <div id="start-name">
         <Section title="사용자 이름" desc="에이전트가 질문하거나 보고할 때 이 이름으로 불러요.">
           <Row label="이름">
