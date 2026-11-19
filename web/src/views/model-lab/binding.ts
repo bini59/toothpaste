@@ -273,8 +273,10 @@ export function hardback(
       paper = T.MathUtils.smoothstep(progress, 0.27, 1);
     hinge.rotation.y = -board * (Math.PI - 0.028);
     turning.set(paper);
-    leaf.visible = progress > 0.01;
-    right.visible = progress > 0.02;
+    // The boards press both sheets flat until the lid has cleared their natural arch.
+    const release = T.MathUtils.smoothstep(progress, 0.13, 0.55);
+    leaf.scale.z = right.scale.z = 0.14 + 0.86 * release;
+    leaf.visible = right.visible = progress > 0.08;
     // Once fully open, the illustrated verso sits just above the board at the left of the gutter.
     leaf.position.z = half + 0.017 + 0.1 * paper;
     hit.visible = progress > 0.98;

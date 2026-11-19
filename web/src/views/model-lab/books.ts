@@ -279,7 +279,16 @@ export function bookcase(
       align = smooth(approach, 0.12, 0.83);
     const readingZ = 5.04;
     const edition = editions.get(key)!;
-    const landingY = -1.87 + (edition.thickness / 2 + 0.034) * edition.height;
+    const standing = (coverHeight * edition.height) / 2;
+    const resting = (edition.thickness / 2 + 0.034) * edition.height;
+    const landingY = -1.87 + resting;
+    const tilt = (lower * Math.PI) / 2;
+    // Rotate above the ledge: the lowest corner sweeps a larger arc than the book's centre.
+    const clearance =
+      standing * Math.cos(tilt) +
+      resting * Math.sin(tilt) +
+      0.23 * Math.sin(Math.PI * lower) -
+      mix(standing, resting, lower);
     // Track the solid book from its back to its gutter. The book keeps its size against its neighbours.
     const track = smooth(progress, 0.24, 0.86);
     const magnification = mix(1, readingScale / edition.height, track);
@@ -287,7 +296,7 @@ export function bookcase(
     rig.rotation.set(lower * mix(1.13, Math.PI / 2, align), 0.056 * (1 - lower), 0, "XYZ");
     const x = turn * (1 - opening) * coverWidth * edition.height * 0.36 - 0.1 * lower;
     const z = 0.14 + 1.86 * pull + (readingZ - 2) * turn;
-    pivot.set(x, (landingY + 0.46 / magnification) * lower, z * track).applyEuler(rig.rotation);
+    pivot.set(x, (landingY + 0.46 / magnification) * lower + clearance * track, z * track).applyEuler(rig.rotation);
     rig.position.copy(pivot).multiplyScalar(-magnification);
     rig.position.z += mix(0, 1.6, track);
     for (const [k, e] of editions) {
@@ -299,7 +308,8 @@ export function bookcase(
       const spineYaw = T.MathUtils.degToRad([81, 84, 79, 80][e.slot]);
       book.root.position.set(
         mix(slotX[e.slot], -0.1, t),
-        mix(-1.87 + (coverHeight * e.height) / 2, landingY, down) + 0.27 * (selected ? Math.sin(Math.PI * pull) : 0),
+        mix(-1.87 + (coverHeight * e.height) / 2, landingY, down) +
+          (selected ? clearance + 0.27 * Math.sin(Math.PI * pull) : 0),
         0.14 + (selected ? 1.86 * pull + (readingZ - 2) * turn : 0)
       );
       book.root.scale.setScalar(e.height);
