@@ -146,6 +146,16 @@ class AccountsTest(unittest.TestCase):
             d = self.detect()
         self.assertTrue(d["docker"])
 
+    def test_current_cli_status_overrides_leftover_credentials(self):
+        self.fake("claude")
+        self.fake("codex")
+        (self.bin / "claude").write_text('#!/bin/sh\nprintf \'{"loggedIn": false}\\n\'\nexit 1\n')
+        (self.bin / "codex").write_text('#!/bin/sh\necho "Error checking login status: invalid credential JSON" >&2\nexit 1\n')
+        (self.home / ".codex" / "auth.json").write_text('{"tokens":{"access_token":"stale"}}')
+        tools = self.detect([{"accessToken": "stale", "expiresAt": 1}])["tools"]
+        self.assertFalse(tools["claude"]["logged_in"])
+        self.assertFalse(tools["codex"]["logged_in"])
+
 
 if __name__ == "__main__":
     unittest.main()

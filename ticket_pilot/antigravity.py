@@ -112,9 +112,10 @@ def account(exe: str) -> dict:
             out.update(method=API_KEY, account=["Gemini API"])
         elif models:
             out.update(method="cli", account=["Google 계정"])
+        elif not key and "please sign in" in (proc.stdout + proc.stderr).lower():
+            out["neon_reason"] = "Google 계정에 로그인하거나 Gemini API 키를 연결하세요."
         else:
-            out["neon_reason"] = ("Antigravity에서 Gemini API 연결을 확인하지 못했어요." if key else
-                                  "Google 계정에 로그인하거나 Gemini API 키를 연결하세요.")
+            out["neon_reason"] = "Antigravity 계정 또는 모델 목록을 확인하지 못했어요."
     except (OSError, ValueError, TypeError, AttributeError, KeyError, subprocess.TimeoutExpired):
         out["neon_reason"] = "계정 또는 모델 목록을 확인하지 못했어요."
         return out

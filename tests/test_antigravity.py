@@ -37,6 +37,7 @@ if args == ["--version"]:
     print("1.5.12")
 elif args[-1] == "models":
     if not (login.exists() or os.environ.get("GEMINI_API_KEY")):
+        print("Please sign in to view available models", file=sys.stderr)
         sys.exit(1)
     if os.environ.get("GEMINI_API_KEY"):
         assert any("modelProvider" in a for a in args)

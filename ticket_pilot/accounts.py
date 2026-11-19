@@ -1,8 +1,7 @@
-"""활성 계정 (TP-168, 설정 > 에이전트): is claude / codex installed, which version, logged in, as whom; and the
-dashboard's login buttons (TP-179): codex Device Flow, claude setup-token / pasted token / API key.
+"""활성 계정 (설정 > 에이전트): CLI installation, current account and dashboard sign-in.
 
-Reads what the CLIs leave on disk (and Claude's keychain entry via usage._creds, the sidebar usage bar's source);
-only account labels (email, plan) leave this module, never a token, code or key. GET /api/agents/accounts."""
+Checks CLI login status and reads local account labels for GET /api/agents/accounts.
+Login URLs and one-time codes are scoped to the dashboard's login endpoints."""
 from __future__ import annotations
 
 import base64
@@ -57,8 +56,25 @@ def _jwt_claims(tok) -> dict:
     return j if isinstance(j, dict) else {}
 
 
-def claude_cli() -> tuple[bool, list[str]]:
+def claude_cli(exe: str | None = None) -> tuple[bool, list[str]]:
     """The CLI's own login (~/.claude, keychain, env), without tp's stored token."""
+    report = {}
+    if exe:
+        try:
+            proc = subprocess.run([exe, "auth", "status", "--json"], stdin=subprocess.DEVNULL,
+                                  capture_output=True, text=True, timeout=5)
+            value = json.loads(proc.stdout)
+            report = value if isinstance(value, dict) else {}
+        except (OSError, subprocess.TimeoutExpired):
+            return False, []
+        except ValueError:
+            pass  # older CLI, fall back to its local credential files
+    if report.get("loggedIn") is False:
+        return False, []
+    if report.get("authMethod") == "api_key":
+        return True, ["API 키"]
+    if report.get("authMethod") == "oauth_token" and os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        return True, ["토큰 (CLAUDE_CODE_OAUTH_TOKEN)"]
     cfg = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
     creds = U._creds() or [c for c in [_json(cfg / ".credentials.json").get("claudeAiOauth")] if isinstance(c, dict) and c.get("accessToken")]
     if creds:
@@ -72,27 +88,34 @@ def claude_cli() -> tuple[bool, list[str]]:
     for k, label in (("CLAUDE_CODE_USE_BEDROCK", "Amazon Bedrock"), ("CLAUDE_CODE_USE_VERTEX", "Google Vertex AI")):
         if os.environ.get(k) not in (None, "", "0"):
             return True, [label]
-    return False, []
+    return report.get("loggedIn") is True, []
 
 
 def codex(exe: str | None = None) -> tuple[bool, list[str]]:
+    signed_in = False
+    if exe:
+        try:
+            p = subprocess.run([exe, "login", "status"], stdin=subprocess.DEVNULL,
+                               capture_output=True, text=True, timeout=5)
+            status = (p.stdout + p.stderr).lower()
+            if "error checking login status" in status:
+                return False, []
+            if "not logged in" in status:
+                return (True, ["API 키"]) if os.environ.get("OPENAI_API_KEY") else (False, [])
+            signed_in = p.returncode == 0 and "logged in using" in status
+            if signed_in and "api key" in status:
+                return True, ["API 키"]
+        except (OSError, subprocess.TimeoutExpired):
+            return False, []
     auth = _json(Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "auth.json")
     tokens = auth.get("tokens") if isinstance(auth.get("tokens"), dict) else {}
     if tokens.get("id_token") or tokens.get("access_token"):
         c = _jwt_claims(tokens.get("id_token"))
         plan = (c.get("https://api.openai.com/auth") or {}).get("chatgpt_plan_type")
         return True, [x for x in (c.get("email"), plan and f"ChatGPT {plan}") if x]
-    if auth.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY"):
+    if not signed_in and (auth.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")):
         return True, ["API 키"]
-    if exe:  # Codex also supports credentials stored only in the OS keyring.
-        try:
-            p = subprocess.run([exe, "login", "status"], capture_output=True, text=True, timeout=5)
-            status = (p.stdout + p.stderr).lower()
-            if p.returncode == 0 and "logged in using" in status:
-                return True, ["API 키"] if "api key" in status else []
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-    return False, []
+    return signed_in, []
 
 
 def claude_saved() -> str | None:
@@ -105,7 +128,7 @@ def detect(*, versions: bool = True) -> dict:
     out = {}
     for tool in ("claude", "codex"):
         exe = shutil.which(tool, path=agent_path())
-        ok, acct = (claude_cli() if tool == "claude" else codex(exe)) if exe else (False, [])
+        ok, acct = (claude_cli(exe) if tool == "claude" else codex(exe)) if exe else (False, [])
         saved = claude_saved() if tool == "claude" else None
         method = "cli" if ok else saved if exe else None
         out[tool] = {"installed": bool(exe), "version": _version(exe) if exe and versions else None, "logged_in": bool(method),
@@ -121,7 +144,7 @@ def agent_env(tool: str) -> dict:
     """Env runner.launch adds for an agent (ticket, chat, automation): tp's stored Claude token or API key, only when
     the CLI has no login of its own (an existing install keeps working exactly as before). Codex: nothing."""
     saved = claude_saved() if tool == "claude" else None  # first: no keychain read of Claude's login without one
-    if not saved or claude_cli()[0]:
+    if not saved or claude_cli(shutil.which("claude", path=agent_path()))[0]:
         return {}
     return {ENV[saved]: secret_get(CLAUDE_SVC, saved)}
 
