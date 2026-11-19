@@ -1,4 +1,13 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  Component,
+  type ComponentPropsWithoutRef,
+  type RefObject,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   ArrowDown,
   ArrowLeft,
@@ -48,6 +57,29 @@ const captions: Record<string, string> = {
   Astra: "태양계가 속한 우리은하",
 };
 
+type LabRegionProps = ComponentPropsWithoutRef<"section"> & { regionRef: RefObject<HTMLElement | null> };
+
+class LabRegion extends Component<LabRegionProps> {
+  // Capture focus before React removes or disables the active control.
+  getSnapshotBeforeUpdate() {
+    return this.props.regionRef.current?.contains(document.activeElement) ?? false;
+  }
+
+  componentDidUpdate(_prevProps: LabRegionProps, _prevState: unknown, hadFocus: boolean) {
+    const region = this.props.regionRef.current;
+    const active = document.activeElement;
+    if (hadFocus && region && (active === document.body || active?.matches(":disabled"))) {
+      const currentModel = region.querySelector<HTMLButtonElement>('[aria-current="step"]');
+      (currentModel ?? region).focus({ preventScroll: true });
+    }
+  }
+
+  render() {
+    const { regionRef, ...props } = this.props;
+    return <section ref={regionRef} {...props} />;
+  }
+}
+
 export default function ModelLab() {
   const [visit, setVisit] = useState<Visit | null>(null);
   const [catalog, setCatalog] = useState<ConfigState["agent_models"]>();
@@ -67,7 +99,6 @@ export default function ModelLab() {
   const [storageError, setStorageError] = useState(false);
   const region = useRef<HTMLElement>(null),
     list = useRef<HTMLElement>(null),
-    nextButton = useRef<HTMLButtonElement>(null),
     startButton = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     let active = true;
@@ -163,8 +194,6 @@ export default function ModelLab() {
     );
   }
   function step(direction: number) {
-    // A step can disable the button that triggered it. Keep arrow keys in the lab on arrival.
-    if (document.activeElement === nextButton.current) region.current?.focus({ preventScroll: true });
     if (!visit) {
       if (direction > 0) zoom();
       return;
@@ -199,8 +228,8 @@ export default function ModelLab() {
   }
 
   return (
-    <section
-      ref={region}
+    <LabRegion
+      regionRef={region}
       tabIndex={-1}
       aria-label="모델 선택 실험실"
       className="@container mx-auto max-w-[94rem] outline-none"
@@ -265,7 +294,6 @@ export default function ModelLab() {
                 <Button
                   size="sm"
                   variant="secondary"
-                  ref={nextButton}
                   aria-label="다음 모델 또는 장면"
                   disabled={index === floors.length - 1 && tool === "agy"}
                   onClick={() => step(1)}
@@ -426,6 +454,6 @@ export default function ModelLab() {
           휠·세로 스와이프 또는 ↑ ↓로 이동 · 좌우 드래그로 회전 · Esc로 이전 장면
         </p>
       )}
-    </section>
+    </LabRegion>
   );
 }
