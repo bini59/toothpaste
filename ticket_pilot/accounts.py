@@ -56,7 +56,7 @@ def _jwt_claims(tok) -> dict:
     return j if isinstance(j, dict) else {}
 
 
-def claude_cli(exe: str | None = None) -> tuple[bool, list[str]]:
+def claude_cli(exe: str | None = None, *, fallback_on_probe_failure: bool = False) -> tuple[bool, list[str]]:
     """The CLI's own login (~/.claude, keychain, env), without tp's stored token."""
     report = {}
     if exe:
@@ -66,7 +66,8 @@ def claude_cli(exe: str | None = None) -> tuple[bool, list[str]]:
             value = json.loads(proc.stdout)
             report = value if isinstance(value, dict) else {}
         except (OSError, subprocess.TimeoutExpired):
-            return False, []
+            if not fallback_on_probe_failure:
+                return False, []
         except ValueError:
             pass  # older CLI, fall back to its local credential files
     if report.get("loggedIn") is False:
@@ -144,7 +145,8 @@ def agent_env(tool: str) -> dict:
     """Env runner.launch adds for an agent (ticket, chat, automation): tp's stored Claude token or API key, only when
     the CLI has no login of its own (an existing install keeps working exactly as before). Codex: nothing."""
     saved = claude_saved() if tool == "claude" else None  # first: no keychain read of Claude's login without one
-    if not saved or claude_cli(shutil.which("claude", path=agent_path()))[0]:
+    # A failed status probe does not override the user's local credentials when launching Claude.
+    if not saved or claude_cli(shutil.which("claude", path=agent_path()), fallback_on_probe_failure=True)[0]:
         return {}
     return {ENV[saved]: secret_get(CLAUDE_SVC, saved)}
 

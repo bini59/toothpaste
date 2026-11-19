@@ -5,6 +5,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -178,6 +179,20 @@ class AgentEnvTest(Base):
         with mock.patch.object(A.urllib.request, "urlopen"):
             A.claude_api_key(KEY)
         self.assertEqual(A.agent_env("claude"), {"ANTHROPIC_API_KEY": KEY})
+
+    def test_failed_status_probe_preserves_local_login_but_logout_uses_saved_key(self):
+        core.secret_set(A.CLAUDE_SVC, A.API_KEY, KEY)
+        cfg = A.Path.home() / ".claude"
+        cfg.mkdir(parents=True)
+        (cfg / ".credentials.json").write_text('{"claudeAiOauth":{"accessToken":"local-token"}}')
+        exe = str(self.bin / "claude")
+        for error in (subprocess.TimeoutExpired(exe, 5), OSError("unable to run Claude")):
+            with self.subTest(error=error), mock.patch.object(A.subprocess, "run", side_effect=error):
+                self.assertEqual(A.claude_cli(exe), (False, []))
+                self.assertEqual(A.agent_env("claude"), {})
+        status = subprocess.CompletedProcess([exe], 1, stdout='{"loggedIn":false}', stderr="")
+        with mock.patch.object(A.subprocess, "run", return_value=status):
+            self.assertEqual(A.agent_env("claude"), {"ANTHROPIC_API_KEY": KEY})
 
     def test_launch_passes_it_and_dev_servers_drop_it(self):
         A.claude_token(TOKEN)

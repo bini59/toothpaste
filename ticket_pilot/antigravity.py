@@ -183,10 +183,14 @@ def usage(exe: str, method: str) -> dict:
     return {"error": "unavailable"}
 
 
-def run_turn(log: str, cmd: list[str]) -> int:
+def run_turn(log: str, cmd: list[str], *, saved_key: str | None = None) -> int:
     """Adapt one stdin prompt to agy's streaming protocol and publish its final response and conversation ID."""
     request = {"event": "user", "message": {"content": sys.stdin.read()}}
-    with subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding="utf-8") as proc:
+    env = None
+    if saved_key:
+        cmd = [cmd[0], *SETTINGS, *cmd[1:]]
+        env = {**os.environ, "GEMINI_API_KEY": saved_key}
+    with subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding="utf-8", env=env) as proc:
         try:
             proc.stdin.write(json.dumps(request) + "\n")
             proc.stdin.flush()
@@ -219,4 +223,11 @@ def run_turn(log: str, cmd: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(run_turn(sys.argv[1], sys.argv[2:]))
+    # The runner starts this adapter after worktree setup. Read the saved key here so only agy receives it.
+    # With Python -I, import the host checkout's secret store and retain the PATH selected by the runner.
+    agent_path = os.environ["PATH"]
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from ticket_pilot.core import secret_get
+
+    os.environ["PATH"] = agent_path
+    sys.exit(run_turn(sys.argv[1], sys.argv[2:], saved_key=secret_get(SERVICE, API_KEY)))

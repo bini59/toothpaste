@@ -257,18 +257,13 @@ def launch(cwd: str, prompt: str, tag: str, setup: str | None = None, repo_path:
     if a["tool"] == "claude":
         a["session"] = resume or str(uuid.uuid4())
     cmd = command(a, log)
-    key = None
-    if a["tool"] == "agy":
-        key, saved = antigravity.credentials()
-        if saved:
-            cmd[1:1] = antigravity.SETTINGS
     meta = {"agent": a["tool"], "model": a["model"], "effort": a["effort"], "ultracode": a["ultracode"],
             "session": a.get("session") or resume, "cmd": cmd, "cwd": cwd, "started": time.time()}
     Path(f"{log}.json").write_text(json.dumps(meta))
     if compact:
         cmd = [sys.executable, chat_usage.__file__, str(log), *cmd]
     elif a["tool"] == "agy":
-        cmd = [sys.executable, antigravity.__file__, str(log), *cmd]
+        cmd = [sys.executable, "-I", antigravity.__file__, str(log), *cmd]
     script = ('if [ -n "$TP_SETUP" ]; then echo "--- worktree setup"; sh -c "$TP_SETUP" < /dev/null '
               '|| echo "--- worktree setup failed ($?), starting the agent anyway"; echo "--- agent"; fi; '
               '"$@" < "$TP_PROMPT"; echo $? > "$TP_EXIT"')
@@ -279,8 +274,6 @@ def launch(cwd: str, prompt: str, tag: str, setup: str | None = None, repo_path:
                   "PATH": agent_path(), "TP_AGENT": tag}, required=False)
     from .accounts import agent_env  # accounts imports this module
     env.update(agent_env(a["tool"]))  # tp's Claude token / API key, only without the CLI's own login (TP-179)
-    if key:
-        env["GEMINI_API_KEY"] = key
     if repo_path:
         for k in ("TP_ROOT_PATH", "ORCA_ROOT_PATH"):
             env[k] = repo_path

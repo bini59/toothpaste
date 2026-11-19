@@ -57,6 +57,9 @@ else:
     assert "--input-format" in args and "--output-format" in args
     assert args[args.index("--model") + 1] == "gemini-4-neon-high"
     text = json.loads(sys.stdin.readline())["message"]["content"]
+    if text == "check saved key":
+        assert os.environ.get("GEMINI_API_KEY") == KEY_FIXTURE
+        assert json.loads(args[args.index("--settings") + 1])["modelProvider"] == "gemini"
     if text == "fail":
         print(json.dumps({"event": "result", "result": {"status": "ERROR", "error": "model unavailable"}}))
         sys.exit(0)
@@ -69,6 +72,16 @@ else:
     print("non-interactive CLI diagnostic", file=sys.stderr)
     print(json.dumps({"event": "result", "result": result}))
 """
+FAKE_SECURITY = """
+import json, os, pathlib, sys
+store = pathlib.Path(os.environ["TP_SECRETS_FILE"])
+if sys.argv[1:] == ["find-generic-password", "-s", "ticket-pilot-antigravity", "-a", "api_key", "-w"] and store.exists():
+    key = json.loads(store.read_text()).get("ticket-pilot-antigravity", {}).get("api_key")
+    if key:
+        print(key)
+        sys.exit(0)
+sys.exit(1)
+"""
 
 
 class TestAntigravity(unittest.TestCase):
@@ -79,17 +92,24 @@ class TestAntigravity(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.work = Path(tmp.name)
         agy = self.work / "agy"
-        agy.write_text(f"#!{sys.executable}\n" + FAKE_AGY.replace("USAGE_FIXTURE", repr(USAGE)).replace("CONVERSATION_ID", SID))
+        agy.write_text(f"#!{sys.executable}\n" + FAKE_AGY.replace("USAGE_FIXTURE", repr(USAGE))
+                       .replace("CONVERSATION_ID", SID).replace("KEY_FIXTURE", repr(KEY)))
         agy.chmod(0o755)
+        # The detached adapter has its own process. Stub its keychain reads on macOS.
+        if sys.platform == "darwin":
+            security = self.work / "security"
+            security.write_text(f"#!{sys.executable}\n" + FAKE_SECURITY)
+            security.chmod(0o755)
         for tool in ("codex", "claude"):
             exe = self.work / tool
             exe.write_text("#!/bin/sh\necho 1.0\n")
             exe.chmod(0o755)
+        secrets = self.work / "secrets.json"
         for patch in (
-            mock.patch.dict(os.environ, {"HOME": tmp.name, "PATH": f"{tmp.name}:/usr/bin:/bin", "CODEX_HOME": tmp.name},
-                            clear=True),
+            mock.patch.dict(os.environ, {"HOME": tmp.name, "PATH": f"{tmp.name}:/usr/bin:/bin", "CODEX_HOME": tmp.name,
+                                         "TP_SECRETS_FILE": str(secrets)}, clear=True),
             mock.patch.object(core, "KEYCHAIN", False),
-            mock.patch.object(core, "SECRETS_FILE", self.work / "secrets.json"),
+            mock.patch.object(core, "SECRETS_FILE", secrets),
             mock.patch.object(runner, "LOGS", self.work / "logs"),
             mock.patch.object(runner, "asana_rules", lambda: ""),
             mock.patch.object(runner, "gh_env", lambda env, required: env),
@@ -156,6 +176,20 @@ class TestAntigravity(unittest.TestCase):
                 return code
             time.sleep(0.05)
         self.fail("agy did not exit")
+
+    def test_saved_key_is_only_in_agy_environment(self):
+        core.secret_set(AGY.SERVICE, AGY.API_KEY, KEY)
+        setup = 'if [ "${GEMINI_API_KEY+x}" = x ]; then echo present; else echo absent; fi > setup-key; exit 17'
+        with mock.patch.object(runner, "settings", return_value=core.DEFAULT_SETTINGS):
+            handle = runner.launch(str(self.work), "check saved key", "fixture", setup=setup,
+                                   agent={"tool": "agy", "model": NEON})
+            self.assertEqual(self.wait_for(handle), 0)
+        self.assertEqual((self.work / "setup-key").read_text().strip(), "absent")
+        self.assertEqual(runner.last_message(handle), "check saved key")
+        _, log = runner._parts(handle)
+        self.assertIn("worktree setup failed (17)", log.read_text())
+        for path in (log, Path(f"{log}.json")):
+            self.assertNotIn(KEY, path.read_text())
 
     def test_runner_roles_and_two_chat_turns(self):
         con = sqlite3.connect(":memory:")
