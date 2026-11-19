@@ -1,6 +1,6 @@
 """Local runner (replaces Orca): ticket worktrees via `git worktree`, agents as detached headless processes.
 
-An agent is `codex exec` or `claude -p` (settings.agent) started by a small /bin/sh wrapper in its own session, so it
+An agent is `codex exec`, `claude -p`, or `agy` (settings.agent) started by a small /bin/sh wrapper in its own session, so it
 outlives the tick that launched it. Its handle "<pid> <log path>" is stored in runs.terminal (and in meta.automations
 for the automations' AI steps). The wrapper writes "<log>.exit" with the exit code, so a finished agent is visible even
 after its process is gone; "<log>.json" keeps the agent name and session id for `tp attach` (resume by hand).
@@ -24,7 +24,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from . import chat_usage
+from . import antigravity, chat_usage
 from .asana_write import rules as asana_rules
 from .core import DATA, ROOT, gh_env, run, settings
 
@@ -56,8 +56,13 @@ def node_bin() -> str | None:
 
 def agent_path() -> str:
     nb = node_bin()
-    cur = os.environ.get("PATH", "")
-    return f"{nb}:{cur}" if nb and nb not in cur.split(":") else cur
+    paths = os.environ.get("PATH", "").split(os.pathsep)
+    local = str(Path.home() / ".local" / "bin")  # the Antigravity installer uses this on host and Docker
+    if local not in paths:
+        paths.append(local)
+    if nb and nb not in paths:
+        paths.insert(0, nb)
+    return os.pathsep.join(paths)
 
 
 def install_cmd(path: str) -> str | None:
@@ -181,6 +186,18 @@ def command(a: dict, log: Path) -> list[str]:
     works in (a project's other repos, chat.py): claude --add-dir; codex exec --add-dir, but `codex exec resume`
     has no such flag (0.166), so a resumed codex turn relies on the paths from the first prompt (its sandbox is off)."""
     dirs = a.get("add_dirs") or ()
+    if a["tool"] == "agy":
+        cmd = ["agy", "--input-format", "stream-json", "--output-format", "stream-json",
+               "--dangerously-skip-permissions", "--disable-slash-commands"]
+        if a.get("resume"):
+            cmd += ["--conversation", a["resume"]]
+        if a["model"]:
+            cmd += ["--model", a["model"]]
+        if a["effort"]:
+            cmd += ["--effort", a["effort"]]
+        for directory in dirs:
+            cmd += ["--add-dir", directory]
+        return cmd
     if a["tool"] == "claude":
         cmd = [*CLAUDE, "--resume" if a.get("resume") else "--session-id", a["session"]]
         if a.get("compact"):
@@ -245,6 +262,8 @@ def launch(cwd: str, prompt: str, tag: str, setup: str | None = None, repo_path:
     Path(f"{log}.json").write_text(json.dumps(meta))
     if compact:
         cmd = [sys.executable, chat_usage.__file__, str(log), *cmd]
+    elif a["tool"] == "agy":
+        cmd = [sys.executable, "-I", antigravity.__file__, str(log), *cmd]
     script = ('if [ -n "$TP_SETUP" ]; then echo "--- worktree setup"; sh -c "$TP_SETUP" < /dev/null '
               '|| echo "--- worktree setup failed ($?), starting the agent anyway"; echo "--- agent"; fi; '
               '"$@" < "$TP_PROMPT"; echo $? > "$TP_EXIT"')
@@ -357,6 +376,12 @@ def session(handle: str | None) -> tuple[str | None, str | None]:
     except (OSError, ValueError, TypeError):
         return None, None
     sid = meta.get("session")
+    if meta.get("agent") == "agy":
+        try:
+            sid = Path(f"{log}.conversation").read_text().strip()
+        except OSError:
+            pass
+        return "agy", sid if sid and antigravity.CONVERSATION.fullmatch(sid) else None
     for f in ((log, Path(f"{log}.err")) if not sid and log else ()):  # codex prints it in its header (stderr)
         try:
             with open(f, errors="replace") as fh:
@@ -373,6 +398,8 @@ def resume_cmd(handle: str | None) -> str | None:
     agent, sid = session(handle)
     if not sid:
         return None
+    if agent == "agy":
+        return f"agy --conversation {sid}"
     return f"claude --resume {sid}" if agent == "claude" else f"codex resume {sid}"
 
 

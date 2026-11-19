@@ -9,7 +9,7 @@ staging 머지, 프로덕션 배포까지 이어 주는 도구입니다. 각 절
 설치한 뒤 할 일과 대시보드 화면 안내.
 
 설치는 `gh repo clone bini59/toothpaste ~/tp-work/app` 다음 `~/tp-work/app/bin/tp setup`입니다. macOS와 Linux(systemd)에서
-같은 두 줄로 설치해요. setup이 빠진 것(Python 3.11 이상, git, gh 로그인, claude나 codex 등)을 먼저 알려 주고, 다 있으면 대시보드와
+같은 두 줄로 설치해요. setup이 빠진 것(Python 3.11 이상, git, gh 로그인, claude, codex, agy 중 하나 등)을 먼저 알려 주고, 다 있으면 대시보드와
 1분마다 도는 tick을 백그라운드로 띄웁니다(macOS는 launchd, Linux는 systemd 사용자 서비스). 그다음 열어 주는
 **시작하기** 화면(`#start`)에서 다섯 단계를 마칩니다. 브라우저가 없는 서버에서는 주소만 출력하니 그 주소를 여세요.
 
@@ -50,7 +50,7 @@ Docker로 바꾼 동안에는 호스트 설치용 `tp update`, `tp setup`, `tp m
 
 1. Asana 연결 (선택): 사용한다면 Personal access token을 넣습니다(macOS는 키체인, Linux는 secrets.json에 저장). 사용하지 않으면 **Asana 사용 안 함**을 누르세요. GitHub 이슈는 Asana 없이도 동기화합니다.
 2. GitHub 연결: 화면에 나온 코드로 Device Flow 로그인.
-3. 에이전트 로그인: claude나 codex 중 쓰는 것 하나. 이미 터미널에서 로그인돼 있으면 완료로 나와요(아래 **agent** 주제).
+3. 에이전트 로그인: Claude, Codex, Antigravity 중 쓰는 것 하나. 이미 터미널에서 로그인돼 있으면 완료로 나와요(아래 **agent** 주제).
 4. 사용자 이름: 에이전트가 질문하거나 보고할 때 부르는 이름.
 5. 첫 프로젝트 추가: GitHub 레포를 고르고 티켓 출처(Asana 프로젝트나 GitHub 이슈)를 정합니다.
 
@@ -201,10 +201,10 @@ staging 열차 레포와 `pr_into_staging` 레포는 티켓 브랜치를 staging
   파이프라인에 있는(실행 기록이 있는) 티켓은 완료 처리하거나 담당자를 바꿀 수 없습니다. 프로덕션 반영 후 toothpaste가 완료합니다.
   설정 `agent_asana_write`가 꺼져 있으면 Asana는 읽기 전용이고, 자동화 단계는 언제나 쓸 수 없습니다.
 - 사용법이 궁금하면 `tp guide`로 주제를 보고 `tp guide <주제>`로 읽습니다.
-- **어떤 도구로 도나**: **설정 → 에이전트**의 카드 세 개가 역할별 도구(claude/codex), 모델, 추론 강도를 정해요(설정 `agents`).
+- **어떤 도구로 도나**: **설정 → 에이전트**의 카드 세 개가 역할별 도구(claude/codex/agy), 모델, 추론 강도를 정해요(설정 `agents`).
   **투입**은 티켓 작업(새 티켓, 리뷰 수정, 충돌, 답장 뒤 재실행), **리뷰**는 AI PR 리뷰, **검사**는 판단을 맡는 자동화(배포 diff 요약,
-  worktree 정리 판정, 저장소 고르기)예요. 우선순위는 레포별 에이전트 설정(티켓 작업에만) > 역할 카드 > 기본 도구(`agent`).
-  카드를 비우면 기본 도구를 따라요. 맨 위 **활성 계정**은 claude와 codex의 설치, 버전, 로그인 방식(CLI 로그인, tp 토큰, API 키), 계정을 보여 주고, 로그인하지 않은 도구는 고를 수 없어요.
+  worktree 정리 판정, 저장소 고르기)예요. 우선순위는 레포별 에이전트 설정(티켓 작업과 프로젝트 채팅) > 역할 카드 > 기본 도구(`agent`).
+  카드를 비우면 기본 도구를 따라요. 맨 위 **활성 계정**은 Claude, Codex, Antigravity의 설치, 버전, 로그인 방식(CLI 로그인, tp 토큰, API 키), 계정을 보여 주고, 로그인하지 않은 도구는 고를 수 없어요.
 - **에이전트 로그인**(활성 계정, 시작하기에서 같은 화면): 이 컴퓨터(127.0.0.1)에서만, Docker 모드에서는 `TP_ADMINS`만 할 수 있어요.
   - **codex**: 로그인을 누르면 코드와 주소가 나와요. 주소를 열어 코드를 넣으면 자동으로 끝나요(15분 안). 로그아웃은 `codex logout`과 같아요.
   - **claude**: 로그인을 누르면 Claude 로그인 주소가 나와요(`claude setup-token`, Claude 구독 필요). 브라우저에서 받은 코드를 붙여넣으면 1년짜리 토큰을 tp에 저장해요.
@@ -213,6 +213,18 @@ staging 열차 레포와 `pr_into_staging` 레포는 티켓 브랜치를 staging
   - claude 로그아웃은 tp에 저장한 토큰과 키만 지워요. CLI 자체 로그인은 그대로예요.
   - 고급(터미널): `claude setup-token`을 실행하고 출력된 토큰을 claude 카드의 **토큰 붙여넣기**에 넣어요. CLI 자체 로그인은 `claude` 실행 후 `/login`, `codex login`.
     Docker 모드에서는 저장소 폴더에서 `cd docker && docker compose exec tp claude`처럼 컨테이너 안에서 실행해요.
+  - **Antigravity (agy)**는 tp가 실행되는 호스트나 컨테이너에 설치하세요. [공식 설치 안내](https://antigravity.google/docs/getting-started/)
+    **Google 계정 로그인**을 눌러 브라우저의 코드를 붙여넣거나 같은 환경의 터미널에서 `agy`를 열어 로그인할 수 있어요.
+    **Gemini API 키**로 연결하려면 결제가 활성화된 Google AI Studio 프로젝트의 키를 넣으세요. tp가 키를 확인해 비밀 저장소에 보관하고 agy 실행에 전달해요.
+    터미널에서 설정했다면 `~/.gemini/antigravity-cli/settings.json`의 `modelProvider`가 `gemini`이고 tp 실행 환경에 `GEMINI_API_KEY`가 있어야 해요.
+  - Antigravity에는 연결된 계정의 모델이 표시돼요. **Gemini 4 Neon**은 Google AI Free·Plus에 제공되지 않아요.
+    유료 Pro, 대상 프리미엄 기기의 Pro 체험, Ultra, Enterprise 또는 Neon 이용 권한이 있는 유료 Gemini API 프로젝트가 필요해요.
+    프로젝트 채팅은 같은 레포와 도구를 쓰는 동안 Antigravity 대화 ID로 이어집니다. [Google 계정의 모델 이용 조건](https://antigravity.google/docs/models) · [Gemini API의 Neon 이용 조건](https://aistudio.google.com/docs/pricing#gemini-4-neon)
+  - 연결 해제는 tp에 저장한 Gemini API 키는 대시보드에서, Google 계정은 `agy`의 `/logout`으로, 직접 설정한 API 키는 `modelProvider` 설정을 제거해요.
+    터미널에서 변경한 뒤 **다시 확인**을 누르면 바로 반영돼요.
+- **사이드바 사용량**에는 설치와 인증이 확인된 에이전트만 표시돼요. 로그아웃하면 이전에 조회한 값이 있어도 해당 행이 사라지고, 연결된 도구가 없으면 영역도 접혀요.
+  Antigravity는 `/usage`의 모델 그룹별 한도, 사용률, 리셋 시각을 표시해요. API 키 등 CLI가 계정 한도를 제공하지 않는 경우에는 조회할 수 없다고 표시해요.
+  [Antigravity 사용량](https://antigravity.google/docs/cli/commands/usage)
 
 ## update · 업데이트
 버전과 업데이트.

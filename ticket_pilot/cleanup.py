@@ -41,7 +41,7 @@ from .track import deployed_sha, track_config
 WORKSPACES = os.path.expanduser("~/orca/workspaces") + "/"  # legacy: worktrees Orca made before the local runner
 SAFE_AGENT_STATES = {"done"}
 # agent CLIs keep a localhost port open while idle; the runner handle / Orca's agent state decides whether they are busy
-AGENT_PROCS = {"codex", "claude", "node_repl", "orca"}
+AGENT_PROCS = {"codex", "claude", "agy", "node_repl", "orca"}
 
 
 def _git(repo: str, *args: str, check: bool = False, timeout: int = 120, **kw):

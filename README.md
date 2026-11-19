@@ -7,11 +7,11 @@ and secrets keep their `ticket-pilot` names, so existing installs keep working.)
 
 toothpaste runs a ticket → agent → PR → AI review → deploy pipeline on your own machine. It picks up tickets from
 **Asana** (tasks tagged `tp`, setting `asana_tag`) and **GitHub issues**, gives each one a git worktree and a headless
-coding agent (**Claude Code** `claude` or **Codex** `codex`, your own login), has the agent open a draft PR, reviews the
-PR with another agent, and lets you approve merges and production deploys from a local dashboard.
+coding agent (**Claude Code** `claude`, **Codex** `codex`, or **Antigravity** `agy`, your own login). The agent opens a draft PR,
+another agent reviews it, and you approve merges and production deploys from the local dashboard.
 
 - Runs on **macOS** and **Linux** (systemd), or in **Docker**.
-- Needs Python 3.11+, `git`, `gh` (logged in) and the `claude` or `codex` CLI (logged in). No pip packages.
+- Needs Python 3.11+, `git`, `gh` (logged in) and the `claude`, `codex` or `agy` CLI (logged in). No pip packages.
 - Everything stays local: the SQLite DB, the worktrees and the dashboard (`http://127.0.0.1:3032`).
 
 ```bash
@@ -35,7 +35,7 @@ Contributing: [CONTRIBUTING.md](CONTRIBUTING.md).
     dispatch  tagged + single-repo + no open dependency + free slot (max 3)
               -> git worktree add (<worktree_root>/<repo>/<ticket>, branch <branch_prefix><ticket>)
               -> copy the checkout's .env / .env.* files (same relative paths), then in the agent's wrapper:
-                 pnpm > yarn > npm install by lockfile, the repo's setup script, then `codex exec` / `claude -p`
+                 pnpm > yarn > npm install by lockfile, the repo's setup script, then `codex exec` / `claude -p` / `agy`
                  with the brief, detached (ticket_pilot/runner.py; repo setting auto_setup: false turns the first two off)
     exit 0 only if a tagged ticket needs a repo choice (multi-repo project)
   agent: prompts/automation_dispatch.md  (picks a repo, tp assign, tp dispatch)
@@ -73,7 +73,7 @@ Dashboard: http://127.0.0.1:3032 (setting dashboard_port; launchd agent com.tick
 An automation's AI step is the same headless agent, started in this checkout; at most one runs per automation, and one
 still running after 60 min is stopped. The dashboard's 로그 page shows the snapshot `tp tick` writes (meta.automations).
 Agent logs, prompts and exit codes are in `data/agents/`. `tp attach KEY` prints the command that resumes a ticket's
-agent session by hand (`codex resume <id>` / `claude --resume <id>`). Orca is not needed; runs Orca started before the
+agent session by hand (`codex resume <id>` / `claude --resume <id>` / `agy --conversation <id>`). Orca is not needed; runs Orca started before the
 local runner keep reading their status from Orca until tp relaunches them, and cleanup removes their worktrees with
 `orca worktree rm`.
 
@@ -102,7 +102,7 @@ Needed first (`tp setup` checks all of them, lists everything missing with how t
 - Python 3.11+ (`python3`). macOS: python.org Python 3 (https://www.python.org/downloads/macos/); Homebrew Python works
   but is warned about (see 고급 > Python)
 - `git`, and `gh` logged in (`gh auth login`)
-- `claude` or `codex` CLI, logged in
+- `claude`, `codex` or `agy` CLI, logged in
 - Linux only: `systemctl --user` working (a systemd user session: log in as that user over ssh or a desktop, not `su`;
   WSL and containers usually have none) and `lsof`. Linger is checked and only warned about (see 고급 > Linux)
 

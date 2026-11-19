@@ -2,7 +2,7 @@
 
 Each turn is one detached agent (runner.launch) in the project's default repo checkout, the other repos opened with
 --add-dir, with the default repo's agent settings (repo.<name>.agent, else the global agent). The first turn sends prompts/chat.md + the message and records the
-agent's session; later turns resume that session (codex exec resume / claude --resume) with only the message.
+agent's session; later turns resume it with only the new message.
 The reply is the agent's final message (runner.last_message), read when the process has exited; the dashboard
 polls messages(), which finalizes finished turns. One running turn per conversation. The tick also finalizes
 turns and summarizes idle Claude sessions so the next turn can start fresh with the summary.

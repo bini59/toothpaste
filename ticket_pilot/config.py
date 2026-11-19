@@ -17,6 +17,7 @@ import copy
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -25,17 +26,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from . import core
+from . import antigravity, core
 from .core import ROOT, db, event, now
 
 MODES = ("staging", "direct", "promote", "all")
 MERGES = ("merge", "squash")
 VERSIONS = ("npm-patch",)
-AGENTS = ("codex", "claude")
+AGENTS = ("codex", "claude", "agy")
 # reasoning effort per agent CLI: claude --effort accepts these; codex models list theirs in `codex debug models`
 # (this is the union; a catalog model only takes its own levels, see agent_models)
 AGENT_EFFORTS = {"codex": ("low", "medium", "high", "xhigh", "max", "ultra"),
-                 "claude": ("low", "medium", "high", "xhigh", "max")}
+                 "claude": ("low", "medium", "high", "xhigh", "max"),
+                 "agy": ("low", "medium", "high", "xhigh", "max")}
 AGENT_KEYS = {"tool", "model", "effort", "ultracode"}
 AGENT_ROLES = ("work", "review", "check")  # global.agents cards (runner.resolve role)
 # claude has no model list command (and tp must not use its OAuth token): the aliases `claude --model` takes
@@ -308,7 +310,8 @@ def validate(doc: dict, old: dict | None = None) -> list[str]:
                                              and re.fullmatch(r"[A-Za-z0-9._:/\[\]-]+", ag["model"]) is not None),
                  f"{path}.model", "모델 이름은 영문, 숫자, . _ : / - [ ] 만 써요")
             known = next((m for m in agent_models().get(tool, []) if m["id"] == ag.get("model")), None)
-            levels = (known or {}).get("efforts") or AGENT_EFFORTS.get(tool, ())
+            pinned = antigravity.pinned_effort(ag.get("model")) if tool == "agy" else None
+            levels = (pinned,) if pinned else (known or {}).get("efforts") or AGENT_EFFORTS.get(tool, ())
             need(ag.get("effort") is None or ag["effort"] in levels, f"{path}.effort",
                  f"{tool}{' ' + ag['model'] if known else ''}: {', '.join(levels)} 중 하나여야 해요")
             need(ag.get("ultracode") in (None, True, False), f"{path}.ultracode", "true/false여야 해요")
@@ -875,6 +878,8 @@ def api_state() -> dict:
 
 
 def _api_state(con) -> dict:
+    from .runner import agent_path
+
     doc = current(con)
     v = view(doc)
     known = {str(p["asana_gid"]): p["name"] for p in doc["project_map"]["projects"] if p.get("asana_gid")}
@@ -889,10 +894,12 @@ def _api_state(con) -> dict:
             info[n]["base_ref"] = base_ref(n) if r.get("checks") else None
         except Exception:  # noqa: BLE001
             pass
+    exe = shutil.which("agy", path=agent_path())
+    models = {**agent_models(), "agy": antigravity.account(exe)["models"] if exe else []}
     return {"config": v, "read_only": list(READ_ONLY), "modes": list(MODES),
             "merges": list(MERGES), "versions": list(VERSIONS), "agents": list(AGENTS),
             "agent_efforts": {k: list(v) for k, v in AGENT_EFFORTS.items()}, "repo_info": info,
-            "agent_models": agent_models(),
+            "agent_models": models,
             "check_runs": check_runs(con), "history": history(limit=500, con=con), "projects": known,
             "imported_at": core.meta_get(con, "config_imported"),
             "backups": {"dir": str(backup_dir()), "count": len(list(backup_dir().glob("config-*.json"))) if backup_dir().is_dir() else 0}}

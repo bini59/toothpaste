@@ -51,10 +51,10 @@ function Group({ group }: { group: SidebarGroup }) {
  * Fixed sidebar on desktop (the logo button collapses it to an icon rail), overlay drawer on mobile.
  * Flat items and collapsible groups; the rail lists every item flat.
  */
-export function Sidebar({ serviceName, version, logo, items, collapsed, onCollapsedChange, mobileOpen, onMobileClose, className }: {
+export function Sidebar({ serviceName, version, logo, items, collapsed, onCollapsedChange, mobileOpen, onMobileClose, className, footer }: {
   serviceName: string; version: string; logo: React.ReactNode; items: SidebarEntry[];
   collapsed: boolean; onCollapsedChange: (collapsed: boolean) => void;
-  mobileOpen: boolean; onMobileClose: () => void; className?: string;
+  mobileOpen: boolean; onMobileClose: () => void; className?: string; footer?: React.ReactNode;
 }) {
   const flat = items.flatMap((e) => (isGroup(e) ? e.items : [e]));
   return (
@@ -64,7 +64,7 @@ export function Sidebar({ serviceName, version, logo, items, collapsed, onCollap
       <aside className={cn("fixed inset-y-0 left-0 z-50 flex w-[260px] max-w-[85vw] flex-col border-r border-border bg-surface lg:max-w-none",
         // transform, not Tailwind's translate-x (the translate property): `slide` transitions transform
         collapsed ? "lg:w-[72px]" : "lg:w-[260px]", mobileOpen ? "transform-none" : "[transform:translateX(-100%)] lg:transform-none", slide, className)}>
-        <div className="flex h-14 items-center gap-2 border-b border-border px-3">
+        <div className="flex h-14 shrink-0 items-center gap-2 border-b border-border px-3">
           <button type="button" onClick={() => onCollapsedChange(!collapsed)} aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"} aria-expanded={!collapsed}
             className={cn("shrink-0 cursor-pointer rounded-lg transition-opacity hover:opacity-70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-200", collapsed && "lg:mx-auto")}>
             {logo}
@@ -94,6 +94,7 @@ export function Sidebar({ serviceName, version, logo, items, collapsed, onCollap
             })}
           </ul>
         </nav>
+        {footer}
       </aside>
     </>
   );

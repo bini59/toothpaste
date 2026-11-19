@@ -70,6 +70,7 @@ class ValidateTest(unittest.TestCase):
         self.assertEqual(self.errors({}), [])
         self.assertEqual(self.errors({"work": {"tool": "claude", "model": "opus", "effort": "high", "ultracode": True},
                                       "check": {"effort": "low"}}), [])
+        self.assertEqual(self.errors({"work": {"tool": "agy", "model": "gemini-4-neon-high"}}), [])
 
     def test_invalid(self):
         self.assertTrue(any("global.agents:" in e for e in self.errors([])))
@@ -77,6 +78,8 @@ class ValidateTest(unittest.TestCase):
         self.assertTrue(any("global.agents.review.tool" in e for e in self.errors({"review": {"tool": "gemini"}})))
         self.assertTrue(any("global.agents.work.ultracode" in e for e in self.errors({"work": {"tool": "codex", "ultracode": True}})))
         self.assertTrue(any("global.agents.check:" in e for e in self.errors({"check": "claude"})))
+        self.assertTrue(any("global.agents.review.effort" in e for e in self.errors(
+            {"review": {"tool": "agy", "model": "gemini-4-neon-high", "effort": "low"}})))
 
     def test_repo_without_tool_checks_against_the_work_card(self):
         # ultracode needs claude: the repo has no tool, the work card says claude, the global agent is codex
@@ -133,7 +136,8 @@ class AccountsTest(unittest.TestCase):
         d = self.detect([{"accessToken": "SECRET-C", "subscriptionType": "max"}])
         self.assertEqual(d["tools"]["claude"]["account"], ["a@x.test", "Org", "max 플랜"])
         self.assertEqual(d["tools"]["codex"]["account"], ["b@x.test", "ChatGPT pro"])
-        self.assertTrue(all(t["logged_in"] and t["method"] == "cli" for t in d["tools"].values()))
+        self.assertEqual({tool for tool, t in d["tools"].items() if t["logged_in"] and t["method"] == "cli"},
+                         {"claude", "codex"})
         self.assertNotIn("SECRET", json.dumps(d))
 
     def test_docker_flag(self):
@@ -141,6 +145,16 @@ class AccountsTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"TP_MODE": "docker"}):
             d = self.detect()
         self.assertTrue(d["docker"])
+
+    def test_current_cli_status_overrides_leftover_credentials(self):
+        self.fake("claude")
+        self.fake("codex")
+        (self.bin / "claude").write_text('#!/bin/sh\nprintf \'{"loggedIn": false}\\n\'\nexit 1\n')
+        (self.bin / "codex").write_text('#!/bin/sh\necho "Error checking login status: invalid credential JSON" >&2\nexit 1\n')
+        (self.home / ".codex" / "auth.json").write_text('{"tokens":{"access_token":"stale"}}')
+        tools = self.detect([{"accessToken": "stale", "expiresAt": 1}])["tools"]
+        self.assertFalse(tools["claude"]["logged_in"])
+        self.assertFalse(tools["codex"]["logged_in"])
 
 
 if __name__ == "__main__":

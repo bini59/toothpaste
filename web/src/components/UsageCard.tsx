@@ -1,5 +1,5 @@
 import { cn } from "../ui";
-import type { ClaudeUsage, CodexUsage, CodexWindow } from "../types";
+import type { AgentUsage, ClaudeUsage, CodexUsage, CodexWindow } from "../types";
 
 const pad = (n: number) => String(n).padStart(2, "0");
 const hhmm = (v?: string | null) => (v ? `${pad(new Date(v).getHours())}:${pad(new Date(v).getMinutes())}` : "");
@@ -76,14 +76,8 @@ function Row({ name, meters, note, collapsed }: { name: string; meters: Meter[];
   );
 }
 
-/** Sidebar footer (the Sidebar has no footer slot): fixed under the aside, which reserves the space with pb-20.
- *  TP-56: the bars always show the last stored values — no loading, refreshing or "run Claude Code" states. */
-export function UsageCard({ claude, codex, collapsed, mobileOpen }: {
-  claude: ClaudeUsage | null | undefined;
-  codex: CodexUsage | null | undefined;
-  collapsed: boolean;
-  mobileOpen: boolean;
-}) {
+export function UsageCard({ usage: { claude, codex, agy }, collapsed }: { usage: AgentUsage; collapsed: boolean }) {
+  if (claude === undefined && codex === undefined && agy === undefined) return null;
   const iso = (v: string | null | undefined) => (v ? new Date(v).getTime() : null);
   const cm: Meter[] = [
     { id: "5h", label: "5시간", used: claude?.five_hour?.utilization ?? null, resetAt: iso(claude?.five_hour?.resets_at) },
@@ -106,21 +100,51 @@ export function UsageCard({ claude, codex, collapsed, mobileOpen }: {
     [`${label} ${ms.map((m) => `${m.label} ${at(m.resetAt)} 리셋`).join(" · ")}`,
      u?.fetched_at ? `마지막 확인 ${hhmm(u.checked_at)}` : "아직 확인 전",
      why(u)].filter(Boolean).join(" · ");
-  const title = `${tip("Claude", claude, cm)}\n${tip("Codex", codex, xm)}`;
 
   return (
     <div
-      role="status"
-      title={title}
-      aria-label={title}
-      className={cn(
-        "fixed bottom-0 left-0 z-50 flex h-20 w-[260px] max-w-[85vw] flex-col justify-center gap-2 border-t border-r border-border bg-surface px-4 transition-[width,transform] duration-300",
-        collapsed ? "lg:w-[72px] lg:px-2" : "lg:w-[260px]",
-        mobileOpen ? "transform-none" : "[transform:translateX(-100%)] lg:transform-none",
-      )}
+      role="region"
+      aria-label="에이전트 사용량"
+      className={cn("max-h-[45dvh] shrink-0 space-y-2 overflow-y-auto border-t border-border bg-surface px-4 py-2",
+        collapsed && "lg:px-2")}
     >
-      <Row name="Claude" meters={cm} note={note(claude)} collapsed={collapsed} />
-      <Row name="Codex" meters={xm} note={note(codex)} collapsed={collapsed} />
+      {claude !== undefined && <div title={tip("Claude", claude, cm)}>
+        <Row name="Claude" meters={cm} note={note(claude) || why(claude)} collapsed={collapsed} />
+      </div>}
+      {codex !== undefined && <div title={tip("Codex", codex, xm)}>
+        <Row name="Codex" meters={xm} note={note(codex) || why(codex)} collapsed={collapsed} />
+      </div>}
+      {agy && (
+        <div className="space-y-1 text-[10px] leading-tight" aria-label="Antigravity 사용량">
+          <p className="font-semibold text-text-main" title="Antigravity">
+            <span className={collapsed ? "lg:hidden" : undefined}>Antigravity</span>
+            {collapsed && <span className="hidden lg:inline" aria-hidden>agy</span>}
+          </p>
+          {agy.error && <p className="text-text-muted" title={REASON[agy.error]}>
+            {agy.error === "unsupported_auth" ? "API 키는 한도 조회 미지원" : REASON[agy.error] ?? REASON.unavailable}
+          </p>}
+          {agy.groups?.map((g) => (
+            <div key={g.name} className="space-y-1">
+              <p className="truncate text-text-muted" title={g.name}>{g.name}</p>
+              {g.limits.map((w, i) => {
+                const reset = w.reset_at ? at(iso(w.reset_at)) : "";
+                return (
+                  <div key={i} title={`${g.name} · ${w.name}${reset ? ` · ${reset} 리셋` : ""}`}>
+                    <Bar m={{ id: w.name, label: w.name, used: w.used, resetAt: iso(w.reset_at) }} collapsed={collapsed} />
+                    {(reset || w.remaining !== null) && (
+                      <p className={cn("text-text-muted tabular-nums", collapsed && "lg:hidden")}>
+                        {w.remaining !== null && `잔여 ${w.remaining.toLocaleString()}`}
+                        {w.remaining !== null && reset && " · "}
+                        {reset && `${reset} 리셋`}
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
