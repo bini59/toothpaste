@@ -20,14 +20,14 @@ export const books = {
     title: "등불을 든 여우",
     glyph: "숲",
     lines: ["해 질 녘 숲에서", "여우는 작은 잎 하나를 들었다.", "돌아가는 길이 그 안에 있었다."],
-    image: "/model-lab/fable.webp",
+    image: "/model-lab/fable-engraving.webp",
   },
   Opus: {
     genre: "악보집",
     title: "현을 위한 소품",
     glyph: "현",
     lines: ["고요한 현 위에", "오후의 빛이 잠시 머문다.", "손을 떼고도 울림은 남는다."],
-    image: "/model-lab/opus.webp",
+    image: "/model-lab/opus-engraving.webp",
   },
   Sonnet: {
     genre: "소네트 시집",
@@ -39,14 +39,14 @@ export const books = {
       "하나는 떠나고 하나는 남아",
       "같은 물가의 저녁을 읽는다.",
     ],
-    image: "/model-lab/sonnet.webp",
+    image: "/model-lab/sonnet-engraving.webp",
   },
   Haiku: {
     genre: "하이쿠 시집",
     title: "비 갠 아침",
     glyph: "비",
     lines: ["아침 비 그쳐", "잎 하나 기울 때면", "연못에 파문"],
-    image: "/model-lab/haiku.webp",
+    image: "/model-lab/haiku-engraving.webp",
   },
 } as const;
 export function bookFor(key: string) {

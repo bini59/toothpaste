@@ -1,7 +1,7 @@
 import * as T from "three";
 import { books, type Floor, type PrintName, type Visit } from "./catalog";
 import { createExhibitSelector } from "./exhibitSelection";
-import { bookcase } from "./books";
+import { bookcase, inkWindow } from "./books";
 import { atomicModels, locationPlate } from "./exhibits";
 import { pigments, type World } from "./materials";
 import { earthApproach, milkyWay, nightSky, solarSystem } from "./space";
@@ -22,7 +22,7 @@ const stops = [
   ["letter", "활자의 잉크"],
   ["atoms", "Gemini · 원자 모형"],
 ] as const;
-const time = [0, 1.62, 3.54, 5.02, 6.91, 8.87, 10.69, 12.61, 14.28, 16.55, 19.85];
+const time = [0, 1.62, 3.54, 5.02, 6.91, 8.87, 10.69, 12.61, 15.54, 17.82, 21.12];
 const shelf = 7,
   opened = 8,
   ink = 9,
@@ -35,12 +35,16 @@ function stopFor(v: SceneVisit) {
 }
 const smooth = T.MathUtils.smoothstep,
   lerp = T.MathUtils.lerp;
-const zoomOut = [7, 6.0, 4.5, 6.2, 4.0, 12.0, 4.5, 1, 21.2, 95];
+const inkZoom = 16.5 / inkWindow.width;
+const zoomOut = [7, 6.0, 4.5, 6.2, 4.0, 12.0, 4.5, 1, inkZoom, 95];
 const incomingSize = [0.49, 0.97, 0.95, 0.95, 0.82, 0.91, 0.81, 1, 0.9, 2.7];
 
 export function createGallery(canvas: HTMLCanvasElement, onStage: (s: Stage) => void) {
   const renderer = new T.WebGLRenderer({ canvas, antialias: true, powerPreference: "low-power" });
   renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 1.5));
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = T.PCFShadowMap;
+  renderer.shadowMap.autoUpdate = false;
   const camera = new T.PerspectiveCamera(38, 1, 0.08, 200),
     scene = new T.Scene(),
     p = pigments();
@@ -48,8 +52,18 @@ export function createGallery(canvas: HTMLCanvasElement, onStage: (s: Stage) => 
     paper = new T.Color(p.tone("warning", 50, "grey", 200, 0.22));
   scene.add(new T.HemisphereLight(p.color("grey", 50), p.color("grey", 700), 1.42));
   const sun = new T.DirectionalLight(p.color("warning", 100), 2.05);
-  sun.position.set(-6, 4, 4);
-  scene.add(sun);
+  sun.position.set(-5, 7, 4);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(1024, 1024);
+  Object.assign(sun.shadow.camera, { left: -10, right: 10, top: 9, bottom: -9, near: 0.1, far: 33 });
+  sun.shadow.camera.updateProjectionMatrix();
+  sun.shadow.bias = -0.00032;
+  sun.shadow.normalBias = 0.016;
+  sun.shadow.radius = 3;
+  const bounce = new T.DirectionalLight(p.color("grey", 50), 0.8);
+  bounce.position.set(4, 1, 7);
+  bounce.visible = false;
+  scene.add(sun, bounce);
   let frame = 0,
     visible = true,
     disposed = false,
@@ -64,7 +78,8 @@ export function createGallery(canvas: HTMLCanvasElement, onStage: (s: Stage) => 
     wantedName = "Fable",
     stageSignature = "";
   const reduced = matchMedia("(prefers-reduced-motion: reduce)");
-  const loader = new T.TextureLoader();
+  const manager = new T.LoadingManager();
+  const loader = new T.TextureLoader(manager);
   const load = (name: string) => {
     const t = loader.load("/model-lab/" + name + ".webp", redraw);
     t.colorSpace = T.SRGBColorSpace;
@@ -73,22 +88,29 @@ export function createGallery(canvas: HTMLCanvasElement, onStage: (s: Stage) => 
   };
   const earthMap = load("earth"),
     room = load("reading-room");
-  const art = Object.fromEntries(Object.keys(books).map((k) => [k, load(k.toLowerCase())])) as Record<
+  const art = Object.fromEntries(Object.keys(books).map((k) => [k, load(k.toLowerCase() + "-engraving")])) as Record<
     PrintName,
     T.Texture
   >;
-  const library = bookcase(p, load("bookcase"), art);
+  const library = bookcase(p, load("walnut"), load("weave"), load("bindings"), art);
+  manager.onLoad = () => {
+    if (!disposed) {
+      library.refresh();
+      redraw();
+    }
+  };
   const initialMacro = library.pose("Fable", 0);
   const macro = locationPlate(initialMacro, 0.5, 0.5, 16.5);
+  macro.root.children[0].scale.y = (inkWindow.height / inkWindow.width) * 1.5;
   const macroMaterial = (macro.root.children[0] as T.Mesh<T.PlaneGeometry, T.MeshBasicMaterial>).material;
   const worlds = [
     milkyWay(p, load("galaxy")),
     solarSystem(p, earthMap, load("planets")),
     earthApproach(p, earthMap),
     locationPlate(load("japan"), (135.768 - 122) / 32, (46 - 35.012) / 17),
-    locationPlate(load("kyoto"), 0.499, 0.607),
+    locationPlate(load("kyoto"), 0.499, 0.607, 18.9, "street"),
     locationPlate(load("library"), 0.501, 0.703),
-    locationPlate(room, 0.502, 0.51),
+    locationPlate(room, 0.502, 0.51, 18.9, "aisle"),
     library.world,
     library.world,
     macro,
@@ -112,19 +134,15 @@ export function createGallery(canvas: HTMLCanvasElement, onStage: (s: Stage) => 
       amount: { value: 0 },
       focus: { value: new T.Vector2() },
       aspect: { value: 1 },
-      softness: { value: 0.4 },
       door: { value: new T.Vector2() },
-      mode: { value: 0 },
+      doorway: { value: false },
     },
     vertexShader: "varying vec2 coord;void main(){coord=uv;gl_Position=vec4(position.xy,0.,1.);}",
     fragmentShader: [
-      "varying vec2 coord;uniform sampler2D outer,inner;uniform float amount,aspect,softness;uniform vec2 focus,door;uniform int mode;",
-      "void main(){vec2 d=abs(coord-focus)*vec2(aspect,1.);float dist=mix(length(d),max(d.x,d.y*.90),.48);",
-      "float edge=mix(-softness,2.5+softness,amount);float t=1.-smoothstep(edge-softness,edge+softness,dist);",
-      "vec2 inside=coord;float lift=1.;",
-      "if(mode==1){vec2 dd=abs(coord-focus)-door;float rim=max(dd.x*aspect,dd.y);t=(1.-smoothstep(-.006,.006,rim))*amount;",
+      "varying vec2 coord;uniform sampler2D outer,inner;uniform float amount,aspect;uniform vec2 focus,door;uniform bool doorway;",
+      "void main(){float t=amount;vec2 inside=coord;float lift=1.;",
+      "if(doorway){vec2 dd=abs(coord-focus)-door;float rim=max(dd.x*aspect,dd.y);t=(1.-smoothstep(-.006,.006,rim))*amount;",
       "float fit=clamp(max(door.x,door.y)*2.,.08,1.);inside=clamp((coord-focus)/fit+.5,0.,1.);lift=mix(.32,1.,fit);}",
-      "if(mode==2){t=amount;}",
       "gl_FragColor=mix(texture2D(outer,coord),texture2D(inner,inside)*vec4(lift,lift,lift,1.),t);",
       "#include <colorspace_fragment>",
       "}",
@@ -160,18 +178,24 @@ export function createGallery(canvas: HTMLCanvasElement, onStage: (s: Stage) => 
     w.root.rotation.y = angle;
     for (const o of notes.get(w)!)
       o.visible = annotate && (!o.userData.modelKey || o.userData.modelKey === destination?.key);
+    const reading = w === library.world;
+    if (reading) library.lightDirection(sun.position, angle);
+    else sun.position.set(-5, 7, 4);
+    bounce.visible = reading;
+    sun.shadow.intensity = reading ? 1 - smooth(scale, 1.15, 2.4) : 0;
+    renderer.shadowMap.needsUpdate = reading && sun.shadow.intensity > 0;
     renderer.setRenderTarget(target);
     renderer.render(scene, camera);
     w.root.visible = false;
   }
   for (const w of unique) for (const [key, mark] of w.marks) mark.userData.modelKey = key;
-  function poseBook(progress: number) {
+  function poseBook(progress: number, approach = 0) {
     const w = library.world;
     w.root.position.set(0, 0, 0);
     w.root.scale.setScalar(1);
     w.root.rotation.y = 0;
     w.root.updateMatrixWorld(true);
-    macroMaterial.map = library.pose(volume, progress);
+    macroMaterial.map = library.pose(volume, progress, approach);
   }
   function segment() {
     let i = 0;
@@ -180,7 +204,8 @@ export function createGallery(canvas: HTMLCanvasElement, onStage: (s: Stage) => 
   }
   function render() {
     const { i, t } = segment();
-    if (i >= shelf - 1 && i <= ink) poseBook(i < shelf ? 0 : i === shelf ? t : 1);
+    if (i >= shelf - 1 && i <= ink)
+      poseBook(i < shelf ? 0 : i === shelf ? t : 1, i === opened ? t : i > opened ? 1 : 0);
     const spot = t > 0.54 ? Math.min(i + 1, atoms) : i,
       moving = clock !== goal || goal !== time[stopFor(destination)];
     const sig = spot + "/" + moving;
@@ -199,11 +224,12 @@ export function createGallery(canvas: HTMLCanvasElement, onStage: (s: Stage) => 
     const z = zoomOut[i] ** (i === ink ? smooth(t, 0, 0.65) : travel);
     focus.copy(outer.portal).multiplyScalar(1 - pan);
     offset.copy(focus).addScaledVector(outer.portal, -z);
-    paint(outer, z, offset, yaw * (1 - pan), targets[0], t < 0.12);
+    const track = (i === 4 ? -0.043 : i === 6 ? 0.039 : 0) * Math.sin(Math.PI * t);
+    paint(outer, z, offset, yaw * (1 - pan) + track, targets[0], t < 0.12);
     let size = incomingSize[i] ** (1 - travel);
     entry.set(0, 0, 0);
     // Cross each threshold on its subject: a globe, a marked block, the open door, or one nucleus.
-    if (i === 0) entry.set(-5.15, 0.13, 0);
+    if (i === 0) entry.set(-6.56, 0.13, 0);
     if (i === 2 || i === 4) entry.copy(inner.portal);
     if (i === 9) entry.set(-4.0, 0.2, 0);
     offset
@@ -212,7 +238,7 @@ export function createGallery(canvas: HTMLCanvasElement, onStage: (s: Stage) => 
       .multiplyScalar(1 - smooth(t, 0.44, 1.0));
     if (i === opened) {
       // The right page is 720 units across; the macro plate reproduces the same 150-unit crop.
-      size = z / 21.2;
+      size = z / inkZoom;
       offset.copy(focus);
     } else if (i === ink) {
       // Go inside the chosen ink stroke before pulling away from the matte hydrogen nucleus.
@@ -222,18 +248,15 @@ export function createGallery(canvas: HTMLCanvasElement, onStage: (s: Stage) => 
     paint(inner, size, offset, 0, targets[1], t > 0.91);
     const f = focus.project(camera);
     blend.uniforms.focus.value.set(0.5 + f.x * 0.5, 0.5 + f.y * 0.5);
-    blend.uniforms.amount.value = smooth(t, i === 1 ? 0.34 : 0.4, i === 1 ? 0.82 : 0.88);
-    blend.uniforms.softness.value = i === 5 ? 0.13 : i === 1 ? 0.7 : 0.41;
-    blend.uniforms.mode.value = 0;
+    blend.uniforms.doorway.value = i === 5;
+    blend.uniforms.amount.value = smooth(t, i === 1 ? 0.43 : 0.65, i === 1 ? 0.82 : 0.89);
     if (i === 5) {
       // Project the actual opening in the facade. Its jambs occlude the reading room until they pass the camera.
       const corner = entry.copy(outer.portal).add(new T.Vector3(0.93, 0.98, 0));
       outer.root.localToWorld(corner).project(camera);
       blend.uniforms.door.value.set(Math.abs(corner.x - f.x) * 0.5, Math.abs(corner.y - f.y) * 0.5);
-      blend.uniforms.mode.value = 1;
       blend.uniforms.amount.value = smooth(t, 0.02, 0.38);
     } else if (i === opened || i === ink) {
-      blend.uniforms.mode.value = 2;
       blend.uniforms.amount.value = i === opened ? smooth(t, 0.9, 0.985) : smooth(t, 0.54, 0.68);
     }
     renderer.setRenderTarget(null);
@@ -319,6 +342,7 @@ export function createGallery(canvas: HTMLCanvasElement, onStage: (s: Stage) => 
     renderer.setSize(width, height, false);
     camera.aspect = width / height;
     camera.position.set(0, 0, Math.max(3.95, 6.76 / camera.aspect) / Math.tan(T.MathUtils.degToRad(19)));
+    for (const w of unique) w.projectPlate?.(camera.position.z);
     camera.lookAt(0, 0, 0);
     camera.updateMatrixWorld();
     camera.updateProjectionMatrix();
@@ -371,6 +395,7 @@ export function createGallery(canvas: HTMLCanvasElement, onStage: (s: Stage) => 
         mats = new Set<T.Material>(),
         maps = new Set<T.Texture>([sky]);
       scene.traverse((o) => {
+        if (o instanceof T.InstancedMesh) o.dispose();
         if (o instanceof T.Mesh || o instanceof T.Line || o instanceof T.Sprite) {
           if (!(o instanceof T.Sprite)) geometry.add(o.geometry);
           for (const m of Array.isArray(o.material) ? o.material : [o.material]) mats.add(m);
@@ -386,6 +411,7 @@ export function createGallery(canvas: HTMLCanvasElement, onStage: (s: Stage) => 
       targets.forEach((t) => t.dispose());
       quad.dispose();
       blend.dispose();
+      sun.shadow.dispose();
       renderer.dispose();
     },
   };

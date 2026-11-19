@@ -31,14 +31,7 @@ export function milkyWay(p: Paint, image: T.Texture) {
     w.portal.y,
     w.portal.z
   );
-  const reach = mesh(
-    sun,
-    new T.SphereGeometry(0.41, 16, 10),
-    new T.MeshBasicMaterial({ visible: false }),
-    0,
-    0,
-    0.08
-  );
+  const reach = mesh(sun, new T.SphereGeometry(0.41, 16, 10), new T.MeshBasicMaterial({ visible: false }), 0, 0, 0.08);
   pickable(w, reach, "@solar");
   const locator = ring(w.root, 0.18, p.color("grey", 200), 0.75);
   locator.position.copy(w.portal);
@@ -65,16 +58,43 @@ function planetSphere(radius: number, tile: number) {
   }
   return sphere;
 }
+function photosphere(atlas: T.Texture, p: Paint) {
+  return new T.ShaderMaterial({
+    uniforms: {
+      surface: { value: atlas },
+      gold: { value: new T.Color(p.color("warning", 400)) },
+      ivory: { value: new T.Color(p.color("warning", 50)) },
+    },
+    vertexShader:
+      "varying vec2 uvAtlas;varying vec3 N,V;void main(){uvAtlas=uv;vec4 mv=modelViewMatrix*vec4(position,1.);N=normalMatrix*normal;V=-mv.xyz;gl_Position=projectionMatrix*mv;}",
+    fragmentShader: [
+      "uniform sampler2D surface;uniform vec3 gold,ivory;varying vec2 uvAtlas;varying vec3 N,V;",
+      "void main(){float face=max(0.,dot(normalize(N),normalize(V)));vec3 tex=texture2D(surface,uvAtlas).rgb;",
+      "float detail=clamp(dot(tex,vec3(.25,.55,.2)),0.,1.);vec3 c=mix(gold,ivory,.20+.70*sqrt(face));",
+      "gl_FragColor=vec4(c*(.46+.74*detail)*(.72+.28*face),1.);",
+      "#include <colorspace_fragment>",
+      "}",
+    ].join("\n"),
+  });
+}
+function sunlit(atlas: T.Texture) {
+  return new T.ShaderMaterial({
+    uniforms: { surface: { value: atlas } },
+    vertexShader:
+      "varying vec2 mapUv;varying vec3 N;void main(){mapUv=uv;N=normalMatrix*normal;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}",
+    fragmentShader: [
+      "varying vec2 mapUv;varying vec3 N;uniform sampler2D surface;",
+      "void main(){vec3 base=texture2D(surface,mapUv).rgb;float day=dot(normalize(N),normalize(vec3(-1.,.15,.33)));",
+      "gl_FragColor=vec4(base*(.055+1.27*pow(max(day,0.),.74)),1.);",
+      "#include <colorspace_fragment>",
+      "}",
+    ].join("\n"),
+  });
+}
 export function solarSystem(p: Paint, earthMap: T.Texture, atlas: T.Texture) {
   const w = world(),
-    sunX = -5.15;
-  const sun = mesh(
-    w.root,
-    planetSphere(1.33, 8),
-    new T.MeshBasicMaterial({ map: atlas, color: p.color("warning", 100) }),
-    sunX,
-    0.13
-  );
+    sunX = -6.56;
+  const sun = mesh(w.root, planetSphere(2.12, 8), photosphere(atlas, p), sunX, 0.13);
   pickable(w, sun, "Sol");
   const tag = (key: string, pos: T.Vector3, offsetY: number, offsetX = 0) => {
     const y = pos.y + offsetY;
@@ -87,7 +107,7 @@ export function solarSystem(p: Paint, earthMap: T.Texture, atlas: T.Texture) {
     w.root.add(mark);
     highlight(w, key, mark);
   };
-  tag("Sol", sun.position, -1.7);
+  tag("Sol", sun.position, -2.54, 1.0);
   // Look six degrees down on the ecliptic. Short arcs behind the limbs convey their order in depth.
   const plane = new T.Group();
   w.root.add(plane);
@@ -103,13 +123,12 @@ export function solarSystem(p: Paint, earthMap: T.Texture, atlas: T.Texture) {
     { r: 10.95, a: 0.13, size: 0.26 },
     { r: 11.29, a: -0.025, size: 0.24 },
   ];
-  planets.forEach(({ r, a, size }, i) => {
-    ring(plane, r, p.color("grey", 400), i === 2 ? 0.36 : 0.19);
+  const shaded = sunlit(atlas);
+  planets.forEach(({ r: radius, a, size }, i) => {
+    const r = radius + 1.41;
+    ring(plane, r, p.color("grey", 400), i === 2 ? 0.25 : 0.1);
     const pos = new T.Vector3(r * Math.cos(a), r * Math.sin(a), 0).applyEuler(plane.rotation).add(plane.position);
-    const body =
-      i === 2
-        ? globe(p, earthMap, size)
-        : new T.Mesh(planetSphere(size, i), new T.MeshStandardMaterial({ map: atlas, roughness: 0.96 }));
+    const body = i === 2 ? globe(p, earthMap, size) : new T.Mesh(planetSphere(size, i), shaded);
     body.position.copy(pos);
     w.root.add(body);
     if (i === 2) {
@@ -117,11 +136,7 @@ export function solarSystem(p: Paint, earthMap: T.Texture, atlas: T.Texture) {
       pickable(w, body, "Terra");
       tag("Terra", pos, -0.8);
       const lunarPos = pos.clone().add(new T.Vector3(0.65, 0.61, 0.09));
-      const moon = mesh(
-        w.root,
-        planetSphere(0.16, 2),
-        new T.MeshStandardMaterial({ map: atlas, roughness: 0.98 })
-      );
+      const moon = mesh(w.root, planetSphere(0.16, 2), shaded);
       moon.position.copy(lunarPos);
       pickable(w, moon, "Luna");
       tag("Luna", lunarPos, 0.49);

@@ -51,7 +51,7 @@ export function label(
   const map = texture(width, 96, (ctx) => {
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.font = "500 58px Georgia, serif";
+    ctx.font = "500 58px LabMincho, Georgia, serif";
     ctx.shadowColor = p.color("grey", 900);
     ctx.shadowBlur = dark ? 0 : 3;
     ctx.fillStyle = p.color("grey", dark ? 800 : 100);
@@ -63,9 +63,7 @@ export function label(
     map.needsUpdate = true;
   }
   setText(text);
-  const sprite = new T.Sprite(
-    new T.SpriteMaterial({ map, depthTest: false, depthWrite: false, transparent: true })
-  );
+  const sprite = new T.Sprite(new T.SpriteMaterial({ map, depthTest: false, depthWrite: false, transparent: true }));
   sprite.position.set(x, y, z);
   sprite.scale.set((height * width) / 96, height, 1);
   sprite.renderOrder = 6;
@@ -90,6 +88,7 @@ export function ring(parent: T.Object3D, radius: number, color: string, opacity:
 export type World = {
   root: T.Group;
   portal: T.Vector3;
+  projectPlate?: (cameraZ: number) => void;
   /** Only these objects participate in picking. Label and decorative sprites have broad transparent bounds. */
   hits: T.Object3D[];
   marks: Map<string, T.Object3D>;

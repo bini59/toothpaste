@@ -358,12 +358,10 @@ export default function ModelLab() {
                       onClick={() => selectFamily(i, true)}
                     >
                       {art ? (
-                        <img
-                          alt=""
-                          src={art.image}
-                          width={32}
-                          height={32}
-                          className="size-8 shrink-0 rounded object-cover"
+                        <span
+                          aria-hidden
+                          className="size-8 shrink-0 bg-current"
+                          style={{ mask: `url("${art.image}") center / contain no-repeat` }}
                         />
                       ) : tool === "agy" && symbols[f.key] ? (
                         <span className="shrink-0 font-mono font-semibold">{symbols[f.key]}</span>
