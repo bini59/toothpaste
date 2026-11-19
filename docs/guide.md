@@ -78,7 +78,7 @@ Docker로 바꾼 동안에는 호스트 설치용 `tp update`, `tp setup`, `tp m
   1. 별을 누르거나 **태양계로 들어가기**를 누르면 OpenAI의 Luna(달), Terra(지구), Sol(태양), Astra(별 무리)를 둘러볼 수 있어요.
   2. **Anthropic · 지구에서 일본으로**를 누르면 카메라가 지구를 지나 일본에 도착해요. 네 삽화에서 Fable, Opus, Sonnet, Haiku를 고릅니다.
   3. Haiku의 **Haiku 선택**은 Claude 모델을 확정해요. **더 확대 · AGY 원자 모형**을 누르거나 장면에서 Haiku 삽화를 한 번 더 누르면 잎의 이슬방울 속으로 들어갑니다. Hydrogen(H), Neon(Ne), Argon(Ar)의 원자 모형을 고르고 **이 모델 선택**을 누르면 AGY 모델이 확정돼요. **Haiku로**를 누르면 일본 장면으로 돌아갑니다.
-  4. 실행 모델의 이름과 ID는 설정에 표시되는 계정 목록을 사용해요. 한 계열에 버전이나 추론 강도가 여럿이면 목록에서 고릅니다. OpenAI의 실행 도구는 `codex`, Anthropic의 실행 도구는 `claude`예요. 계정에 없는 모델도 둘러볼 수 있어요. Claude 별칭의 실행 권한은 **계정 권한 미확인**으로 표시해요. 확정한 모델은 현재 브라우저의 실험실에 저장해요.
+  4. 실행 모델의 이름과 ID는 설정에 표시되는 계정 목록을 사용해요. 한 계열에 버전이나 추론 강도가 여럿이면 목록에서 고릅니다. 전용 전시물이 없는 계정 모델을 고르면 장면 위쪽에 결정 모양 표식과 해당 모델의 실행 ID가 나타나요. OpenAI의 실행 도구는 `codex`, Anthropic의 실행 도구는 `claude`예요. 계정에 없는 모델도 둘러볼 수 있어요. Claude 별칭의 실행 권한은 **계정 권한 미확인**으로 표시해요. 확정한 모델은 현재 브라우저의 실험실에 저장해요.
   5. 장면 옆이나 아래의 목록은 터치·키보드로 조작할 수 있고 WebGL을 쓸 수 없을 때도 동작해요. 휠·세로 스와이프·↑↓는 이동, 좌우 드래그는 회전, Home·End는 첫·마지막 모델, Esc는 이전 장면입니다. 동작 줄이기를 켜면 카메라가 즉시 이동해요.
 
   지구와 일본의 위성 영상은 NASA Earth Observatory의 2004년 7월 Blue Marble을 사용해요. [NASA Blue Marble](https://science.nasa.gov/earth/earth-observatory/blue-marble-next-generation/base-topography-bathymetry/)

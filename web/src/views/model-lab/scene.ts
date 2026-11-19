@@ -1,10 +1,11 @@
 import * as T from "three";
-import { artworks, type PrintName, type Visit } from "./catalog";
+import { artworks, type Floor, type PrintName, type Tool } from "./catalog";
+import { createExhibitSelector } from "./exhibitSelection";
 import { atomicModels, haikuDetail, japanPrints, microscopicField } from "./exhibits";
 import { pigments, type World } from "./materials";
 import { constellation, earthApproach, nightSky, solarSystem } from "./space";
 
-export type SceneVisit = Visit | null;
+export type SceneVisit = { tool: Tool; floor: Floor } | null;
 export type Gallery = ReturnType<typeof createGallery>;
 const depthFor = (v: SceneVisit) => (!v ? 0 : { codex: 1, claude: 3, agy: 5 }[v.tool]);
 const magnification = [6.5, 6, 5.5, 5.2, 7];
@@ -68,6 +69,7 @@ export function createGallery(canvas: HTMLCanvasElement) {
     haikuDetail(prints.Haiku),
     atoms.world,
   ];
+  const selectors = worlds.map((w) => createExhibitSelector(w, p));
   for (const w of worlds) {
     w.root.visible = false;
     scene.add(w.root);
@@ -149,8 +151,8 @@ export function createGallery(canvas: HTMLCanvasElement) {
   }
   function visit(next: SceneVisit, immediate = false) {
     destination = next;
-    for (const w of worlds) for (const [key, mark] of w.marks) mark.visible = key === next?.key;
     const target = depthFor(next);
+    selectors.forEach((select, i) => select(i === target ? next?.floor : undefined));
     if (immediate || motion.matches) {
       depth = to = target;
       yaw = 0;
@@ -201,8 +203,8 @@ export function createGallery(canvas: HTMLCanvasElement) {
       w.root.rotation.y = yaw;
       w.root.updateMatrixWorld(true);
       ray.setFromCamera(new T.Vector2(((x - r.left) * 2) / r.width - 1, 1 - ((y - r.top) * 2) / r.height), camera);
-      let obj: T.Object3D | null =
-        ray.intersectObjects(w.hits, true).find((hit) => hit.object instanceof T.Mesh)?.object ?? null;
+      const hits = ray.intersectObjects(w.hits.filter((object) => object.visible), true);
+      let obj: T.Object3D | null = hits.find((hit) => hit.object instanceof T.Mesh)?.object ?? null;
       while (obj && !obj.userData.choice) obj = obj.parent;
       return obj?.userData.choice ?? null;
     },

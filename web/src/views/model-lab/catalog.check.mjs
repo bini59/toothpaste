@@ -1,7 +1,10 @@
 // Run with npm run check (Node 24 strips the imported TypeScript types).
 import assert from "node:assert/strict";
+import { Object3D, Texture } from "three";
 import { modelsForTool } from "../../agentModels.ts";
 import { backFrom, floorsFor, modelStatus, printFor, readSelection, zoomFrom } from "./catalog.ts";
+import { createExhibitSelector } from "./exhibitSelection.ts";
+import { highlight, world } from "./materials.ts";
 
 const model = (id, name = id) => ({ id, name, efforts: [], default_effort: null });
 const agy = [model("gemini-4-neon-high", "Gemini 4 Neon (High)")];
@@ -44,4 +47,42 @@ assert.equal(zoomFrom({ tool: "agy", key: "Hydrogen" }), null);
 assert.equal(readSelection(JSON.stringify(haiku)), null);
 for (const name of ["Fable", "Opus", "Sonnet", "Haiku"]) assert.ok(printFor(name)?.image);
 assert.equal(printFor("toString"), undefined);
-console.log("model lab catalog and zoom route ok");
+
+// Build the Three.js scene objects with a stand-in for the label's 2D canvas.
+const labels = [];
+const context = {
+  clearRect() {},
+  fillText(text) { labels.push(text); },
+};
+globalThis.document = { createElement: () => ({ getContext: () => context }) };
+const paint = { color: () => "white", haze: new Texture() };
+for (const tool of ["codex", "agy", "claude"]) {
+  const entries = floorsFor(tool, [model("long-model", "Preview"), model("another-model", "Preview")]);
+  const [first, second] = entries.slice(-2);
+  const w = world();
+  const named = new Object3D();
+  highlight(w, entries[0].key, named);
+  const select = createExhibitSelector(w, paint);
+  select(entries[0]);
+  assert.ok(named.visible);
+  select(first);
+  const [marker] = w.hits;
+  assert.equal(marker.parent, w.root);
+  assert.ok(marker.visible && marker.children.some((child) => child.isMesh));
+  assert.ok(marker.children.some((child) => child.isSprite && child.material.map?.isCanvasTexture));
+  assert.equal(marker.userData.choice, first.key);
+  assert.equal(named.visible, false);
+  assert.equal(labels.at(-1), "long-model");
+  select(second);
+  assert.equal(w.hits.length, 1);
+  assert.equal(marker.userData.choice, second.key);
+  assert.equal(labels.at(-1), "another-model");
+  select(entries[0]);
+  assert.ok(named.visible && !marker.visible);
+  select(first);
+  assert.ok(marker.visible && !named.visible);
+  select();
+  assert.equal(marker.visible, false);
+}
+delete globalThis.document;
+console.log("model lab catalog, zoom route and 3D exhibit selection ok");

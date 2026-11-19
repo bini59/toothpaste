@@ -57,22 +57,30 @@ export function seeded(seed: number) {
   return () => ((seed = (Math.imul(seed, 1664525) + 1013904223) | 0) >>> 0) / 4294967296;
 }
 
-export function label(parent: T.Object3D, p: Paint, text: string, x: number, y: number, z: number, height = 0.48) {
-  const map = texture(512, 96, (ctx) => {
+export function label(
+  parent: T.Object3D, p: Paint, text: string, x: number, y: number, z: number, height = 0.48, width = 512
+) {
+  const map = texture(width, 96, (ctx) => {
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.font = "600 62px system-ui, sans-serif";
     ctx.shadowColor = p.color("grey", 900);
     ctx.shadowBlur = 12;
     ctx.fillStyle = p.color("grey", 50);
-    ctx.fillText(text, 256, 48);
   });
+  function setText(value: string) {
+    const ctx = map.image.getContext("2d")!;
+    ctx.clearRect(0, 0, width, 96);
+    ctx.fillText(value, width / 2, 48, width - 16);
+    map.needsUpdate = true;
+  }
+  setText(text);
   const sprite = new T.Sprite(new T.SpriteMaterial({ map, depthTest: false, depthWrite: false, transparent: true }));
   sprite.position.set(x, y, z);
-  sprite.scale.set((height * 512) / 96, height, 1);
+  sprite.scale.set((height * width) / 96, height, 1);
   sprite.renderOrder = 6;
   parent.add(sprite);
-  return sprite;
+  return setText;
 }
 
 export function ring(parent: T.Object3D, radius: number, color: string, opacity: number) {

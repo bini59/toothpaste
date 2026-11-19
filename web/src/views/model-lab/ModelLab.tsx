@@ -91,6 +91,7 @@ export default function ModelLab() {
       floors.findIndex((f) => f.key === visit?.key)
     ),
     floor = floors[index];
+  const sceneVisit = useMemo(() => visit && { tool: visit.tool, floor }, [visit, floor]);
   const model =
     floor.models.find((m) => m.id === pickedId) ??
     floor.models.find((m) => saved?.tool === tool && m.id === saved.id) ??
@@ -196,7 +197,7 @@ export default function ModelLab() {
       </header>
       <Card className="grid overflow-hidden @min-[54rem]:grid-cols-[minmax(0,1fr)_19rem]">
         <figure className="min-w-0 bg-background">
-          <GalleryCanvas visit={visit} onPick={chooseObject} onStep={step} />
+          <GalleryCanvas visit={sceneVisit} onPick={chooseObject} onStep={step} />
           <figcaption className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-4 py-3 sm:px-5">
             <div className="flex min-w-0 items-start gap-3">
               <Icon aria-hidden className="mt-1 size-4 shrink-0 text-text-muted" />
