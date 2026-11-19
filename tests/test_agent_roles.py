@@ -70,6 +70,7 @@ class ValidateTest(unittest.TestCase):
         self.assertEqual(self.errors({}), [])
         self.assertEqual(self.errors({"work": {"tool": "claude", "model": "opus", "effort": "high", "ultracode": True},
                                       "check": {"effort": "low"}}), [])
+        self.assertEqual(self.errors({"work": {"tool": "agy", "model": "gemini-4-neon-high"}}), [])
 
     def test_invalid(self):
         self.assertTrue(any("global.agents:" in e for e in self.errors([])))
@@ -77,6 +78,8 @@ class ValidateTest(unittest.TestCase):
         self.assertTrue(any("global.agents.review.tool" in e for e in self.errors({"review": {"tool": "gemini"}})))
         self.assertTrue(any("global.agents.work.ultracode" in e for e in self.errors({"work": {"tool": "codex", "ultracode": True}})))
         self.assertTrue(any("global.agents.check:" in e for e in self.errors({"check": "claude"})))
+        self.assertTrue(any("global.agents.review.effort" in e for e in self.errors(
+            {"review": {"tool": "agy", "model": "gemini-4-neon-high", "effort": "low"}})))
 
     def test_repo_without_tool_checks_against_the_work_card(self):
         # ultracode needs claude: the repo has no tool, the work card says claude, the global agent is codex

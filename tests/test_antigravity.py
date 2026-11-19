@@ -65,6 +65,7 @@ else:
     elif "second turn" in text:
         sys.exit(1)
     result = {"status": "SUCCESS", "conversation_id": "CONVERSATION_ID", "response": text.splitlines()[-1]}
+    print("non-interactive CLI diagnostic", file=sys.stderr)
     print(json.dumps({"event": "result", "result": result}))
 """
 

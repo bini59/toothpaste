@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from . import core
+from . import antigravity, core
 from .core import ROOT, db, event, now
 
 MODES = ("staging", "direct", "promote", "all")
@@ -310,7 +310,8 @@ def validate(doc: dict, old: dict | None = None) -> list[str]:
                                              and re.fullmatch(r"[A-Za-z0-9._:/\[\]-]+", ag["model"]) is not None),
                  f"{path}.model", "모델 이름은 영문, 숫자, . _ : / - [ ] 만 써요")
             known = next((m for m in agent_models().get(tool, []) if m["id"] == ag.get("model")), None)
-            levels = (known or {}).get("efforts") or AGENT_EFFORTS.get(tool, ())
+            pinned = antigravity.pinned_effort(ag.get("model")) if tool == "agy" else None
+            levels = (pinned,) if pinned else (known or {}).get("efforts") or AGENT_EFFORTS.get(tool, ())
             need(ag.get("effort") is None or ag["effort"] in levels, f"{path}.effort",
                  f"{tool}{' ' + ag['model'] if known else ''}: {', '.join(levels)} 중 하나여야 해요")
             need(ag.get("ultracode") in (None, True, False), f"{path}.ultracode", "true/false여야 해요")
@@ -877,7 +878,6 @@ def api_state() -> dict:
 
 
 def _api_state(con) -> dict:
-    from . import antigravity
     from .runner import agent_path
 
     doc = current(con)

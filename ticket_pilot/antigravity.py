@@ -80,13 +80,20 @@ def save_key(value) -> None:
     secret_set(SERVICE, API_KEY, key)
 
 
+def pinned_effort(slug) -> str | None:
+    match = EFFORT_SUFFIX.search(slug) if isinstance(slug, str) else None
+    return match[1] if match else None
+
+
 def parse_models(output: str) -> list[dict]:
     models = {}
     for line in output.splitlines():
         match = re.fullmatch(r"([a-zA-Z0-9][\w.:-]*)[\t ]+(.+)", line.strip())
         if match and (match[1].count("-") >= 1 or "\t" in line):
             slug, name = match.groups()
-            models[slug] = {"id": slug, "name": name.strip(), "efforts": [], "default_effort": None}
+            effort = pinned_effort(slug)
+            models[slug] = {"id": slug, "name": name.strip(), "efforts": [effort] if effort else [],
+                            "default_effort": effort}
     return list(models.values())
 
 
@@ -112,7 +119,9 @@ def account(exe: str) -> dict:
         out["neon_reason"] = "계정 또는 모델 목록을 확인하지 못했어요."
         return out
     out["models"] = models
-    if out["method"] and not any(m["id"].startswith("gemini-4-neon") for m in models):
+    if key and out["method"] and not models:
+        out["neon_reason"] = "이 Gemini API 키와 호환되는 Antigravity 모델이 없어요. 프로젝트의 모델 권한과 결제 설정을 확인하세요."
+    elif out["method"] and not any(m["id"].startswith("gemini-4-neon") for m in models):
         out["neon_reason"] = ("Gemini 4 Neon은 이 키의 모델 목록에 없어요. Neon을 제공하는 유료 Gemini API 프로젝트의 키가 필요해요."
                               if key else "Gemini 4 Neon은 이 계정의 모델 목록에 없어요. Google AI Free·Plus는 미지원이며, "
                               "유료 Pro, 대상 기기의 Pro 체험, Ultra 또는 Enterprise 권한이 필요해요.")
@@ -202,7 +211,9 @@ def run_turn(log: str, cmd: list[str]) -> int:
     sid = result.get("conversation_id")
     if isinstance(sid, str) and CONVERSATION.fullmatch(sid):
         Path(f"{log}.conversation").write_text(sid)
-    print(result.get("response") or "")
+    response = result.get("response") or ""
+    Path(f"{log}.last").write_text(response, encoding="utf-8")
+    print(response)
     return 0
 
 

@@ -536,7 +536,7 @@ function AgentFields({ a, onChange, c, inherit, accounts }: {
     save((n) => {
       n.model = v || null;
       const ok = m?.efforts?.length ? m.efforts : c.agent_efforts[tool] || [];
-      if (n.effort && !ok.includes(n.effort)) n.effort = null;
+      if (n.effort && (!ok.includes(n.effort) || tool === "agy" && m?.default_effort)) n.effort = null;
     });
   };
   const out = (x: string) => accounts?.tools[x] && !accounts.tools[x].logged_in;
@@ -567,12 +567,12 @@ function AgentFields({ a, onChange, c, inherit, accounts }: {
             onChange={(e) => { const v = e.target.value.trim(); save((n) => { n.model = v || null; }); }} />
         )}
       </Row>
-      <Row label="추론 강도" desc={"비우면 CLI 설정 그대로" + defaultHint}>
+      {!(tool === "agy" && listed?.default_effort) && <Row label="추론 강도" desc={"비우면 CLI 설정 그대로" + defaultHint}>
         <Select className={selectCls} value={a.effort || ""} onChange={(e) => { const v = e.target.value; save((n) => { n.effort = v || null; }); }}>
           <option value="">CLI 설정 따름</option>
           {efforts.map((x) => <option key={x} value={x}>{x}</option>)}
         </Select>
-      </Row>
+      </Row>}
       {tool === "claude" && (
         <CheckRow label="ultracode" checked={!!a.ultracode} onChange={(v) => save((n) => { n.ultracode = v || null; })}
           desc="Claude가 큰 작업을 여러 하위 에이전트로 나눠 병렬로 처리해요. 결과는 더 꼼꼼해지지만 사용량이 크게 늘어요. dynamic workflows가 켜진 계정에서, xhigh를 지원하는 모델일 때만 실제로 켜져요." />
@@ -1107,7 +1107,7 @@ export function Accounts({ a, error, onRefresh, children }: { a: AgentAccounts |
               {t.method && <span className="text-xs text-text-muted">{METHOD[t.method]}</span>}
             </div>
             {t.logged_in && t.account.length > 0 && <p className="text-text-main">{t.account.join(" · ")}</p>}
-            {!t.installed && <p className="text-text-muted">PATH에서 {tool} 명령을 찾지 못했어요{a.docker ? " (Docker 이미지를 다시 빌드해요)" : ""}.</p>}
+            {!t.installed && <p className="text-text-muted">PATH에서 {tool} 명령을 찾지 못했어요{a.docker && tool !== "agy" ? " (Docker 이미지를 다시 빌드해요)" : ""}.</p>}
             {t.neon_reason && <p className="text-text-muted">{t.neon_reason}</p>}
             {!t.installed && tool === "agy" && <a href="https://antigravity.google/docs/getting-started/"
               target="_blank" rel="noreferrer" className="font-semibold text-primary-700 underline">Antigravity CLI 설치 안내</a>}

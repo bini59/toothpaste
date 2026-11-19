@@ -7,8 +7,8 @@ and secrets keep their `ticket-pilot` names, so existing installs keep working.)
 
 toothpaste runs a ticket → agent → PR → AI review → deploy pipeline on your own machine. It picks up tickets from
 **Asana** (tasks tagged `tp`, setting `asana_tag`) and **GitHub issues**, gives each one a git worktree and a headless
-coding agent (**Claude Code** `claude`, **Codex** `codex`, or **Antigravity** `agy`, your own login), has the agent open a draft PR, reviews the
-PR with another agent, and lets you approve merges and production deploys from a local dashboard.
+coding agent (**Claude Code** `claude`, **Codex** `codex`, or **Antigravity** `agy`, your own login). The agent opens a draft PR,
+another agent reviews it, and you approve merges and production deploys from the local dashboard.
 
 - Runs on **macOS** and **Linux** (systemd), or in **Docker**.
 - Needs Python 3.11+, `git`, `gh` (logged in) and the `claude`, `codex` or `agy` CLI (logged in). No pip packages.

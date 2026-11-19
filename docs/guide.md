@@ -213,13 +213,13 @@ staging 열차 레포와 `pr_into_staging` 레포는 티켓 브랜치를 staging
   - claude 로그아웃은 tp에 저장한 토큰과 키만 지워요. CLI 자체 로그인은 그대로예요.
   - 고급(터미널): `claude setup-token`을 실행하고 출력된 토큰을 claude 카드의 **토큰 붙여넣기**에 넣어요. CLI 자체 로그인은 `claude` 실행 후 `/login`, `codex login`.
     Docker 모드에서는 저장소 폴더에서 `cd docker && docker compose exec tp claude`처럼 컨테이너 안에서 실행해요.
-  - **Antigravity (agy)**: [공식 설치 안내](https://antigravity.google/docs/getting-started/)에 따라 tp가 실행되는 호스트나 컨테이너에 CLI를 설치하세요.
+  - **Antigravity (agy)**는 tp가 실행되는 호스트나 컨테이너에 설치하세요. [공식 설치 안내](https://antigravity.google/docs/getting-started/)
     **Google 계정 로그인**을 눌러 브라우저의 코드를 붙여넣거나 같은 환경의 터미널에서 `agy`를 열어 로그인할 수 있어요.
     **Gemini API 키**로 연결하려면 결제가 활성화된 Google AI Studio 프로젝트의 키를 넣으세요. tp가 키를 확인해 비밀 저장소에 보관하고 agy 실행에 전달해요.
     터미널에서 설정했다면 `~/.gemini/antigravity-cli/settings.json`의 `modelProvider`가 `gemini`이고 tp 실행 환경에 `GEMINI_API_KEY`가 있어야 해요.
   - Antigravity에는 연결된 계정의 모델이 표시돼요. **Gemini 4 Neon**은 Google AI Free·Plus에 제공되지 않아요.
     유료 Pro, 대상 프리미엄 기기의 Pro 체험, Ultra, Enterprise 또는 Neon 이용 권한이 있는 유료 Gemini API 프로젝트가 필요해요.
-    프로젝트 채팅은 같은 레포와 도구를 쓰는 동안 Antigravity 대화 ID로 이어집니다. [Neon 이용 조건](https://antigravity.google/docs/models)
+    프로젝트 채팅은 같은 레포와 도구를 쓰는 동안 Antigravity 대화 ID로 이어집니다. [Google 계정의 모델 이용 조건](https://antigravity.google/docs/models) · [Gemini API의 Neon 이용 조건](https://aistudio.google.com/docs/pricing#gemini-4-neon)
   - 연결 해제는 tp에 저장한 Gemini API 키는 대시보드에서, Google 계정은 `agy`의 `/logout`으로, 직접 설정한 API 키는 `modelProvider` 설정을 제거해요.
     터미널에서 변경한 뒤 **다시 확인**을 누르면 바로 반영돼요.
 - **사이드바 사용량**에는 설치와 인증이 확인된 에이전트만 표시돼요. 로그아웃하면 이전에 조회한 값이 있어도 해당 행이 사라지고, 연결된 도구가 없으면 영역도 접혀요.
