@@ -168,15 +168,18 @@ staging 열차 레포와 `pr_into_staging` 레포는 티켓 브랜치를 staging
 1. **staging**(티켓 → staging): AI가 승인한 PR을 staging 브랜치에 머지합니다(리뷰 완료 카드의 머지 승인).
 2. **direct**(티켓 → prod, staging 건너뜀): PR base가 이미 prod면 그대로 머지, 아니면 prod에서 `release/<키>-<시각>` 브랜치를 만들어
    PR의 커밋을 cherry-pick해 머지하고, 원래 PR도 자기 base에 머지합니다.
-3. **promote**(staging의 티켓 → prod): 이미 staging에 있는 PR을 같은 cherry-pick 방식으로 prod에 올립니다.
+3. **promote**(staging의 PR → prod): 티켓 배포 표에서 staging에 머지된 PR마다 한 행을 표시합니다. 그 행의 **prod 반영**은 선택한 PR의 커밋만 cherry-pick합니다.
+   CLI에서 PR을 지정하려면 `tp deploy promote --ticket 키 --pr URL`을 실행합니다. `--pr`을 생략하면 최신 실행의 PR을 사용합니다.
 4. **all**(staging 전체 → prod): staging 파이프라인이 초록이면 `staging -> prod` PR을 머지합니다. toothpaste 밖에서 들어간 커밋도 같이 나가요.
 
 버튼은 요청만 기록하고, 다음 tick이 머지 → 프로덕션 파이프라인 확인까지 진행합니다. 레포마다 한 번에 하나씩 순서대로 돌고, 자동 롤백은 없습니다.
 배포 화면의 "staging에 있고 프로덕션에 없는 것"은 나갈 커밋과 AI 메모(배포 추천 / 확인 필요 / 보류)를 보여 줄 뿐, 배포는 버튼으로만 합니다.
+배포 화면의 대기 PR 수와 배포 열차는 레포의 staging 브랜치에 머지되었고, 배포 기록이나 프로덕션 반영 기록이 아직 없는 PR을 기준으로 집계합니다.
 
 **배포 열차**: 열차 레포(`deploy.repos.*.train`)는 설정 `release`의 평일 시간대(기본 월-금 10:00부터 120분, Asia/Seoul)에
 자동으로 `staging -> main`을 머지하고 프로덕션 파이프라인을 기다립니다. staging에 승인된 PR이 아닌 커밋이 있거나 staging 파이프라인이
-초록이 아니면 그날 열차는 멈춰요. 배포 화면에서 다음 시각, 실을 내용, 보류 스위치를 볼 수 있습니다. 열차가 없는 레포의 staging 티켓은
+초록이 아니면 그날 열차는 멈춰요. 배포 화면에서 다음 시각, 자동 배포 레포의 staging 대기 PR 수, 보류 스위치를 볼 수 있습니다.
+대기 PR 수에는 다른 배포에서 처리 중이거나 다음 마일스톤 PR을 기다리는 PR도 포함됩니다. 열차가 없는 레포의 staging PR은
 배포 화면에서 promote나 all로 올립니다.
 
 **프로덕션 확인과 완료**: 머지는 배포가 아닙니다. 티켓은 프로덕션이 실제로 그 커밋을 돌리는 것이 확인될 때까지 배포 대기에 있고,

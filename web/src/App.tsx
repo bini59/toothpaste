@@ -5,7 +5,7 @@ import { fetchState, getJson, post, postJson } from "./api";
 import { CommandPalette } from "./components/CommandPalette";
 import { UsageCard } from "./components/UsageCard";
 import { ROLES, ago, deployable, indexState, milestones } from "./lib";
-import type { InboxNotification, LanMe, Mode, Project, State } from "./types";
+import type { DeployRequest, InboxNotification, LanMe, Project, State } from "./types";
 import { Board } from "./views/Board";
 import { ChatCompactions } from "./views/ChatCompactions";
 import { Help } from "./views/Help";
@@ -193,7 +193,7 @@ export default function App({ me }: { me: LanMe }) {
   const actions = { onAssign, onSkip, onApprove, onOverride, onReply, onDrop };
   const onMilestoneDone = (parent: string, cancel: boolean) => act("/api/milestone-done", { parent, cancel });
   const onHold = (hold: boolean) => act("/api/release-hold", { hold });
-  const onDeploy = (mode: Mode, ticket?: string, repo?: string) => act("/api/deploy", { mode, ticket, repo });
+  const onDeploy = (request: DeployRequest) => act("/api/deploy", request);
   const onCancelDeploy = (id: number) => act("/api/deploy-cancel", { id });
   const refresh = async () => { setSyncing(true); await act("/api/refresh", {}); setSyncing(false); };
 

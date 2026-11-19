@@ -1,7 +1,7 @@
 """Production tracking for merged PRs that were not shipped by ticket-pilot itself.
 
 A merged PR is not "done" until its change is in what production last deployed (2026-10-19).
-Merged PRs (stage `merged`, or `staged` when they sit in a staging branch) are checked on every review precheck;
+Merged PRs without a recorded release or production confirmation are checked on every review precheck;
 once the commit is in production this sets `prs.prod_at` and completes the Asana task (the owner approved Asana
 completion after production verification for every repo, 2026-10-19), which unblocks dependent tickets.
 
@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 from datetime import datetime
 
+from . import milestone as M
 from . import notifications as N
 from .core import db, event, gh_json, now, repo_rules, run
 
@@ -96,23 +97,28 @@ def _cherry_picked(repo_path: str | None, github: str, number: int, head: str, d
 
 
 def track_deploys(log=print) -> int:
-    from .pipeline import restage
+    from .pipeline import active_release_pr_urls, restage
 
     con = db()
-    restage(con)  # a PR merged since the last scan gets stage `merged` first
+    restage(con)
     cfg = track_config()
+    active_urls = active_release_pr_urls(con)
     rows = con.execute("""SELECT p.*, t.key, rp.path repo_path FROM prs p JOIN tickets t ON t.gid=p.ticket_gid
                           LEFT JOIN repos rp ON rp.name=p.repo
                           WHERE p.state='MERGED' AND p.prod_at IS NULL AND p.release_id IS NULL
-                            AND t.stage IN ('merged','staged')""").fetchall()
+                            AND (p.base IS NULL OR p.base NOT GLOB ?)""", (f"{M.PREFIX}*",)).fetchall()
     cache: dict[str, tuple[str | None, str]] = {}
     shipped = 0
     for p in rows:
+        if p["url"] in active_urls:
+            continue  # this release's own verification will mark it live
         try:
             if not p["merge_sha"] or not p["base"]:  # PRs merged before these columns existed
                 info = gh_json(["pr", "view", p["url"], "--json", "baseRefName,mergedAt,mergeCommit"])
                 con.execute("UPDATE prs SET base=?, merged_at=?, merge_sha=? WHERE url=?",
                             (info["baseRefName"], info["mergedAt"], (info.get("mergeCommit") or {}).get("oid"), p["url"]))
+                if (info["baseRefName"] or "").startswith(M.PREFIX):
+                    continue  # milestone completion verifies the subtasks as part of their round
                 p = con.execute("SELECT p.*, ? key, ? repo_path FROM prs p WHERE url=?", (p["key"], p["repo_path"], p["url"])).fetchone()
             rc = cfg.get(p["repo"])
             if not rc:
@@ -123,14 +129,15 @@ def track_deploys(log=print) -> int:
             if not sha or sha == p["track_sha"]:  # nothing new deployed since the last check
                 continue
             ok = _ancestor(p["github"], p["merge_sha"], sha) or _cherry_picked(p["repo_path"], p["github"], p["number"], p["head_sha"], sha)
-            con.execute("UPDATE prs SET track_sha=?, prod_at=?, prod_note=? WHERE url=?",
-                        (sha, now() if ok else None, how if ok else None, p["url"]))
-            if ok:
+            updated = con.execute("""UPDATE prs SET track_sha=?, prod_at=?, prod_note=?
+                                     WHERE url=? AND prod_at IS NULL AND release_id IS NULL""",
+                                  (sha, now() if ok else None, how if ok else None, p["url"]))
+            if ok and updated.rowcount:
                 shipped += 1
                 from .release import complete_asana
-                err = complete_asana(con, p["ticket_gid"])
+                err = complete_asana(con, p["ticket_gid"], pr_url=p["url"])
                 event(con, "release", f"{p['key']}: PR #{p['number']} is live in production ({how})"
-                                      + (f"; Asana 완료 처리 실패: {err}" if err else "; Asana completed"), p["ticket_gid"])
+                                      + (f"; Asana 완료 처리 실패: {err}" if err else ""), p["ticket_gid"])
                 N.add(con, "deploy", f"{p['key']} 프로덕션 반영", f"PR #{p['number']} ({how})", "#release", p["ticket_gid"])
                 log(f"track {p['key']}: PR #{p['number']} live ({how})")
             con.commit()

@@ -498,7 +498,8 @@ def main(argv=None):
     dp.add_argument("mode", choices=list(D.MODES))
     dp.add_argument("--ticket")
     dp.add_argument("--repo")
-    dp.set_defaults(fn=lambda a: print(D.request_deploy(a.mode, a.ticket, a.repo) or "approval requested"))
+    dp.add_argument("--pr", metavar="URL", help="PR to promote (defaults to the latest run's PR)")
+    dp.set_defaults(fn=lambda a: print(D.request_deploy(a.mode, a.ticket, a.repo, pr_url=a.pr) or "approval requested"))
     dc = sp.add_parser("deploy-cancel")
     dc.add_argument("id", type=int)
     dc.set_defaults(fn=lambda a: D.cancel_deploy(a.id))
@@ -508,7 +509,7 @@ def main(argv=None):
     rt.set_defaults(fn=_log_errors(lambda a: print(R.release_tick(force=a.force))))
     sp.add_parser("release-status").set_defaults(fn=lambda a: print(json.dumps({
         "next_release_at": R.next_release_at().isoformat(),
-        "staged": {k: [p["url"] for p in v] for k, v in R.staged_by_repo(db()).items()},
+        "staged": R.staged_pr_urls(db()),
         "today": [dict(r) for r in db().execute("SELECT * FROM releases WHERE day=? ORDER BY id", (R._today(),))],
     }, ensure_ascii=False, indent=1)))
 

@@ -4,7 +4,7 @@ Modes (2026-10-19):
   staging  ticket PR -> staging branch      = the existing approval (release.request_approval);
                                               repos without a staging branch but a `preview_label` get that label
   direct   ticket -> production, skipping staging
-  promote  a ticket already merged into staging -> production (only its own commits)
+  promote  a PR already merged into staging -> production (only its own commits)
   all      everything in staging -> production
 
 The dashboard only inserts a `releases` row (mode set, status `requested`). The host prechecks (every 5 min) run it right
@@ -28,15 +28,16 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from . import milestone as M
 from .core import db, event, gh_json, now, repo_rules, run
 from .pipeline import latest_run, restage, run_pr, slug
 from .release import (_execution_for, _finish, _gh, _today, deploy_timeout_min, expire_stale_train,
-                      request_approval, staging_branch, verify_deploy)
+                      request_approval, staged_by_repo, staging_branch, verify_deploy)
 
 MODES = {
     "staging": "티켓 → staging",
     "direct": "티켓 → prod (staging 건너뜀)",
-    "promote": "staging의 티켓 → prod",
+    "promote": "staging의 PR → prod",
     "all": "staging 전체 → prod",
     "preview": "티켓 → 프리뷰",
 }
@@ -59,8 +60,7 @@ def _approved(con, pr) -> bool:
 
 
 def staged_prs(con, repo: str) -> list[dict]:
-    rows = con.execute("""SELECT p.*, t.key, t.name tname FROM prs p JOIN tickets t ON t.gid=p.ticket_gid
-                          WHERE t.stage='staged' AND p.repo=? ORDER BY p.merged_at""", (repo,)).fetchall()
+    rows = staged_by_repo(con, [repo]).get(repo, [])
     return [_pr_item(p, p["key"], p["tname"]) for p in rows]
 
 
@@ -79,19 +79,33 @@ def busy_release(con, repo: str, before_id: int | None = None):
     return con.execute(q + (" AND id<?" if before_id else "") + " ORDER BY id LIMIT 1", args).fetchone()
 
 
-def deploy_target(con, mode: str, ticket: str | None = None, repo: str | None = None):
+def deploy_target(con, mode: str, ticket: str | None = None, repo: str | None = None, *, pr_url: str | None = None):
     """Return (info, error). Shared by the dashboard (validation) and the CLI."""
     if mode not in MODES or mode == "staging":
         return None, f"알 수 없는 배포 방식: {mode}"
+    if pr_url is not None:
+        if mode != "promote":
+            return None, "PR 지정은 staging의 PR을 배포할 때만 쓸 수 있어요"
+        if not isinstance(pr_url, str) or not pr_url:
+            return None, "배포할 PR 주소가 필요해요"
+        if not ticket:
+            return None, "티켓이 필요해요"
     t = pr = None
     if ticket:
         t = _ticket(con, ticket)
         if not t:
             return None, "티켓을 찾을 수 없어요"
-        r = latest_run(con, t["gid"])
-        pr = r and run_pr(con, r["id"])
-        if not pr:
-            return None, "PR이 없어요"
+        if pr_url is not None:
+            pr = con.execute("SELECT * FROM prs WHERE url=? AND ticket_gid=?", (pr_url, t["gid"])).fetchone()
+            if not pr:
+                return None, "이 티켓에서 지정한 PR을 찾을 수 없어요"
+            if repo and pr["repo"] != repo:
+                return None, "지정한 PR이 이 레포에 없어요"
+        else:
+            r = latest_run(con, t["gid"])
+            pr = r and run_pr(con, r["id"])
+            if not pr:
+                return None, "PR이 없어요"
         repo = pr["repo"]
     rr = repo_rules(repo) if repo else None
     if not rr:
@@ -124,14 +138,16 @@ def deploy_target(con, mode: str, ticket: str | None = None, repo: str | None = 
         stg = rr["staging"]["branch"] if rr["staging"] else None
         if pr["state"] != "MERGED" or not stg or pr["base"] != stg:
             return None, f"{stg or 'staging'}에 머지된 PR이 아니에요"
-        if pr["release_id"] or pr["prod_at"]:
+        if pr["release_id"] is not None or pr["prod_at"] is not None:
             return None, "이미 프로덕션에 반영됐어요"
+        if M.awaiting_next_round(con, t["gid"]):
+            return None, "다음 마일스톤 PR이 staging에 머지될 때까지 기다려 주세요"
     return {"repo": repo, "rr": rr, "t": t, "pr": pr, "prs": [_pr_item(pr, t["key"], t["name"])]}, None
 
 
-def request_deploy(mode: str, ticket: str | None = None, repo: str | None = None) -> int | None:
+def request_deploy(mode: str, ticket: str | None = None, repo: str | None = None, *, pr_url: str | None = None) -> int | None:
     con = db()
-    if mode == "staging":
+    if mode == "staging" and pr_url is None:
         t = _ticket(con, ticket or "")
         r = t and latest_run(con, t["gid"])
         pr = r and run_pr(con, r["id"])
@@ -141,7 +157,7 @@ def request_deploy(mode: str, ticket: str | None = None, repo: str | None = None
         else:
             request_approval(ticket)  # validates and records; the host merges it into staging within 5 min
             return None
-    info, err = deploy_target(con, mode, ticket, repo)
+    info, err = deploy_target(con, mode, ticket, repo, pr_url=pr_url)
     if err:
         raise SystemExit(err)
     gh = con.execute("SELECT github FROM repos WHERE name=?", (info["repo"],)).fetchone()
@@ -317,7 +333,7 @@ def _prepare(con, rel, rr, log) -> str:
     prs = staged_prs(con, rel["repo"])  # whatever reached staging since the request
     _save(con, rel["id"], prs_json=json.dumps(prs, ensure_ascii=False))
     rel = _row(con, rel["id"])
-    note = f"{stg} 전체 ({cmp['ahead']} 커밋, 추적 중인 티켓 {len(prs)}개)"
+    note = f"{stg} 전체 ({cmp['ahead']} 커밋, 추적 중인 PR {len(prs)}개)"
     if rr.get("version"):
         branch, new, old = _release_branch(repo_path, gh, target, f"release/staging-{stamp}", merge_ref=stg, bump=True)
         url = _open_pr(gh, target, branch, _title(rr, new, f"{stg} 전체"), _body(rel, prs, note, new))

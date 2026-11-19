@@ -339,13 +339,22 @@ class MilestoneTest(unittest.TestCase):
         self.ticket("A")
         self.pr("A", "MERGED", "milestone/P1", merged_at="2026-10-30T01")
         self.ticket(MS, in_ms=0)
-        self.pr(MS, "MERGED", "staging", merged_at="2026-10-30T02")  # staged, not live
+        staged = self.pr(MS, "MERGED", "staging", merged_at="2026-10-30T02")  # staged, not live
         self.restage()
         self.assertEqual(self.stage(MS), "staged")
         self.ticket("B")
         self.pr("B", "MERGED", "milestone/P1", merged_at="2026-10-30T04")
         self.restage()
         self.assertEqual(self.stage(MS), "ms_hold")
+        self.assertEqual(R.staged_pr_urls(self.con), {API: [staged]})
+        self.assertTrue(M.awaiting_next_round(self.con, MS))
+        prs_json = json.dumps([{"ticket_gid": MS, "url": staged}])
+        self.con.execute("INSERT INTO releases(day,repo,github,status,prs_json) VALUES (?,?,?,'pending',?)",
+                         ("2026-10-30", API, "o/api", prs_json))
+        rel = self.con.execute("SELECT * FROM releases").fetchone()
+        with mock.patch.object(R, "gh_json", return_value={"commits": [{"sha": "held-merge"}]}) as gh:
+            self.assertEqual(R._start(self.con, rel, log=lambda _: None), "aborted")
+        gh.assert_called_once_with(["api", "repos/o/api/compare/main...staging"])
         with mock.patch.object(M, "db", lambda: self.con):
             M.mark_done("P1")
         self.restage()
@@ -354,6 +363,7 @@ class MilestoneTest(unittest.TestCase):
         self.pr(MS, "MERGED", "staging", merged_at="2026-10-30T05")
         self.restage()
         self.assertEqual(self.stage(MS), "staged")
+        self.assertFalse(M.awaiting_next_round(self.con, MS))
 
     def test_round_completes_only_its_own_subtasks(self):
         self.ticket("A")
@@ -361,11 +371,13 @@ class MilestoneTest(unittest.TestCase):
         self.ticket("B")
         self.pr("B", "MERGED", "milestone/P1", merged_at="2026-10-30T05")  # merged after the milestone PR
         self.ticket(MS, in_ms=0)
-        self.pr(MS, "MERGED", "staging", merged_at="2026-10-30T02")
+        shipped = self.pr(MS, "MERGED", "staging", merged_at="2026-10-30T02")
+        self.pr(MS, "OPEN", "staging")
         done = []
         with mock.patch.object(R, "asana", side_effect=lambda m, path, body=None: done.append(path)):
-            R.complete_asana(self.con, MS)
+            R.complete_asana(self.con, MS, pr_url=shipped)
         self.assertEqual(done, ["/tasks/A"])
+        self.assertFalse(self.row(MS)["completed"])
 
     def test_complete_subtasks_then_parent(self):
         self.ticket("P1", parent=None, in_ms=0, tags=("tp-milestone",))

@@ -69,6 +69,7 @@ export interface PR {
   mergeable: "MERGEABLE" | "CONFLICTING" | null;
   /** open PRs only: tp's own checks of the head commit (checks.py) */
   checks?: PrChecks;
+  awaiting_milestone_round?: boolean;
 }
 export interface CheckRow {
   id: number;
@@ -186,6 +187,7 @@ export interface State {
   tickets: Ticket[];
   runs: Run[];
   prs: PR[];
+  staged_pr_urls: Record<string, string[]>;
   reviews: Review[];
   repos: Repo[];
   project_map: ProjectMapRow[];
@@ -271,6 +273,10 @@ export interface StagingDiff {
   note_at: string | null;
 }
 export type Mode = "staging" | "direct" | "promote" | "all" | "preview";
+export type DeployRequest =
+  | { mode: "staging" | "direct" | "preview"; ticket: string }
+  | { mode: "promote"; ticket: string; pr_url: string }
+  | { mode: "all"; repo: string };
 export interface Rule {
   staging: { branch: string; pipeline?: string } | null;
   prod: { branch: string; pipeline?: string; workflow?: string; release?: boolean; ecs?: unknown; smoke?: string[] };
