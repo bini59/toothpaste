@@ -1,10 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useThemeVersion } from "../../theme/theme";
-import type { Tool } from "./catalog";
 import type { Gallery, SceneVisit } from "./scene";
 
-export function GalleryCanvas({ visit, onEnter, onStep }: {
-  visit: SceneVisit; onEnter: (tool: Tool) => void; onStep: (direction: number) => void;
+export function GalleryCanvas({ visit, onPick, onStep }: {
+  visit: SceneVisit; onPick: (choice: string) => void; onStep: (direction: number) => void;
 }) {
   const canvas = useRef<HTMLCanvasElement>(null), gallery = useRef<Gallery | null>(null);
   const current = useRef(visit);
@@ -39,7 +38,7 @@ export function GalleryCanvas({ visit, onEnter, onStep }: {
   useEffect(() => {
     const el = canvas.current!;
     function move(event: WheelEvent) {
-      if (!visit || event.ctrlKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+      if (status !== "ready" || (!visit && event.deltaY < 0) || event.ctrlKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
       const gesture = wheel.current, now = performance.now();
       if (now - gesture.last > 190) { gesture.distance = 0; gesture.stepped = false; }
       gesture.last = now;
@@ -53,16 +52,16 @@ export function GalleryCanvas({ visit, onEnter, onStep }: {
     }
     el.addEventListener("wheel", move, { passive: false });
     return () => el.removeEventListener("wheel", move);
-  }, [visit, onStep]);
+  }, [visit, onStep, status]);
 
   const pointer = useRef<{ id: number; x: number; y: number; lastX: number; turned: boolean } | null>(null);
   return (
-    <div className="relative aspect-[1.55] w-full max-h-[min(59dvh,38rem)] min-h-52 overflow-hidden bg-grey-900">
-      <canvas ref={canvas} aria-label={visit ? "모델 전시물" : "세 프로바이더의 원형 입구 데크"} role="img"
+    <div data-renderer={status} className="relative aspect-[1.6] w-full max-h-[min(63dvh,42rem)] min-h-60 overflow-hidden bg-grey-900">
+      <canvas ref={canvas} aria-label={visit ? ({ codex: "OpenAI 태양계", claude: "일본의 네 문학 삽화", agy: "AGY 원자 모형" })[visit.tool] : "별 무리와 태양계 입구"} role="img"
         className="absolute inset-0 block h-full w-full"
-        style={{ touchAction: visit ? "pinch-zoom" : "pan-y pinch-zoom" }}
+        style={{ touchAction: status === "ready" ? "pinch-zoom" : "pan-y pinch-zoom" }}
         onPointerDown={(e) => {
-          if (!e.isPrimary || e.button !== 0) return;
+          if (status !== "ready" || !e.isPrimary || e.button !== 0) return;
           pointer.current = { id: e.pointerId, x: e.clientX, y: e.clientY, lastX: e.clientX, turned: false };
           e.currentTarget.setPointerCapture(e.pointerId);
         }}
@@ -76,7 +75,7 @@ export function GalleryCanvas({ visit, onEnter, onStep }: {
               drag.lastX = e.clientX;
             }
           } else if (!drag && e.pointerType === "mouse") {
-            e.currentTarget.style.cursor = visit ? "grab" : gallery.current?.entrance(e.clientX, e.clientY) ? "pointer" : "default";
+            e.currentTarget.style.cursor = gallery.current?.pick(e.clientX, e.clientY) ? "pointer" : visit ? "grab" : "default";
           }
         }}
         onPointerCancel={() => { pointer.current = null; }}
@@ -85,14 +84,14 @@ export function GalleryCanvas({ visit, onEnter, onStep }: {
           pointer.current = null;
           if (!drag || e.pointerId !== drag.id || drag.turned) return;
           const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
-          if (visit && Math.abs(dy) >= 36 && Math.abs(dy) > Math.abs(dx)) onStep(dy < 0 ? 1 : -1);
-          else if (!visit && Math.hypot(dx, dy) < 8) {
-            const tool = gallery.current?.entrance(e.clientX, e.clientY);
-            if (tool) onEnter(tool);
+          if (Math.abs(dy) >= 36 && Math.abs(dy) > Math.abs(dx)) onStep(dy < 0 ? 1 : -1);
+          else if (Math.hypot(dx, dy) < 8) {
+            const choice = gallery.current?.pick(e.clientX, e.clientY);
+            if (choice) onPick(choice);
           }
         }} />
       {status !== "ready" && <div role="status" className="pointer-events-none absolute inset-0 grid place-items-center bg-grey-100 p-6 text-center text-sm text-text-muted">
-        {status === "loading" ? "3D 전시실을 여는 중…" : "이 환경에서는 3D 장면을 표시할 수 없어요. 목록에서 입구와 층을 고를 수 있어요."}
+        {status === "loading" ? "3D 장면을 여는 중…" : "이 환경에서는 3D 장면을 표시할 수 없어요. 아래나 옆의 버튼에서 같은 장면과 모델을 선택할 수 있어요."}
       </div>}
     </div>
   );

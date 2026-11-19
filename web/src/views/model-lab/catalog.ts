@@ -1,21 +1,48 @@
 import type { AgentAccount, AgentModel } from "../../types";
 
 export const providers = {
-  agy: { name: "AGY", material: "금속 원소 타일" },
-  claude: { name: "Claude", material: "접힌 종이 조형" },
-  codex: { name: "OpenAI", material: "유리 천체" },
+  agy: { name: "AGY" },
+  claude: { name: "Anthropic" },
+  codex: { name: "OpenAI" },
 } as const;
 export type Tool = keyof typeof providers;
 export const tools: Tool[] = ["agy", "claude", "codex"];
 
 const collections = {
   agy: ["Hydrogen", "Neon", "Argon"],
-  claude: ["Haiku", "Sonnet", "Opus", "Fable"],
+  claude: ["Fable", "Opus", "Sonnet", "Haiku"],
   codex: ["Luna", "Terra", "Sol", "Astra"],
 } as const;
+export type PrintName = (typeof collections.claude)[number];
+export const artworks: Record<PrintName, { image: string; alt: string }> = {
+  Fable: { image: "/model-lab/fable.webp", alt: "잎사귀 등불을 든 숲속 여우" },
+  Opus: { image: "/model-lab/opus.webp", alt: "가을빛 아래 고토의 현을 연주하는 손" },
+  Sonnet: { image: "/model-lab/sonnet.webp", alt: "매화 핀 강가에서 마주 보는 두루미 두 마리" },
+  Haiku: { image: "/model-lab/haiku.webp", alt: "연잎 위에 맺힌 한 방울의 이슬" },
+};
+export function printFor(key: string) {
+  return Object.hasOwn(artworks, key) ? artworks[key as PrintName] : undefined;
+}
+
 export type Sculpture = (typeof collections)[Tool][number] | "Other";
 export type Floor = { key: string; name: string; sculpture: Sculpture; models: AgentModel[] };
 export type Visit = { tool: Tool; key: string };
+export const arrivals: Record<Tool, Visit> = {
+  codex: { tool: "codex", key: "Sol" },
+  claude: { tool: "claude", key: "Fable" },
+  agy: { tool: "agy", key: "Hydrogen" },
+};
+
+/** A visit is a camera destination. Only explicit confirmation writes an execution model. */
+export function zoomFrom(v: Visit | null): Visit | null {
+  if (!v) return arrivals.codex;
+  if (v.tool === "codex") return arrivals.claude;
+  return v.tool === "claude" && v.key === "Haiku" ? arrivals.agy : null;
+}
+export function backFrom(tool: Tool): Visit | null {
+  if (tool === "agy") return { tool: "claude", key: "Haiku" };
+  return tool === "claude" ? { tool: "codex", key: "Terra" } : null;
+}
 export type Selection = { tool: Tool; id: string; name: string };
 export const selectionKey = "tp.lab.model";
 
