@@ -31,6 +31,7 @@ from .core import DATA, ROOT, UNSORTED, db, now, project_map, settings
 MAX_TEXT = 32000
 REPLY_LIMIT = 200_000
 COMPACT_IDLE = timedelta(minutes=50)
+COMPACT_MIN_TOKENS = 100_000
 COMPACT_TIMEOUT = timedelta(minutes=5)
 COMPACT_LIMIT = 2  # keep a backlog of old conversations from starting all at once
 SUMMARY_LIMIT = 6000
@@ -463,7 +464,21 @@ def _finished_at(end: float | None) -> str:
     return datetime.fromtimestamp(end, timezone.utc).isoformat(timespec="seconds") if end is not None else now()
 
 
-_COMPACTION_DUE = """c.tool='claude' AND c.session IS NOT NULL AND datetime(c.updated_at) <= datetime(?)
+def _runner_claude_session(handle: str | None) -> str | None:
+    """Stopped and older failed turns may only have a session ID in the runner metadata."""
+    tool, session = R.session(handle)
+    return session if tool == "claude" else None
+
+
+# A later measured failure in the same session takes precedence over the last successful turn.
+_COMPACTION_DUE = """SELECT c.id, c.repo, c.session, baseline.context_tokens AS before_context_tokens
+    FROM chat_conversations c JOIN chat_messages baseline ON baseline.id=(
+        SELECT m.id FROM chat_messages m WHERE m.conversation_id=c.id AND m.role='assistant'
+          AND (m.failed=0 OR (m.failed=1 AND m.context_tokens IS NOT NULL
+               AND COALESCE(m.claude_session_id, runner_claude_session(m.handle))=c.session))
+        ORDER BY m.id DESC LIMIT 1)
+    WHERE c.tool='claude' AND c.session IS NOT NULL AND datetime(c.updated_at) <= datetime(?)
+    AND baseline.context_tokens >= ?
     AND NOT EXISTS (SELECT 1 FROM chat_messages m WHERE m.conversation_id=c.id AND m.text IS NULL)
     AND (SELECT m.role FROM chat_messages m WHERE m.conversation_id=c.id ORDER BY m.id DESC LIMIT 1)='assistant'"""
 
@@ -476,30 +491,25 @@ def compact_idle(con) -> None:
     if slots <= 0:
         return
     cutoff = (datetime.fromisoformat(now()) - COMPACT_IDLE).isoformat()
-    candidates = con.execute(f"""SELECT id FROM chat_conversations c WHERE {_COMPACTION_DUE}
-                                 ORDER BY c.updated_at DESC""", (cutoff,)).fetchall()
+    due = (cutoff, COMPACT_MIN_TOKENS)
+    con.create_function("runner_claude_session", 1, _runner_claude_session)
+    candidates = con.execute(_COMPACTION_DUE + " ORDER BY c.updated_at DESC", due).fetchall()
     if not candidates:
         return
     repos = project_map()["repos"]
     for candidate in candidates:
         con.execute("BEGIN IMMEDIATE")
         with con:
-            c = con.execute(f"SELECT * FROM chat_conversations c WHERE c.id=? AND {_COMPACTION_DUE}",
-                            (candidate["id"], cutoff)).fetchone()
+            c = con.execute(_COMPACTION_DUE + " AND c.id=?", (*due, candidate["id"])).fetchone()
             if not c:
                 continue
             path = os.path.expanduser((repos.get(c["repo"]) or {}).get("path") or "")
             if not os.path.isdir(path):
                 continue
-            last = con.execute("""SELECT id, handle, context_tokens FROM chat_messages WHERE conversation_id=?
+            last = con.execute("""SELECT handle FROM chat_messages WHERE conversation_id=?
                                   AND role='assistant' AND failed=0 ORDER BY id DESC LIMIT 1""", (c["id"],)).fetchone()
             prior = R.settings_of(last["handle"]) if last else {}
-            # A stopped or failed turn can still have added context to the session being compacted.
-            failed_turns = con.execute("""SELECT handle, context_tokens FROM chat_messages WHERE conversation_id=?
-                                          AND id>? AND role='assistant' AND failed=1 AND context_tokens IS NOT NULL
-                                          ORDER BY id DESC""", (c["id"], last["id"] if last else 0))
-            before = next((r["context_tokens"] for r in failed_turns if R.session(r["handle"]) == ("claude", c["session"])),
-                          last["context_tokens"] if last else None)
+            before = c["before_context_tokens"]
             agent = {"tool": "claude", "model": prior.get("model"), "effort": prior.get("effort"),
                      "ultracode": prior.get("ultracode")}
             tag = f"chat-compact-{c['id']}"

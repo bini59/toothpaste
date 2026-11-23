@@ -139,19 +139,31 @@ class AttachTest(unittest.TestCase):
             CH.send(self.id, "second", [{"name": "a.txt", "data": b64(b"x")}])
         self.assertFalse((CH.UPLOADS / self.id).exists())
 
-    def _claude_history(self, at):
+    def _claude_history(self, at, context_tokens):
         self.con.execute("UPDATE chat_conversations SET session='old', tool='claude', updated_at=? WHERE id=?",
                          (at, self.id))
         self.con.execute("INSERT INTO chat_messages(conversation_id,role,text,ts) VALUES(?,'user','old question',?)",
                          (self.id, at))
-        self.con.execute("INSERT INTO chat_messages(conversation_id,role,text,ts) VALUES(?,'assistant','old reply',?)",
-                         (self.id, at))
+        self.con.execute("""INSERT INTO chat_messages(conversation_id,role,text,ts,context_tokens)
+                            VALUES(?,'assistant','old reply',?,?)""", (self.id, at, context_tokens))
         self.con.commit()
 
+    def test_small_and_unknown_context_stay_out_of_idle_candidates(self):
+        self._claude_history("2026-11-18T12:00:00+00:00", 120_000)
+        with mock.patch.object(CH, "now", return_value="2026-11-18T12:50:00+00:00"), \
+             mock.patch.object(CH, "project_map", wraps=CH.project_map) as projects:
+            for context in (None, 99_999):
+                with self.subTest(context=context):
+                    self.con.execute("""INSERT INTO chat_messages(conversation_id,role,text,context_tokens)
+                                        VALUES(?,'assistant','latest reply',?)""", (self.id, context))
+                    self.con.commit()
+                    CH.compact_idle(self.con)
+                    CH.compact_idle(self.con)
+                    self.launch.assert_not_called()
+                    projects.assert_not_called()  # no candidates to look up on either tick
+
     def test_compaction_at_fifty_minutes_hands_off_to_a_new_session(self):
-        self._claude_history("2026-11-18T12:00:00+00:00")
-        self.con.execute("UPDATE chat_messages SET context_tokens=100 WHERE role='assistant'")
-        self.con.commit()
+        self._claude_history("2026-11-18T12:00:00+00:00", 100_000)
         with mock.patch.object(CH, "now", return_value="2026-11-18T12:49:59+00:00"):
             CH.compact_idle(self.con)
         self.launch.assert_not_called()
@@ -183,7 +195,7 @@ class AttachTest(unittest.TestCase):
         self.assertNotIn("old reply", prompt)
         compact = self.con.execute("SELECT * FROM chat_messages WHERE role='compaction'").fetchone()
         self.assertEqual((compact["before_context_tokens"], compact["input_tokens"], compact["context_tokens"]),
-                         (100, 10, 60))
+                         (100_000, 10, 60))
         self.assertEqual(self.con.execute("SELECT compaction_id FROM chat_messages WHERE id=?", (turn,)).fetchone()[0],
                          compact["id"])
         with mock.patch.object(CH.R, "agent_state", return_value=(False, 0)), \
@@ -196,7 +208,7 @@ class AttachTest(unittest.TestCase):
                          compact["id"])
 
     def test_compaction_without_summary_leaves_existing_session_resumable(self):
-        self._claude_history("2026-11-18T12:00:00+00:00")
+        self._claude_history("2026-11-18T12:00:00+00:00", 110_000)
         with mock.patch.object(CH, "now", return_value="2026-11-18T12:50:00+00:00"):
             CH.compact_idle(self.con)
         with mock.patch.object(CH.R, "agent_state", return_value=(False, 0)), \
@@ -244,10 +256,9 @@ class AttachTest(unittest.TestCase):
                           report["net_savings_tokens"]), (80, 2, 2, 130))
 
     def test_compaction_baseline_includes_failed_resumed_turn_with_usage(self):
-        self._claude_history("2026-11-18T12:00:00+00:00")
-        self.con.execute("UPDATE chat_messages SET context_tokens=100 WHERE role='assistant'")
+        self._claude_history("2026-11-18T12:00:00+00:00", 99_999)
         self.con.execute("""INSERT INTO chat_messages(conversation_id,role,text,failed,handle,context_tokens)
-                            VALUES(?,'assistant','stopped',1,'1 /tmp/stop.log',140)""", (self.id,))
+                            VALUES(?,'assistant','stopped',1,'1 /tmp/stop.log',110000)""", (self.id,))
         self.con.execute("""INSERT INTO chat_messages(conversation_id,role,text,failed)
                             VALUES(?,'assistant','failed to launch',1)""", (self.id,))
         self.con.commit()
@@ -255,7 +266,17 @@ class AttachTest(unittest.TestCase):
              mock.patch.object(CH.R, "session", return_value=("claude", "old")):
             CH.compact_idle(self.con)
         self.assertEqual(self.con.execute("SELECT before_context_tokens FROM chat_messages WHERE role='compaction'").fetchone()[0],
-                         140)
+                         110_000)
+
+    def test_failed_turn_only_changes_threshold_for_its_own_session(self):
+        self._claude_history("2026-11-18T12:00:00+00:00", 120_000)
+        self.con.executemany("""INSERT INTO chat_messages(conversation_id,role,text,failed,claude_session_id,context_tokens)
+                                VALUES(?,'assistant','failed',1,?,?)""",
+                             [(self.id, "old", 99_999), (self.id, "other", 120_000)])
+        self.con.commit()
+        with mock.patch.object(CH, "now", return_value="2026-11-18T12:50:00+00:00"):
+            CH.compact_idle(self.con)
+        self.launch.assert_not_called()
 
 
 class CodexImageTest(unittest.TestCase):
