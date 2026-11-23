@@ -22,16 +22,14 @@ def api(method, token, path="/api/update"):
         return e.code, json.load(e)
 
 
-def wait_until_idle(manager):
-    deadline = time.monotonic() + 120
-    while True:
-        try:
-            manager.exec(manager.container(), "python3", "-c", updater.PREFLIGHT)
-            return
-        except RuntimeError:
-            if time.monotonic() > deadline:
-                raise
-            time.sleep(2)
+def set_latest(manager, container, version):
+    # A tick may still be fetching release tags after the dashboard is ready.
+    updater._run(manager.docker, "exec", container, "python3", "-c", """
+import sys
+from ticket_pilot import core, migrate
+with migrate.tick_lock(), core.db() as con:
+    core.meta_set(con, 'update_check', {'latest': sys.argv[1], 'at': core.now()})
+""", version)
 
 
 def local_variant(manager, base, body):
@@ -80,7 +78,6 @@ def main():
 from pathlib import Path
 from ticket_pilot import core, lan
 con = core.db()
-core.meta_set(con, 'update_check', {'latest': 'v0.0.2', 'at': core.now()})
 core.meta_set(con, 'update_test_marker', 'preserved')
 con.commit()
 for login in ('ci-admin', 'ci-member'):
@@ -105,7 +102,21 @@ for login in ('ci-admin', 'ci-member'):
             assert job == {"id": reply["job"]["id"], "tag": version}, job
             return job
 
-        wait_until_idle(manager)
+        def apply_when_idle(version):
+            # A tick can start during the image pull. Retry only a switch refused for that reason.
+            deadline = time.monotonic() + 120
+            with patch.object(updater, "latest_release", return_value=version), \
+                 patch.object(updater.channel, "REGISTRY_IMAGE", registry_image):
+                while True:
+                    manager.apply(request(version))
+                    state = manager.snapshot()
+                    if state["state"] != "failed" or "자동화가 실행 중" not in state["message"]:
+                        return state
+                    if time.monotonic() >= deadline:
+                        raise AssertionError(state)
+                    time.sleep(2)
+
+        set_latest(manager, original, "v0.0.2")
         holder = subprocess.Popen(
             [manager.docker, "exec", "-i", original, "python3", "-c",
              "import fcntl, sys; f = open('/opt/tp/data/tick.lock', 'a'); "
@@ -124,11 +135,8 @@ for login in ('ci-admin', 'ci-member'):
         finally:
             holder.communicate(timeout=10)
 
-        job = request("v0.0.2")
-        with patch.object(updater, "latest_release", return_value=job["tag"]), \
-             patch.object(updater.channel, "REGISTRY_IMAGE", registry_image):
-            manager.apply(job)
-        assert manager.snapshot()["state"] == "done", manager.snapshot()
+        state = apply_when_idle("v0.0.2")
+        assert state["state"] == "done", state
         updated = manager.container()
         assert original != updated
         assert manager.exec(updated, "id", "-u") == "1001"
@@ -137,18 +145,9 @@ for login in ('ci-admin', 'ci-member'):
         assert manager.exec(updated, "cat", "/home/node/tp-work/update-test-marker") == "preserved"
         assert manager.exec(updated, "python3", "-c",
                             "from ticket_pilot import core; print(core.meta_get(core.db(), 'update_test_marker'))") == "preserved"
-        manager.exec(updated, "python3", "-c", """
-from ticket_pilot import core
-con = core.db()
-core.meta_set(con, 'update_check', {'latest': 'v0.0.3', 'at': core.now()})
-con.commit()
-""")
-        wait_until_idle(manager)
-        job = request("v0.0.3")
-        with patch.object(updater, "latest_release", return_value=job["tag"]), \
-             patch.object(updater.channel, "REGISTRY_IMAGE", registry_image), patch.object(updater, "PROBE_SECONDS", 25):
-            manager.apply(job)
-        state = manager.snapshot()
+        set_latest(manager, updated, "v0.0.3")
+        with patch.object(updater, "PROBE_SECONDS", 25):
+            state = apply_when_idle("v0.0.3")
         assert state["state"] == "failed" and "복구" in state["message"], state
         assert api("GET", admin)[1]["current"] == "v0.0.2"
         assert manager.exec(manager.container(), "cat", "/home/node/tp-work/update-test-marker") == "preserved"
