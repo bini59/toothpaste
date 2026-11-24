@@ -21,7 +21,6 @@ import os
 from datetime import datetime
 
 from . import milestone as M
-from . import notion_stages
 from . import notifications as N
 from .core import db, event, gh_json, now, repo_rules, run
 
@@ -148,7 +147,5 @@ def track_deploys(log=print) -> int:
             con.commit()
     restage(con)
     con.commit()
-    if shipped:
-        notion_stages.flush(con)
     log(f"track: {len(rows)} merged PR(s) waiting, {shipped} newly live")
     return shipped

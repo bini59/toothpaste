@@ -28,7 +28,7 @@ from pathlib import Path
 
 # everything this needs is imported here: once the checkout has moved, a lazy import from the old path fails
 from . import config as G
-from . import core, runner
+from . import core, notion_stages, runner
 
 # the pre-TP-131 names too: a host that migrates before install.sh renamed its agents must still find and stop them
 LABELS = ("com.ticket-pilot.tick", "com.ticket-pilot.dashboard", "com.bini59.ticket-pilot.tick", "com.bini59.ticket-pilot.dashboard")
@@ -82,6 +82,8 @@ def busy(con, fix=lambda s: s) -> list[str]:
         return runner.running(fix(handle) if handle else handle)
 
     out = []
+    if notion_stages.worker_running():
+        out.append("Notion 상태 반영")
     day_ago = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(timespec="seconds")
     # Active runs, and runs touched in the last day (a rework agent may still run on a finished one). Not older ones:
     # an agent that was killed leaves no exit file, and its pid may belong to something else by now.

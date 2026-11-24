@@ -390,7 +390,6 @@ def sync(log=print) -> dict:
     restage(con)
     meta_set(con, "last_sync", ts)
     con.commit()
-    notion_stages.flush(con)
     res = {"incomplete": incomplete, "dropped": dropped, "new_tagged": new_tagged}
     if asana_error:
         res["asana_error"] = asana_error
@@ -580,8 +579,6 @@ def dispatch(dry_run=False, log=print, only: str | None = None) -> list[str]:
         done.append(t["key"])
     restage(con)
     con.commit()
-    if done and not dry_run:
-        notion_stages.flush(con)
     return done
 
 
@@ -904,7 +901,6 @@ def scan(log=print) -> dict:
     restage(con)
     meta_set(con, "last_scan", now())
     con.commit()
-    notion_stages.flush(con)
     res = {"active_runs": len(runs), "prs": found_prs}
     log(f"scan: {res}")
     return res

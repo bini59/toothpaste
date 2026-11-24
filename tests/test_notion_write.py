@@ -1,10 +1,13 @@
 """The CLI and host use the same project account and page ID against a local Notion HTTP server."""
 import io
 import json
+import os
+import threading
+from contextlib import contextmanager
 from unittest import mock
 
 from test_notion import DOCS_DB, MEMBER, OWNER, TEAM_DB, NotionDashboard, uid
-from ticket_pilot import chat, cli, core, notion, notion_stages, notion_tickets, pipeline, release, track
+from ticket_pilot import chat, cli, core, migrate, notion, notion_stages, notion_tickets, pipeline, release, track
 
 
 class NotionWrites(NotionDashboard):
@@ -150,14 +153,19 @@ class NotionWrites(NotionDashboard):
         with self.assertRaisesRegex(SystemExit, r"NT-\w+ https://www.notion.so/.*로컬 DB"):
             self.cmd("create", "--project", "example", "--title", "로컬 기록 실패")
 
-    def start_ticket(self):
-        pipeline.sync()
+    @contextmanager
+    def fake_agent(self):
         (self.root / "prompts").symlink_to(core.ROOT / "prompts", target_is_directory=True)
         with mock.patch.object(pipeline, "ROOT", self.root), mock.patch.object(pipeline, "github_token", return_value="fixture"), \
                 mock.patch.object(pipeline.R, "worktrees", return_value=[]), mock.patch.object(pipeline.R, "create", return_value={
                     "path": str(self.root / "worktree"), "branch": "tp/example"}), \
                 mock.patch.object(pipeline, "prepare_worktree", return_value=(None, None)), \
                 mock.patch.object(pipeline.R, "launch", return_value="fixture") as launch:
+            yield launch
+
+    def start_ticket(self):
+        pipeline.sync()
+        with self.fake_agent() as launch:
             self.assertEqual(pipeline.dispatch(only=self.key), [self.key])
             self.assertIn("notion create --project example", launch.call_args.args[1])
         return pipeline.latest_run(self.con, self.gid)["id"]
@@ -175,6 +183,8 @@ class NotionWrites(NotionDashboard):
         self.save({**self.cfg, "stage_statuses": {"in_progress": "doing-id", "done": "done-id"}})
         self.save({**self.cfg, "status_option": "doing-id"}, "second")
         run_id = self.start_ticket()
+        self.assertEqual(self.fixture.writes, [])
+        notion_stages.flush(self.con)
         self.assertEqual(self.page["properties"]["상태"]["status"]["name"], "진행 중")
         for _ in range(2):
             self.assertEqual(pipeline.sync()["new_tagged"], [])
@@ -192,6 +202,9 @@ class NotionWrites(NotionDashboard):
                                (json.dumps([{"key": self.key, "url": url, "ticket_gid": self.gid}]),)).lastrowid
         rel = self.con.execute("SELECT * FROM releases WHERE id=?", (rid,)).fetchone()
         release.finalize(self.con, rel)
+        self.assertEqual(pipeline.find_ticket(self.con, self.key)["stage"], "done")
+        self.assertEqual(self.page["properties"]["상태"]["status"]["name"], "진행 중")
+        notion_stages.flush(self.con)
         self.assertEqual(self.page["properties"]["상태"]["status"]["name"], "완료")
         pipeline.sync()
         self.assertEqual(pipeline.find_ticket(self.con, self.key)["stage"], "done")
@@ -210,38 +223,124 @@ class NotionWrites(NotionDashboard):
                 mock.patch.object(track, "deployed_sha", return_value=("deployed", "fixture")):
             self.assertEqual(track.track_deploys(), 1)
         self.assertEqual(pipeline.find_ticket(self.con, self.key)["completed"], 1)
-        pending = self.con.execute("SELECT last_error FROM notion_status_queue").fetchone()[0]
-        self.assertIn("콘텐츠 수정", pending)
+        notion_stages.flush(self.con)
+        pending = self.con.execute("SELECT last_error, next_attempt_at FROM notion_status_queue").fetchone()
+        self.assertIn("콘텐츠 수정", pending["last_error"])
+        # Repeated identical errors still postpone delivery and only produce one failure event.
+        with mock.patch.object(notion_stages, "time", return_value=pending["next_attempt_at"]):
+            notion_stages.flush(self.con)
+        due = self.con.execute("SELECT next_attempt_at FROM notion_status_queue").fetchone()[0]
+        self.assertEqual(due, pending["next_attempt_at"] + notion_stages.RETRY_SECONDS)
+        errors = self.con.execute("SELECT count(*) FROM events WHERE message LIKE 'Notion 상태 반영 대기%'").fetchone()[0]
+        self.assertEqual(errors, 1)
         self.fixture.deny_writes.clear()
         pipeline.sync()
-        pipeline.sync()
+        with mock.patch.object(notion_stages, "time", return_value=due - 1) as clock:
+            with mock.patch("subprocess.Popen") as spawn:
+                notion_stages.start_worker(self.con)
+                spawn.assert_not_called()
+            notion_stages.flush(self.con)
+            self.assertEqual(self.fixture.writes, [])
+            clock.return_value = due
+            notion_stages.flush(self.con)
         self.assertEqual(self.page["properties"]["상태"]["status"]["name"], "완료")
         self.assertEqual(len(self.fixture.writes), 1)
 
     def test_dropped_run_remains_skipped_after_leaving_filter(self):
         self.save({**self.cfg, "stage_statuses": {"in_progress": "doing-id"}})
         self.start_ticket()
+        notion_stages.flush(self.con)
         pipeline.sync()
         self.assertFalse(pipeline.find_ticket(self.con, self.key)["assigned"])
         pipeline.drop(self.key)
         pipeline.sync()
         self.assertEqual(pipeline.find_ticket(self.con, self.key)["stage"], "skipped")
 
+    def test_verified_stage_supersedes_a_backed_off_start(self):
+        self.save({**self.cfg, "stage_statuses": {"in_progress": "doing-id", "done": "done-id"}})
+        run_id = self.start_ticket()
+        self.fixture.deny_writes = {("PATCH", self.path)}
+        notion_stages.flush(self.con)
+        self.fixture.deny_writes.clear()
+        pending = self.con.execute("SELECT last_error FROM notion_status_queue").fetchone()
+        self.assertIn("콘텐츠 수정", pending["last_error"])
+        url = self.merged_pr(run_id)
+        release.complete_asana(self.con, self.gid, pr_url=url)
+        pipeline.restage(self.con)
+        self.con.commit()
+        notion_stages.flush(self.con)
+        expected = {"properties": {"status-id": {"status": {"id": "done-id"}}}}
+        self.assertEqual(self.fixture.writes, [("PATCH", self.path, expected)])
+        self.assertEqual(self.con.execute("SELECT count(*) FROM notion_status_queue").fetchone()[0], 0)
+
     def test_stage_disabled_while_retry_is_reading_the_schema(self):
         self.save({**self.cfg, "stage_statuses": {"in_progress": "doing-id"}})
         self.fixture.deny_writes = {("PATCH", self.path)}
         self.start_ticket()
+        notion_stages.flush(self.con)
+        retry_at = self.con.execute("SELECT next_attempt_at FROM notion_status_queue").fetchone()[0]
         self.fixture.deny_writes.clear()
         read_schema = notion.Client.properties
         def disable(client, source):
             schema = read_schema(client, source)
             self.save(self.cfg)
             return schema
-        with mock.patch.object(notion.Client, "properties", disable):
+        with mock.patch.object(notion_stages, "time", return_value=retry_at), \
+                mock.patch.object(notion.Client, "properties", disable):
             notion_stages.flush(self.con)
-        pipeline.sync()
+            notion_stages.flush(self.con)
         self.assertEqual(self.fixture.writes, [])
         self.assertEqual(self.con.execute("SELECT count(*) FROM notion_status_queue").fetchone()[0], 0)
+
+    def test_stalled_status_worker_allows_github_dispatch(self):
+        self.save({**self.cfg, "status_option": "done-id", "stage_statuses": {"in_progress": "doing-id"}})
+        backlog = notion_stages.BATCH_SIZE + 2
+        for n in range(backlog):
+            notion_stages.enqueue(self.con, {"gid": "notion:" + uid(600 + n), "project_gid": "notion:example"}, "in_progress")
+        self.con.commit()
+
+        reading, resume = threading.Event(), threading.Event()
+        reads = []
+        respond = self.fixture.respond
+        def slow_page(method, path, headers, body):
+            if method == "GET" and path.startswith("/pages/"):
+                reads.append(path)
+                reading.set()
+                if not resume.wait(10):
+                    resume.set()  # bound the test if a host call waits for this request
+                return 504, {}
+            return respond(method, path, headers, body)
+
+        # Route the actual worker process to the fixture server and its temporary credentials on both host platforms.
+        (self.root / "sitecustomize.py").write_text(
+            f"from ticket_pilot import core, notion\ncore.KEYCHAIN = False\nnotion.API = {notion.API!r}\n")
+        env = {"PYTHONPATH": os.pathsep.join(map(str, (self.root, core.ROOT))), "TP_SECRETS_FILE": str(core.SECRETS_FILE)}
+        issue = {"number": 42, "title": "다른 티켓", "url": "https://github.com/example/app/issues/42"}
+        with mock.patch.object(self.fixture, "respond", slow_page), mock.patch.dict(os.environ, env):
+            worker = notion_stages.start_worker(self.con)
+            try:
+                self.assertTrue(reading.wait(10))
+                self.assertIsNone(notion_stages.start_worker(self.con))
+                self.assertIn("Notion 상태 반영", migrate.busy(self.con))
+                with self.fake_agent() as launch, mock.patch.object(cli, "_release_steps"), \
+                        mock.patch.object(pipeline, "issue_repos", return_value={"app": ("GH", None)}), \
+                        mock.patch.object(pipeline, "_gh_issue_json", side_effect=[[issue], {"comments": []}]), \
+                        self.assertRaises(SystemExit) as exit_status:
+                    cli.main(["precheck-dispatch"])
+                self.assertEqual(exit_status.exception.code, 1)  # deterministic dispatch finished, no AI triage
+                launch.assert_called_once()
+                self.assertEqual(pipeline.find_ticket(self.con, "GH-42")["stage"], "in_progress")
+                self.assertFalse(resume.is_set())
+                self.assertEqual(len(reads), 1)
+            finally:
+                resume.set()
+                worker.wait(timeout=10)
+            self.assertEqual(worker.returncode, 0)
+            self.assertFalse(notion_stages.worker_running())
+            self.assertEqual(len(reads), notion_stages.BATCH_SIZE)
+            notion_stages.flush(self.con)  # only the untried pages are due
+            self.assertEqual(len(set(reads)), backlog)
+            self.assertEqual(len(reads), backlog)
 
     def test_read_only_and_project_chat_instructions(self):
         run_id = self.start_ticket()

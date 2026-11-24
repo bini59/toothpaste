@@ -365,7 +365,7 @@ CREATE TABLE IF NOT EXISTS notion_connections (
 );
 CREATE TABLE IF NOT EXISTS notion_status_queue (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_gid TEXT UNIQUE NOT NULL, project_id TEXT NOT NULL,
-  data_source_id TEXT NOT NULL, stage TEXT NOT NULL, last_error TEXT
+  data_source_id TEXT NOT NULL, stage TEXT NOT NULL, last_error TEXT, next_attempt_at REAL NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS tickets (
   gid TEXT PRIMARY KEY,
@@ -577,6 +577,7 @@ def db() -> sqlite3.Connection:
 
 
 _COLUMNS = {
+    "notion_status_queue": {"next_attempt_at": "REAL NOT NULL DEFAULT 0"},
     # source: NULL = AI review, 'check' = tp check failure sent back to the agent through the same rework flow
     "reviews": {"rework_at": "TEXT", "source": "TEXT"},
     # attempt: checks.py reruns a head once when tp could not run its checks (error)

@@ -23,7 +23,6 @@ from zoneinfo import ZoneInfo
 
 from . import checks as K
 from . import milestone as M
-from . import notion_stages
 from . import notifications as N
 from .core import asana, current_actor, db, event, gh_json, meta_get, now, repo_rules, run, settings, train_repos
 from .pipeline import VIOLATION, active_deploy, active_release_pr_urls, latest_run, restage, review_overridden, run_pr
@@ -610,4 +609,3 @@ def finalize(con, rel):
     _finish(con, rel, "done", (note + "Asana 완료 처리 실패: " + "; ".join(asana_errors)) if asana_errors else (rel["reason"] or None))
     restage(con)
     con.commit()
-    notion_stages.flush(con)

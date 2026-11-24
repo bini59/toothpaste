@@ -1,6 +1,15 @@
-"""Deliver configured Notion stage changes after the host commits its local transition."""
-from . import notion, notion_tickets, notion_write
-from .core import event
+"""Queue stage changes with the host transition and deliver them from a separate tick worker."""
+import fcntl
+import os
+import subprocess
+import sys
+from contextlib import contextmanager
+from time import time
+
+from . import core, notion, notion_tickets, notion_write
+
+BATCH_SIZE = 8
+RETRY_SECONDS = 300
 
 
 def enqueue(con, ticket, stage):
@@ -14,23 +23,59 @@ def enqueue(con, ticket, stage):
     pid = ticket["project_gid"].removeprefix("notion:")
     cfg = notion_tickets.project_config(con, pid)
     if cfg and cfg.get("stage_statuses", {}).get(stage):
-        con.execute("""INSERT OR REPLACE INTO notion_status_queue(ticket_gid,project_id,data_source_id,stage)
-                       VALUES(?,?,?,?)""", (gid, pid, cfg["data_source_id"], stage))
+        con.execute("""INSERT OR REPLACE INTO notion_status_queue(ticket_gid,project_id,data_source_id,stage,next_attempt_at)
+                       VALUES(?,?,?,?,?)""", (gid, pid, cfg["data_source_id"], stage, time()))
+
+
+@contextmanager
+def _worker_lock(mode):
+    with core.DB_PATH.with_suffix(".notion-status.lock").open(mode) as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield None
+        else:
+            yield lock
+
+
+def worker_running():
+    """Mode switches and migrations check for detached writers before moving the database."""
+    try:
+        with _worker_lock("r") as lock:
+            return lock is None
+    except FileNotFoundError:
+        return False
+
+
+def start_worker(con):
+    if not con.execute("SELECT 1 FROM notion_status_queue WHERE next_attempt_at<=? LIMIT 1", (time(),)).fetchone():
+        return
+    with _worker_lock("a") as lock:
+        if lock is None:
+            return
+        # The child inherits the held lock until exit, including if the tick exits first.
+        # Give it its own output so a caller capturing the tick's pipes can return immediately.
+        with core.DB_PATH.with_suffix(".notion-status.log").open("a") as log:
+            return subprocess.Popen([sys.executable, "-m", "ticket_pilot.notion_stages"], cwd=core.ROOT,
+                                    env={**os.environ, "TP_DB": str(core.DB_PATH.resolve())}, pass_fds=(lock.fileno(),),
+                                    start_new_session=True, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
 
 
 def flush(con):
-    """Run outside the pipeline transaction. Recheck the pending change under the same lock as CLI edits."""
-    pending = con.execute("SELECT id, ticket_gid FROM notion_status_queue ORDER BY id").fetchall()
+    """Process a batch of due pages, oldest due first. Keep network I/O outside SQLite transactions."""
+    pending = con.execute("""SELECT id, ticket_gid FROM notion_status_queue WHERE next_attempt_at<=?
+                             ORDER BY next_attempt_at, id LIMIT ?""", (time(), BATCH_SIZE)).fetchall()
     for job in pending:
         gid = job["ticket_gid"]
         page_id = gid.removeprefix("notion:")
         with notion_write.page_lock(page_id):
-            row = con.execute("SELECT * FROM notion_status_queue WHERE id=?", (job["id"],)).fetchone()
+            row = con.execute("SELECT * FROM notion_status_queue WHERE id=? AND next_attempt_at<=?",
+                              (job["id"], time())).fetchone()
             if not row:
-                continue  # superseded or delivered by another host process
-            cfg = notion_tickets.project_config(con, row["project_id"])
-            option = (cfg or {}).get("stage_statuses", {}).get(row["stage"])
+                continue
             try:
+                cfg = notion_tickets.project_config(con, row["project_id"])
+                option = (cfg or {}).get("stage_statuses", {}).get(row["stage"])
                 if option and cfg["data_source_id"] == row["data_source_id"]:
                     pages = notion_write.ProjectPages(con, cfg)
                     page = pages.client.page(page_id, pages.source)
@@ -40,10 +85,15 @@ def flush(con):
                             or notion_tickets.project_config(con, row["project_id"]) != cfg):
                         continue
                     pages.apply_properties(page, props)
-                    event(con, "notion_write", f"Notion 상태 반영 · {row['stage']} · {notion_tickets.ticket_key(page_id)}", gid)
+                    core.event(con, "notion_write", f"Notion 상태 반영 · {row['stage']} · {notion_tickets.ticket_key(page_id)}", gid)
                 con.execute("DELETE FROM notion_status_queue WHERE id=?", (row["id"],))
-            except notion.NotionError as e:
-                if str(e) != row["last_error"]:
-                    event(con, "error", f"Notion 상태 반영 대기 · {row['stage']} · {e}", gid)
-                    con.execute("UPDATE notion_status_queue SET last_error=? WHERE id=?", (str(e), row["id"]))
+            except (notion.NotionError, KeyError, TypeError, ValueError) as e:
+                updated = con.execute("UPDATE notion_status_queue SET last_error=?, next_attempt_at=? WHERE id=?",
+                                      (str(e), time() + RETRY_SECONDS, row["id"]))
+                if updated.rowcount and str(e) != row["last_error"]:
+                    core.event(con, "error", f"Notion 상태 반영 대기 · {row['stage']} · {e}", gid)
             con.commit()
+
+
+if __name__ == "__main__":
+    flush(core.db())
