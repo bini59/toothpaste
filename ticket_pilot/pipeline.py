@@ -355,9 +355,11 @@ def _sync_asana(con, st, mapped, names, hidden, ts, new_tagged):
 def sync(log=print) -> dict:
     st = settings()
     con = db()
-    load_map(con)
+    mapping = project_map()
+    load_map(con, mapping)
+    sources = [p for p in mapping["projects"] if p["source"] == "notion"]
+    notion_generation = notion_tickets.begin_sync(con, sources)
     con.commit()
-    sources = [p for p in project_map()["projects"] if p["source"] == "notion"]
     notion_listings = notion_tickets.fetch(con, sources, st["asana_tag"])
     mapped = {r["project_gid"] for r in con.execute("SELECT project_gid FROM project_map WHERE repo IS NOT NULL")}
     names = {r["project_gid"]: r["project_name"] for r in con.execute("SELECT project_gid, project_name FROM project_map")}
@@ -377,7 +379,7 @@ def sync(log=print) -> dict:
             asana_error = str(e)
             event(con, "error", f"Asana 동기화: {asana_error}")
     sync_issues(con, ts, new_tagged)
-    notion_errors = notion_tickets.sync(con, notion_listings, ts, new_tagged)
+    notion_errors = notion_tickets.sync(con, notion_generation, notion_listings, ts, new_tagged)
     for k in new_tagged:
         event(con, "tagged", f"{k} tagged")
     restage(con)
@@ -401,10 +403,12 @@ def slug(s: str) -> str:
 def build_brief(con, t, repo: dict) -> str:
     tpl = (ROOT / "prompts" / "work_brief.md").read_text()
     ref = issue_ref(t["gid"])
-    notes = t["notes"] or ""
     is_notion = t["gid"].startswith("notion:")
     if is_notion:
-        notes = "\n\n".join(filter(None, (notes, notion_tickets.page_body(con, t))))
+        t, markdown = notion_tickets.queued_page(con, t, repo)
+        notes = "\n\n".join(filter(None, (t["notes"], markdown)))
+    else:
+        notes = t["notes"] or ""
     try:
         if ref:
             j = _gh_issue_json(["issue", "view", ref[1], "--repo", ref[0], "--json", "comments"])
@@ -515,6 +519,8 @@ def dispatch(dry_run=False, log=print, only: str | None = None) -> list[str]:
         repo = chosen_repo(con, t)
         if not repo:
             continue
+        if t["gid"].startswith("notion:") and con.in_transaction:
+            con.commit()  # release earlier candidates' writes before reading the page over HTTP
         try:
             brief = build_brief(con, t, repo)
         except notion.NotionError as e:

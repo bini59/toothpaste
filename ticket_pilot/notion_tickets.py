@@ -96,6 +96,15 @@ def _version(project, work_tag):
     return hashlib.sha256(data).hexdigest()
 
 
+def begin_sync(con, projects):
+    """Number listings in the same short write transaction as load_map, before reading any network pages."""
+    if not projects and not meta_get(con, SYNC_STATE, {}).get("projects"):
+        return None
+    generation = meta_get(con, "notion_sync_generation", 0) + 1
+    meta_set(con, "notion_sync_generation", generation)
+    return generation
+
+
 def fetch(con, projects, work_tag):
     """Finish each remote listing before taking the sync writer lock. Keep only complete project results."""
     listings = {}
@@ -118,7 +127,7 @@ def _batches(con, projects, work_tag, listings):
         if rows:
             confirmed_sources.update(dict.fromkeys(rows, p["notion"]["data_source_id"]))
         current.append((p, version, rows, error))
-    previous = meta_get(con, SYNC_STATE, {})
+    previous = meta_get(con, SYNC_STATE, {}).get("projects", {})
     claimed = set()
     for p, version, rows, error in current:
         pid = p["id"]
@@ -133,18 +142,30 @@ def _batches(con, projects, work_tag, listings):
         yield p, version, rows, owned, error
 
 
-def page_body(con, ticket):
+def _dispatch_source(con, project_gid):
     doc = effective_config(read_config(con))
-    pid = ticket["project_gid"].removeprefix("notion:")
+    pid = project_gid.removeprefix("notion:")
     project = next((p for p in doc["project_map"]["projects"] if p["id"] == pid and p["source"] == "notion"), None)
-    state = meta_get(con, SYNC_STATE, {}).get(pid, {})
+    state = meta_get(con, SYNC_STATE, {}).get("projects", {}).get(pid, {})
     if not project or not state.get("ready") or state["version"] != _version(project, doc["settings"]["asana_tag"]):
         raise notion.NotionError("현재 프로젝트 조건으로 동기화한 뒤 작업을 시작해요")
-    client = notion.Client(con, project["notion"]["connection_id"])
+    return project["notion"]["connection_id"], state["version"]
+
+
+def queued_page(con, ticket, repo):
+    from .pipeline import chosen_repo, compute_stage
+    project_gid = ticket["project_gid"]
+    source = _dispatch_source(con, project_gid)
+    client = notion.Client(con, source[0])
     markdown = client.read(f"/pages/{ticket['gid'].removeprefix('notion:')}/markdown").get("markdown")
     if not isinstance(markdown, str):
         raise notion.NotionError("Notion 페이지의 본문을 읽을 수 없어요")
-    return markdown
+    # A sync, skip or project edit can finish while the body is in flight. Build the brief from the current row.
+    current = con.execute("SELECT * FROM tickets WHERE gid=?", (ticket["gid"],)).fetchone()
+    if (not current or current["project_gid"] != project_gid or compute_stage(con, current) != "queued"
+            or chosen_repo(con, current) != repo or _dispatch_source(con, project_gid) != source):
+        raise notion.NotionError("페이지를 읽는 동안 대기열이나 프로젝트 설정이 바뀌었어요")
+    return current, markdown
 
 
 def _local_fields(old, row):
@@ -152,12 +173,14 @@ def _local_fields(old, row):
     return {"repo_override": old["repo_override"] if old and old["project_gid"] == row["project_gid"] else None}
 
 
-def sync(con, listings, ts, new_tagged):
-    if not (listings or meta_get(con, SYNC_STATE)):
+def sync(con, generation, listings, ts, new_tagged):
+    if generation is None:
         return {}
     # Settings may have changed during the network reads. Apply results against the same snapshot as the write.
     if not con.in_transaction:
         con.execute("BEGIN IMMEDIATE")
+    if meta_get(con, SYNC_STATE, {}).get("generation", 0) >= generation:
+        return {}  # a more recent dashboard refresh or tick already applied its results
     previous = con.execute("SELECT gid FROM tickets WHERE gid LIKE 'notion:%' AND assigned=1").fetchall()
     doc = effective_config(read_config(con))
     projects = [p for p in doc["project_map"]["projects"] if p["source"] == "notion"]
@@ -184,7 +207,7 @@ def sync(con, listings, ts, new_tagged):
                              has_tag=excluded.has_tag,asana_modified_at=excluded.asana_modified_at,assigned=1,
                              last_seen=excluded.last_seen,repo_override=excluded.repo_override""",
                         {**row, **_local_fields(old, row), "project_name": p["name"], "ts": ts})
-    meta_set(con, SYNC_STATE, state)
+    meta_set(con, SYNC_STATE, {"generation": generation, "projects": state})
     con.executemany("UPDATE tickets SET assigned=0 WHERE gid=?", [(r[0],) for r in previous if r[0] not in seen])
     return errors
 

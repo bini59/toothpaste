@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import fcntl
+import http.client
 import json
 import secrets
 import threading
@@ -55,7 +56,7 @@ def _request(path, authorization, body=None):
                 time.sleep(int(delay))
                 continue
             raise APIError(e.code) from None  # an OAuth error body can contain credentials
-        except (OSError, ValueError) as e:
+        except (OSError, ValueError, http.client.HTTPException) as e:
             raise NotionError("Notion 응답을 읽을 수 없어요. 잠시 뒤 다시 시도하세요") from e
 
 

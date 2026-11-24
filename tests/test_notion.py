@@ -50,6 +50,9 @@ class NotionFixture:
         self.queries = []
         self.fail_cursor = False
         self.on_query = None
+        self.after_listing = None
+        self.on_markdown = None
+        self.truncate_path = None
         self.denied_page = None
         self.expired = False
         self.refreshes = 0
@@ -107,18 +110,31 @@ class NotionFixture:
                     kind = "status" if "status" in f else "select"
                     rows = [r for r in rows if f[kind]["equals"] == r["properties"][column][kind]["name"]]
         elif url.path.startswith("/pages/") and url.path.endswith("/markdown"):
+            if self.on_markdown:
+                fn, self.on_markdown = self.on_markdown, None
+                fn()
             if url.path == f"/pages/{self.denied_page}/markdown":
                 return 403, {}
             return 200, {"markdown": "페이지 본문에서 가져온 작업 설명"}
         else:
             return 404, {}
-        return 200, {"results": rows[start:start + 1], "has_more": start + 1 < len(rows),
-                     "next_cursor": str(start + 1) if start + 1 < len(rows) else None}
+        result = {"results": rows[start:start + 1], "has_more": start + 1 < len(rows),
+                  "next_cursor": str(start + 1) if start + 1 < len(rows) else None}
+        if self.after_listing and url.path.endswith("/query") and not result["has_more"]:
+            fn, self.after_listing = self.after_listing, None
+            fn()
+        return 200, result
 
 
 class FixtureHandler(BaseHTTPRequestHandler):
     def handle_api(self):
         data = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        if urlsplit(self.path).path == self.server.fixture.truncate_path:
+            self.send_response(200)
+            self.send_header("Content-Length", "100")
+            self.end_headers()
+            self.wfile.write(b'{"results":')
+            return
         status, result = self.server.fixture.respond(self.path, self.headers, json.loads(data) if data else None)
         self.send_response(status)
         self.end_headers()
@@ -331,6 +347,38 @@ class NotionTest(unittest.TestCase):
         pipeline.sync(log=lambda *_: None)
         self.assertEqual(self.stages(), {"설정 저장": "queued", "계정 연결": "queued"})
 
+    def test_older_sync_finishing_last_does_not_requeue_removed_page(self):
+        self.save(self.cfg)
+
+        def newer_sync():
+            self.fixture.pages[TEAM_DB].pop(0)
+            pipeline.sync(log=lambda *_: None)
+
+        self.fixture.after_listing = newer_sync
+        pipeline.sync(log=lambda *_: None)
+        self.assertEqual(self.stages(), {"팀 보드": "queued"})
+
+    def test_filter_change_and_sync_during_markdown_read(self):
+        self.save(self.cfg)
+        pipeline.sync(log=lambda *_: None)
+
+        def new_filter():
+            self.save({**self.cfg, "assignee": "all", "status_option": "done-id"})
+            pipeline.sync(log=lambda *_: None)
+
+        self.fixture.on_markdown = new_filter
+        self.assertFalse(any("would create" in s for s in self.dispatch_log()))
+        self.assertEqual(self.stages(), {"배포 완료": "queued"})
+        self.assertTrue(any("배포 완료" in s for s in self.dispatch_log() if "would create" in s))
+
+    def test_interrupted_http_body_is_scoped_to_its_project(self):
+        self.save(self.cfg)
+        home = {**self.cfg, "connection_id": self.connect("home"), "data_source_id": HOME_DB}
+        self.save(home, "second")
+        self.fixture.truncate_path = f"/data_sources/{TEAM_DB}/query"
+        self.assertIn("example", pipeline.sync(log=lambda *_: None)["notion_errors"])
+        self.assertEqual(self.stages(), {"개인 일정": "queued"})
+
     def test_page_moved_between_databases_wins_over_an_old_failed_listing(self):
         self.save({**self.cfg, "assignee": "all"}, "first")
         pipeline.sync(log=lambda *_: None)
@@ -354,6 +402,10 @@ class NotionTest(unittest.TestCase):
         lines = self.dispatch_log()
         self.assertTrue(any("Notion HTTP 403" in s for s in lines), lines)
         starts = [s for s in lines if "would create" in s]
+        self.assertEqual(len(starts), 1)
+        self.assertIn("팀 보드", starts[0])
+        self.fixture.truncate_path = f"/pages/{self.fixture.denied_page}/markdown"
+        starts = [s for s in self.dispatch_log() if "would create" in s]
         self.assertEqual(len(starts), 1)
         self.assertIn("팀 보드", starts[0])
 
