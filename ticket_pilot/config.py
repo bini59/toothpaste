@@ -598,6 +598,9 @@ def save(con, new: dict, actor: str, note: str | None = None) -> list[dict]:
     meta = sorted({c["scope"] for c in ch})
     event(con, "config", f"설정 변경 ({actor}): {', '.join(meta)} · {len(ch)}개 항목" + (f" · {note}" if note else ""))
     core.load_map(con, new["project_map"])
+    removed_repos = old["project_map"]["repos"].keys() - new["project_map"]["repos"].keys()
+    con.executemany("UPDATE tickets SET repo_override=NULL WHERE gid LIKE 'notion:%' AND repo_override=?",
+                    [(repo,) for repo in removed_repos])
     con.commit()
     core.config_cache_clear()
     backup(con)

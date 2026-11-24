@@ -162,7 +162,7 @@ def compute_stage(con, t, *, repo_count=None) -> str:
         return "skipped"
     if t["open_deps"] and unmet_deps(con, t):
         return "waiting_dep"
-    if t["repo_override"]:
+    if t["repo_override"] and (not t["gid"].startswith("notion:") or chosen_repo(con, t)):
         return "queued"
     if repo_count is None:  # preview can supply the project's unsaved repo selection
         repo_count = len(repos_for_project(con, t["project_gid"]))
@@ -459,11 +459,13 @@ def chosen_repo(con, t):
     repos = repos_for_project(con, t["project_gid"])
     if t["repo_override"]:
         r = con.execute("SELECT * FROM repos WHERE name=?", (t["repo_override"],)).fetchone()
-        if not r:
+        if r:
+            base = next((x for x in repos if x["repo"] == r["name"]), {})
+            return {"repo": r["name"], "role": base.get("role"), "orca_repo_id": r["orca_repo_id"], "path": r["path"],
+                    "github": r["github"], "description": r["description"]}
+        # Older Notion rows can still name a deleted repo until their next sync.
+        if not t["gid"].startswith("notion:"):
             return None
-        base = next((x for x in repos if x["repo"] == r["name"]), {})
-        return {"repo": r["name"], "role": base.get("role"), "orca_repo_id": r["orca_repo_id"], "path": r["path"],
-                "github": r["github"], "description": r["description"]}
     return repos[0] if len(repos) == 1 else None
 
 
@@ -518,6 +520,7 @@ def dispatch(dry_run=False, log=print, only: str | None = None) -> list[str]:
             continue
         repo = chosen_repo(con, t)
         if not repo:
+            slots += 1
             continue
         if t["gid"].startswith("notion:") and con.in_transaction:
             con.commit()  # release earlier candidates' writes before reading the page over HTTP

@@ -52,8 +52,8 @@ class NotionFixture:
         self.on_query = None
         self.after_listing = None
         self.on_markdown = None
+        self.markdown = {}
         self.truncate_path = None
-        self.denied_page = None
         self.expired = False
         self.refreshes = 0
 
@@ -113,9 +113,8 @@ class NotionFixture:
             if self.on_markdown:
                 fn, self.on_markdown = self.on_markdown, None
                 fn()
-            if url.path == f"/pages/{self.denied_page}/markdown":
-                return 403, {}
-            return 200, {"markdown": "페이지 본문에서 가져온 작업 설명"}
+            return self.markdown.get(url.path.split("/")[2], (200, {
+                "markdown": "페이지 본문에서 가져온 작업 설명", "truncated": False, "unknown_block_ids": []}))
         else:
             return 404, {}
         result = {"results": rows[start:start + 1], "has_more": start + 1 < len(rows),
@@ -323,6 +322,55 @@ class NotionTest(unittest.TestCase):
         pipeline.sync(log=lambda *_: None)
         self.assertEqual(self.stages(), {})
 
+    def test_deleted_manual_repo_matches_preview_and_dispatch(self):
+        self.save(self.cfg)
+        self.post("/api/config", {"updates": [
+            {"scope": "global", "value": {"max_active_runs": 1}},
+            {"scope": "repo.web", "value": {"path": str(self.root)}}]})
+        gid, other = "notion:" + uid(101), "notion:" + uid(104)
+
+        def ticket(ticket_gid=gid):
+            return self.con.execute("SELECT * FROM tickets WHERE gid=?", (ticket_gid,)).fetchone()
+
+        def assert_route(repos, stage):
+            match = next(t for t in self.preview(self.cfg, repos) if t["gid"] == gid)
+            self.assertEqual((match["stage"], match["auto_start"]), (stage, stage == "queued"))
+            self.assertEqual(pipeline.compute_stage(self.con, ticket()), stage)
+            starts = [s.splitlines()[0] for s in self.dispatch_log() if "would create" in s]
+            expected = ticket(gid if match["auto_start"] else other)["key"].lower()
+            self.assertEqual(starts, [f"--- would create app/{expected}"])
+
+        for repos, stage in (([], "unmapped"), (["app", "web"], "needs_repo"), (["app"], "queued")):
+            with self.subTest(repos=repos):
+                # A ticket with no mapped repos can be manually assigned any registered repo.
+                before = [*repos, "manual"] if repos else []
+                project = {"source": "notion", "name": "example", "notion": self.cfg,
+                           "repos": [{"repo": r, "role": r} for r in before]}
+                self.post("/api/config", {"updates": [
+                    {"scope": "repo.manual", "value": {"path": str(self.root)}},
+                    {"scope": "project.example", "value": project}]})
+                pipeline.sync(log=lambda *_: None)
+                self.post("/api/assign", {"ticket": gid, "repo": "manual"})
+                self.post("/api/assign", {"ticket": other, "repo": "app"})
+                self.con.execute("UPDATE tickets SET due_on='2000-01-01' WHERE gid=?", (gid,))
+                self.con.commit()
+                pipeline.sync(log=lambda *_: None)
+                self.assertEqual(ticket()["repo_override"], "manual")
+                self.assertTrue(next(t for t in self.preview(self.cfg, before) if t["gid"] == gid)["auto_start"])
+
+                self.post("/api/config", {"scope": "repo.manual", "value": None})
+                self.assertIsNone(ticket()["repo_override"])
+                assert_route(repos, stage)
+                # A database from before the fix may still have the deleted override and its old queued stage.
+                self.con.execute("UPDATE tickets SET repo_override='manual', stage='queued' WHERE gid=?", (gid,))
+                self.con.commit()
+                assert_route(repos, stage)
+                self.assertEqual(ticket()["repo_override"], "manual")
+                pipeline.sync(log=lambda *_: None)
+                self.assertIsNone(ticket()["repo_override"])
+                self.assertEqual(ticket()["stage"], stage)
+                assert_route(repos, stage)
+
     def test_changed_source_does_not_dispatch_or_reserve_an_old_page(self):
         self.save(self.cfg, "first")
         pipeline.sync(log=lambda *_: None)
@@ -396,7 +444,7 @@ class NotionTest(unittest.TestCase):
         self.save(self.cfg)
         self.post("/api/config", {"scope": "global", "value": {"max_active_runs": 1}})
         pipeline.sync(log=lambda *_: None)
-        self.fixture.denied_page = uid(101)
+        self.fixture.markdown[uid(101)] = (403, {})
         self.con.execute("UPDATE tickets SET due_on='2000-01-01' WHERE gid=?", ("notion:" + uid(101),))
         self.con.commit()
         lines = self.dispatch_log()
@@ -404,10 +452,44 @@ class NotionTest(unittest.TestCase):
         starts = [s for s in lines if "would create" in s]
         self.assertEqual(len(starts), 1)
         self.assertIn("팀 보드", starts[0])
-        self.fixture.truncate_path = f"/pages/{self.fixture.denied_page}/markdown"
+        self.fixture.truncate_path = f"/pages/{uid(101)}/markdown"
         starts = [s for s in self.dispatch_log() if "would create" in s]
         self.assertEqual(len(starts), 1)
         self.assertIn("팀 보드", starts[0])
+
+    def test_dispatch_recovers_nested_markdown_blocks(self):
+        self.save(self.cfg)
+        pipeline.sync(log=lambda *_: None)
+        root, child, leaf = uid(101), uid(501), uid(502)
+        self.fixture.markdown = {
+            root: (200, {"markdown": "본문 요약", "truncated": True, "unknown_block_ids": [child, leaf]}),
+            child: (200, {"markdown": "하위 요구사항", "truncated": True, "unknown_block_ids": [leaf]}),
+            leaf: (200, {"markdown": "세부 완료 기준", "truncated": False, "unknown_block_ids": []}),
+        }
+        brief = next(s for s in self.dispatch_log() if "would create" in s and "본문 요약" in s)
+        self.assertIn("하위 요구사항", brief)
+        self.assertEqual(brief.count("세부 완료 기준"), 1)
+
+    def test_incomplete_markdown_holds_only_the_affected_ticket(self):
+        self.save(self.cfg)
+        self.post("/api/config", {"scope": "global", "value": {"max_active_runs": 1}})
+        pipeline.sync(log=lambda *_: None)
+        root, child = uid(101), uid(501)
+        self.con.execute("UPDATE tickets SET due_on='2000-01-01' WHERE gid=?", ("notion:" + root,))
+        self.con.commit()
+        cycle = {"markdown": "하위 블록", "truncated": True, "unknown_block_ids": [root]}
+        cases = [("HTTP 404", [child], {child: (404, {})}), ("블록 ID", [], {}), ("반복", [child], {child: (200, cycle)})]
+        for reason, unknown, blocks in cases:
+            with self.subTest(reason=reason):
+                self.fixture.markdown = {
+                    root: (200, {"markdown": "일부만 읽은 본문", "truncated": True, "unknown_block_ids": unknown}),
+                    **blocks,
+                }
+                lines = self.dispatch_log()
+                self.assertTrue(any("보류" in s and reason in s for s in lines if "would create" not in s))
+                starts = [s for s in lines if "would create" in s]
+                self.assertEqual(len(starts), 1)
+                self.assertIn("팀 보드", starts[0])
 
     def test_select_columns_and_renamed_options_use_stored_ids(self):
         for old, new, kind in (("라벨", "분류", "multi_select"), ("상태", "진행", "status")):

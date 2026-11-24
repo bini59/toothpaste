@@ -205,6 +205,31 @@ class Client:
             cursors.add(cursor)
             params["start_cursor"] = cursor
 
+    def markdown(self, page_id):
+        """Fetch the page and any subtrees Notion omitted. Only return a complete brief body."""
+        parts, seen = [], set()
+        pending = [(page_id, frozenset())]
+        while pending:
+            block_id, ancestors = pending.pop()
+            if block_id in ancestors:
+                raise NotionError(f"Notion이 누락된 블록 {block_id}을 반복해서 반환해 작업을 보류해요")
+            if block_id in seen:
+                continue
+            try:
+                result = self.read(f"/pages/{block_id}/markdown")
+            except NotionError as e:
+                raise NotionError(f"Notion 본문 {block_id}을 읽을 수 없어 작업을 보류해요 ({e})") from e
+            body, unknown = result.get("markdown"), result.get("unknown_block_ids", [])
+            if not isinstance(body, str) or not isinstance(unknown, list) or not all(valid_id(i) for i in unknown):
+                raise NotionError(f"Notion 본문 {block_id}의 응답을 확인할 수 없어 작업을 보류해요")
+            if result.get("truncated") and not unknown:
+                raise NotionError(f"Notion 본문 {block_id}이 잘렸고 추가 조회할 블록 ID가 없어 작업을 보류해요")
+            parts.append(body if block_id == page_id else f"#### Notion 블록 {block_id}\n\n{body}")
+            seen.add(block_id)
+            path = ancestors | {block_id}
+            pending.extend((child, path) for child in reversed(unknown))
+        return "\n\n".join(parts)
+
     def sources(self):
         rows = self.items("/search", {"filter": {"property": "object", "value": "data_source"}})
         return [{"id": r["id"], "name": plain(r.get("title")) or r["id"]} for r in rows if r["object"] == "data_source"]

@@ -157,9 +157,7 @@ def queued_page(con, ticket, repo):
     project_gid = ticket["project_gid"]
     source = _dispatch_source(con, project_gid)
     client = notion.Client(con, source[0])
-    markdown = client.read(f"/pages/{ticket['gid'].removeprefix('notion:')}/markdown").get("markdown")
-    if not isinstance(markdown, str):
-        raise notion.NotionError("Notion 페이지의 본문을 읽을 수 없어요")
+    markdown = client.markdown(ticket["gid"].removeprefix("notion:"))
     # A sync, skip or project edit can finish while the body is in flight. Build the brief from the current row.
     current = con.execute("SELECT * FROM tickets WHERE gid=?", (ticket["gid"],)).fetchone()
     if (not current or current["project_gid"] != project_gid or compute_stage(con, current) != "queued"
@@ -168,9 +166,11 @@ def queued_page(con, ticket, repo):
     return current, markdown
 
 
-def _local_fields(old, row):
-    # A manual repo choice belongs to the project where it was made.
-    return {"repo_override": old["repo_override"] if old and old["project_gid"] == row["project_gid"] else None}
+def _repo_override(old, project_gid, repos):
+    # An override can name any registered repo, even for a project without mapped repos.
+    if old and old["project_gid"] == project_gid and old["repo_override"] in repos:
+        return old["repo_override"]
+    return None
 
 
 def sync(con, generation, listings, ts, new_tagged):
@@ -206,7 +206,8 @@ def sync(con, generation, listings, ts, new_tagged):
                              project_name=excluded.project_name,notes=excluded.notes,section=excluded.section,tags=excluded.tags,
                              has_tag=excluded.has_tag,asana_modified_at=excluded.asana_modified_at,assigned=1,
                              last_seen=excluded.last_seen,repo_override=excluded.repo_override""",
-                        {**row, **_local_fields(old, row), "project_name": p["name"], "ts": ts})
+                        {**row, "repo_override": _repo_override(old, row["project_gid"], doc["project_map"]["repos"]),
+                         "project_name": p["name"], "ts": ts})
     meta_set(con, SYNC_STATE, {"generation": generation, "projects": state})
     con.executemany("UPDATE tickets SET assigned=0 WHERE gid=?", [(r[0],) for r in previous if r[0] not in seen])
     return errors
@@ -231,10 +232,11 @@ def preview(con, projects, project, work_tag):
         if error:
             raise notion.NotionError(error)
         items = []
+        registered = {r[0] for r in con.execute("SELECT name FROM repos")}
         for gid, row in rows.items():
             old = con.execute("SELECT * FROM tickets WHERE gid=?", (gid,)).fetchone()
             ticket = {"completed": 0, "skip": 0, "open_deps": 0, **(dict(old) if old else {}), **row,
-                      **_local_fields(old, row), "assigned": 1}
+                      "repo_override": _repo_override(old, row["project_gid"], registered), "assigned": 1}
             stage = "other_project" if gid not in owned else compute_stage(con, ticket, repo_count=len(project["repos"]))
             items.append({"gid": gid, "title": row["name"], "stage": stage, "auto_start": stage == "queued"})
         return {"count": len(items), "tickets": items}

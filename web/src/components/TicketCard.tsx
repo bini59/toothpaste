@@ -92,9 +92,9 @@ export function TicketCard({ t, s, I, onAssign, onSkip, onApprove, onOverride, o
         : null;
 
   return (
-    <Card className="p-3.5">
+    <Card className="wrap-anywhere p-3.5">
       <div className="flex flex-wrap items-center gap-1.5 text-xs font-medium text-text-muted">
-        <a href={t.url} target="_blank" rel="noreferrer" className="text-primary hover:text-primary-700 hover:underline">
+        <a href={t.url} target="_blank" rel="noreferrer" className="break-all text-primary hover:text-primary-700 hover:underline">
           {t.key}
         </a>
         <StageBadge stage={t.stage} />

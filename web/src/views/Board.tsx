@@ -108,7 +108,7 @@ export function Board({ s, I, project, onAssign, onSkip, onApprove, onOverride, 
       <Card className="mb-6 flex flex-col gap-5 px-5 py-4 md:flex-row md:items-center">
         <dl className="flex shrink-0 flex-wrap gap-x-6 gap-y-3">
           {([
-            ["미완료 (나에게 할당)", inc.length, ""],
+            ["가져온 미완료 티켓", inc.length, ""],
             ["막힘", blocked, "text-danger-700"],
             ["기한 지남", overdue, "text-warning-700"],
           ] as const).map(([label, v, hot]) => (
