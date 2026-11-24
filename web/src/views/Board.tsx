@@ -135,7 +135,7 @@ export function Board({ s, I, project, onAssign, onSkip, onApprove, onOverride, 
       </Card>
       {!s.tickets.some((t) => t.stage !== "open") && (
         <p className="p-5 text-center text-sm text-text-muted">
-          아직 <b>{s.meta.settings.asana_tag}</b> 태그가 붙은 티켓이 없어요. Asana에서 작업에 태그를 달면 5분 안에 여기로 들어와요.
+          아직 작업 대기열에 들어온 티켓이 없어요. 프로젝트의 티켓 출처와 작업 태그를 확인하세요.
         </p>
       )}
       {split

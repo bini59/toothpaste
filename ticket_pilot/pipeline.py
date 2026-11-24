@@ -20,6 +20,7 @@ from .core import (
 from . import runner as R
 from . import milestone as M
 from . import notifications as N
+from . import notion, notion_tickets
 
 # briefs call ticket-pilot's CLI by absolute path from inside the target repo's worktree
 TP_BIN = str(ROOT / "bin" / "tp")
@@ -80,7 +81,7 @@ def review_overridden(t, pr) -> bool:
     return bool("review_override" in t.keys() and t["review_override"] and t["review_override_sha"] == pr["head_sha"])
 
 
-def compute_stage(con, t) -> str:
+def compute_stage(con, t, *, repo_count=None) -> str:
     if t["completed"]:
         return "done"
     r = latest_run(con, t["gid"])
@@ -155,7 +156,7 @@ def compute_stage(con, t) -> str:
         return "closed"
     if not t["has_tag"]:
         return "open"
-    if M.has_tag(json.loads(t["tags"] or "[]")):
+    if not t["gid"].startswith("notion:") and M.has_tag(json.loads(t["tags"] or "[]")):
         return "open"  # a milestone parent ships through its milestone tickets (ms:<gid>:<repo>), not an agent
     if t["skip"]:
         return "skipped"
@@ -163,10 +164,11 @@ def compute_stage(con, t) -> str:
         return "waiting_dep"
     if t["repo_override"]:
         return "queued"
-    repos = repos_for_project(con, t["project_gid"])
-    if not repos:
+    if repo_count is None:  # preview can supply the project's unsaved repo selection
+        repo_count = len(repos_for_project(con, t["project_gid"]))
+    if not repo_count:
         return "unmapped"
-    if len(repos) > 1:
+    if repo_count > 1:
         return "needs_repo"
     return "queued"
 
@@ -335,7 +337,7 @@ def _sync_asana(con, st, mapped, names, hidden, ts, new_tagged):
               has_tag, json.dumps(deps), sum(1 for d in deps if not d["completed"]), t.get("modified_at"), ts, ts, in_ms))
         seen.add(t["gid"])
     gone = [r["gid"] for r in con.execute("SELECT gid FROM tickets WHERE completed=0 AND assigned=1 "
-                                          "AND gid NOT LIKE 'gh:%' AND gid NOT LIKE 'ms:%'")
+                                          "AND gid NOT LIKE 'gh:%' AND gid NOT LIKE 'ms:%' AND gid NOT LIKE 'notion:%'")
             if r["gid"] not in seen]
     me = asana("GET", "/users/me", {"opt_fields": "gid"})["data"]["gid"] if gone else None
     for gid in gone:
@@ -373,6 +375,8 @@ def sync(log=print) -> dict:
             asana_error = str(e)
             event(con, "error", f"Asana 동기화: {asana_error}")
     sync_issues(con, ts, new_tagged)
+    sources = [p for p in project_map()["projects"] if p["source"] == "notion"]
+    notion_errors = notion_tickets.sync(con, sources, st["asana_tag"], ts, new_tagged)
     for k in new_tagged:
         event(con, "tagged", f"{k} tagged")
     restage(con)
@@ -381,6 +385,8 @@ def sync(log=print) -> dict:
     res = {"incomplete": incomplete, "dropped": dropped, "new_tagged": new_tagged}
     if asana_error:
         res["asana_error"] = asana_error
+    if notion_errors:
+        res["notion_errors"] = notion_errors
     log(f"sync: {res}")
     return res
 
@@ -394,11 +400,23 @@ def slug(s: str) -> str:
 def build_brief(con, t, repo: dict) -> str:
     tpl = (ROOT / "prompts" / "work_brief.md").read_text()
     ref = issue_ref(t["gid"])
+    notes = t["notes"] or ""
+    is_notion = t["gid"].startswith("notion:")
+    if is_notion:
+        project = next((p for p in project_map()["projects"] if p["source"] == "notion"
+                        and f"notion:{p['id']}" == t["project_gid"]), None)
+        if not project:
+            raise notion.NotionError("티켓의 Notion 프로젝트 연결을 확인하세요")
+        client = notion.Client(con, project["notion"]["connection_id"])
+        page = client.read(f"/pages/{t['gid'][7:]}/markdown")
+        notes = "\n\n".join(filter(None, (notes, page["markdown"])))
     try:
         if ref:
             j = _gh_issue_json(["issue", "view", ref[1], "--repo", ref[0], "--json", "comments"])
             comments = [{"created_by": {"name": (c.get("author") or {}).get("login")}, "created_at": c.get("createdAt"),
                          "text": c.get("body") or ""} for c in j.get("comments") or []]
+        elif is_notion:
+            comments = []
         else:
             comments = asana_comments(t["gid"])
     except (AsanaError, RuntimeError):
@@ -414,7 +432,7 @@ def build_brief(con, t, repo: dict) -> str:
     vals = {
         "KEY": t["key"], "TITLE": t["name"], "URL": t["url"], "PROJECT": t["project_name"] or "",
         "SECTION": t["section"] or "", "PARENT": t["parent_name"] or "(none)", "DUE": t["due_on"] or "(none)",
-        "NOTES": (t["notes"] or "(empty)").strip(), "COMMENTS": ctext, "DEPS": dtext,
+        "NOTES": (notes or "(empty)").strip(), "COMMENTS": ctext, "DEPS": dtext,
         "REPO": repo["repo"], "ROLE": repo.get("role") or "", "REPO_DESC": repo.get("description") or "",
         "GITHUB": repo.get("github") or "", "SIBLINGS": stext,
     }
@@ -499,7 +517,13 @@ def dispatch(dry_run=False, log=print, only: str | None = None) -> list[str]:
         repo = chosen_repo(con, t)
         if not repo:
             continue
-        brief = build_brief(con, t, repo)
+        try:
+            brief = build_brief(con, t, repo)
+        except notion.NotionError as e:
+            log(f"{t['key']}: {e}")
+            if not dry_run:
+                event(con, "error", f"{t['key']}: {e}", t["gid"])
+            continue
         name = slug(t["key"])
         if dry_run:
             log(f"--- would create {repo['repo']}/{name}\n{brief}")

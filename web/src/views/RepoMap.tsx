@@ -15,7 +15,7 @@ export function RepoMap({ s }: { s: State }) {
   type P = { gid: string; name: string; conf: string | null; note?: string | null; links: ProjectMapRow[] };
   const projs: Record<string, P> = {};
   for (const m of s.project_map) {
-    const k = m.project_gid ?? m.project_id; // TP-91: a project without Asana is keyed by its id (no Asana tickets)
+    const k = m.project_gid ?? m.project_id;
     projs[k] ??= { gid: k, name: m.project_name, conf: m.confidence, note: m.note, links: [] };
     if (m.repo) projs[k].links.push(m);
   }
@@ -35,7 +35,7 @@ export function RepoMap({ s }: { s: State }) {
   return (
     <>
       <div className="mb-4">
-        <h1 className="text-xl font-bold text-text-main sm:text-2xl">Asana 프로젝트 → 로컬 레포</h1>
+        <h1 className="text-xl font-bold text-text-main sm:text-2xl">프로젝트 → 로컬 레포</h1>
         <p className="mt-1 text-sm text-text-muted">
           굵은 선 = 기본 레포 · 점선 = 확신도 낮음 · 색:{" "}
           {Object.entries(ROLE).map(([k, c]) => (

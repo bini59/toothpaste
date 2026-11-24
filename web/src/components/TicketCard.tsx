@@ -29,7 +29,7 @@ export function TicketCard({ t, s, I, onAssign, onSkip, onApprove, onOverride, o
     <ConfirmButton
       size="sm"
       variant="secondary"
-      message="이 작업을 그만두고 티켓을 건너뜀으로 옮길까요? 에이전트 터미널을 닫고 리뷰·머지 대상에서 빠져요. 워크트리는 청소기가 곧 지우고(커밋 안 된 변경 포함), 원격 브랜치와 PR은 남아요. Asana는 직접 닫아야 해요."
+      message="이 작업을 그만두고 티켓을 건너뜀으로 옮길까요? 에이전트 터미널을 닫고 리뷰·머지 대상에서 빠져요. 워크트리는 청소기가 곧 지우고(커밋 안 된 변경 포함), 원격 브랜치와 PR은 남아요. 원본 티켓을 닫으려면 직접 처리하세요."
       confirmLabel="그만두기"
       onConfirm={() => onDrop(t.gid)}
     >
@@ -253,7 +253,7 @@ export function TicketCard({ t, s, I, onAssign, onSkip, onApprove, onOverride, o
           <Badge status="draft">{pr.base ?? "?"}</Badge>
           <span>
             머지 {ago(pr.merged_at)} ·{" "}
-            {tracked ? "프로덕션 반영 확인 대기" : "배포 추적 미설정 (Asana 완료 시 완료 처리)"}
+            {tracked ? "프로덕션 반영 확인 대기" : t.gid.startsWith("notion:") ? "배포 추적 미설정" : "배포 추적 미설정 (Asana 완료 시 완료 처리)"}
           </span>
         </p>
       )}

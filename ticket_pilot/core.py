@@ -178,9 +178,9 @@ def effective_config(stored: dict | None) -> dict:
 
 
 # Projects (TP-91): a project has its own id (slug), a name and 1..N repos; source says where its tickets come from
-# (asana = an Asana project, asana_gid; github = issues of its repos; none). Repos no project links show under the
+# (Asana project, GitHub issues, Notion data source or none). Repos no project links show under the
 # virtual project UNSORTED (미분류) on the 프로젝트 page.
-PROJECT_SOURCES = ("asana", "github", "none")
+PROJECT_SOURCES = ("asana", "github", "notion", "none")
 PROJECT_COLS = ("id", "name", "source", "asana_gid", "repos")
 UNSORTED = "unsorted"
 
@@ -342,8 +342,7 @@ def _pin_old_defaults(con, mark: str, old: dict, note: str) -> bool:
 # ---------------------------------------------------------------- SQLite
 
 # TP-91 project tables (also what _migrate_projects recreates). project_map: derived from config_projects (load_map);
-# project_gid = its Asana project (NULL without one). config_projects: id = tp's own slug, source asana | github | none,
-# asana_gid only for source asana.
+# project_gid links tickets to repos: Asana gid or notion:<tp project id>, otherwise NULL.
 PROJECT_TABLES = """
 CREATE TABLE IF NOT EXISTS project_map (
   project_gid TEXT, project_name TEXT, repo TEXT, role TEXT, is_default INTEGER,
@@ -359,6 +358,9 @@ CREATE TABLE IF NOT EXISTS config_project_repos (
 """
 
 SCHEMA = PROJECT_TABLES + """
+CREATE TABLE IF NOT EXISTS notion_connections (
+  id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, workspace_name TEXT NOT NULL, user_id TEXT NOT NULL, user_name TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS tickets (
   gid TEXT PRIMARY KEY,
   key TEXT,                -- Asana "ID" custom field (CRSC-340) or AS-<gid>
@@ -734,7 +736,8 @@ def load_map(con, m: dict | None = None):
             con.execute(
                 "INSERT OR REPLACE INTO project_map(project_gid,project_name,repo,role,is_default,confidence,note,"
                 "project_id) VALUES(?,?,?,?,?,?,?,?)",
-                (p.get("asana_gid"), p["name"], rr.get("repo"), rr.get("role"), 1 if rr.get("default") else 0,
+                (f"notion:{p['id']}" if p.get("source") == "notion" else p.get("asana_gid"),
+                 p["name"], rr.get("repo"), rr.get("role"), 1 if rr.get("default") else 0,
                  p.get("confidence"), p.get("note"), p["id"]),
             )
     # completed tickets are not re-synced; keep their project names in line with the map too

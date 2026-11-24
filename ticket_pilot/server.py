@@ -14,6 +14,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote
@@ -31,6 +32,7 @@ from . import guide as GD
 from . import lan as L
 from . import milestone as MS
 from . import notifications as N
+from . import notion, notion_tickets
 from . import onboard as OB
 from . import pipeline as P
 from . import release as R
@@ -539,12 +541,12 @@ class H(BaseHTTPRequestHandler):
         self._send(code, {"error": msg})
         return False
 
-    def _cookie(self) -> str | None:
+    def _cookie(self, key=L.COOKIE) -> str | None:
         # TP-178: not SimpleCookie, which silently drops every cookie after one it cannot parse (a JSON value
         # another service on the parent domain sets), so ours is looked up by name and the rest is ignored
         for part in (self.headers.get("Cookie") or "").split(";"):
             name, _, value = part.partition("=")
-            if name.strip() == L.COOKIE:
+            if name.strip() == key:
                 return value.strip() or None
         return None
 
@@ -828,6 +830,8 @@ class H(BaseHTTPRequestHandler):
 
     def _post(self, body):
         try:
+            if self.path.startswith("/api/notion/"):
+                return self._notion(self.path.removeprefix("/api/notion/"), body)
             if self.path in ("/api/config", "/api/config/import"):
                 # 설정 page: dry_run returns the changes for the confirm step; invalid values come back as errors
                 if self.path == "/api/config" and "updates" in body:  # several scopes as one change (프로젝트 추가)
@@ -1018,6 +1022,8 @@ class H(BaseHTTPRequestHandler):
                 return self._send(404, {"error": "not found"})
         except G.ConfigError as e:
             return self._send(400, {"error": str(e), "errors": e.errors})
+        except notion.NotionError as e:
+            return self._send(400, {"error": str(e)})
         except Forbidden as e:
             return self._send(403, {"error": str(e)})
         except L.LoginError as e:
@@ -1027,6 +1033,43 @@ class H(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             return self._send(500, {"error": str(e)})
         self._send(200, {"ok": True})
+
+    def _notion(self, action, body):
+        if action in ("app", "connect", "finish") and not self.admin:
+            raise Forbidden("Notion 계정 연결은 이 컴퓨터 또는 Docker 관리자만 할 수 있어요")
+        if action == "app":
+            notion.save_app(body.get("client_id"), body.get("client_secret"))
+            return self._send(200, {"ok": True})
+        if action == "connect":
+            origin = self.headers.get("Origin")
+            if not L.origin_ok(origin, self.headers.get("Host")):
+                raise Forbidden("대시보드에서 연결을 시작하세요")
+            url, state = notion.start(self.actor, origin + notion.CALLBACK)
+            attrs = "HttpOnly; SameSite=Strict; Path=/api/notion/finish" + ("; Secure" if origin.startswith("https:") else "")
+            return self._send(200, {"url": url}, headers=[
+                ("Set-Cookie", f"tp_notion={state}; Max-Age={notion.TTL}; {attrs}")])
+        with closing(db()) as con:
+            if action == "finish":
+                result = notion.finish(con, self.actor, body.get("state"), self._cookie("tp_notion"), body.get("code"))
+            elif action == "accounts":
+                result = {**notion.accounts(con), "admin": self.admin}
+            elif action == "preview":
+                repos = body.get("repos")
+                if not isinstance(repos, list) or not all(isinstance(r, str) for r in repos):
+                    raise notion.NotionError("프로젝트 레포 목록을 확인하세요")
+                draft = {"id": body.get("project_id"), "name": "", "notion": body.get("notion"), "repos": repos}
+                result = notion_tickets.preview(con, project_map()["projects"], draft, settings()["asana_tag"])
+            elif action in ("sources", "people", "properties"):
+                client = notion.Client(con, body.get("connection_id"))
+                if action == "sources":
+                    result = client.sources()
+                elif action == "people":
+                    result = client.people()
+                else:
+                    result = client.properties(body.get("data_source_id"))
+            else:
+                return self._send(404, {"error": "not found"})
+        return self._send(200, result)
 
 
 def serve(port: int | None = None, block: bool = True) -> ThreadingHTTPServer:

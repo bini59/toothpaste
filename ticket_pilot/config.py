@@ -7,7 +7,7 @@ Scopes (CLI paths and POST /api/config):
   global            settings.json top level (deploy without its repos) + hidden_projects
   repo.<name>       path, github, description, setup, worktree_base, orca_repo_id (legacy), dev, depends_on, checks, ci,
                     review, deploy, links (the projects it belongs to)
-  project.<id>      a project (TP-91): name, source (asana | github | none), asana_gid (source asana only), repos
+  project.<id>      a project (TP-91): name, source (asana | github | notion | none), asana_gid or notion filters, repos
                     [{repo, role, default}], confidence / note. Its repos can also be edited through repo.<name>.links
 Export / import / backups use the old file shapes: {"settings": <settings.json>, "project_map": <project_map.json>}.
 """
@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from . import antigravity, core
+from . import antigravity, core, notion, notion_tickets
 from .core import ROOT, db, event, now
 
 MODES = ("staging", "direct", "promote", "all")
@@ -526,6 +526,13 @@ def validate(doc: dict, old: dict | None = None) -> list[str]:
             gids.add(str(gid))
         else:
             need(not gid, f"{p}.asana_gid", "Asana 연결(source asana)일 때만 써요")
+        if pj.get("source") == "notion":
+            try:
+                notion_tickets.validate(pj.get("notion"))
+            except notion.NotionError as e:
+                err.append(f"{p}.notion: {e}")
+        else:
+            need("notion" not in pj, f"{p}.notion", "Notion 연결 프로젝트에서만 써요")
         need(_text(pj.get("name")), f"{p}.name", "이름이 비어 있으면 안 돼요")
         rows = pj.get("repos") or []
         name = pj.get("name") or pid
@@ -883,7 +890,7 @@ def _api_state(con) -> dict:
     doc = current(con)
     v = view(doc)
     known = {str(p["asana_gid"]): p["name"] for p in doc["project_map"]["projects"] if p.get("asana_gid")}
-    for r in con.execute("SELECT DISTINCT project_gid, project_name FROM tickets WHERE project_gid IS NOT NULL"):
+    for r in con.execute("SELECT DISTINCT project_gid, project_name FROM tickets WHERE project_gid NOT LIKE 'notion:%'"):
         known.setdefault(r["project_gid"], r["project_name"] or r["project_gid"])
     info = {}
     for n, r in v["repo"].items():
