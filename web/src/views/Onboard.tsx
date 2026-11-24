@@ -5,6 +5,7 @@ import { ConfigError, getJson, postConfig, postJson } from "../api";
 import { Select } from "../components/Select";
 import type { CloneJob, ConfigChange, ConfigState, GithubRepo, PathCheck, ProjectConf, ProjectSource } from "../types";
 import { ChangeTable, Errors, ID_RE, SOURCE_LABEL, slug } from "./Settings";
+import { emptyNotion, notionError, NotionPreview, NotionSource } from "./NotionSource";
 
 const ROLES = ["fe", "be", "admin", "app"];
 const NAME_RE = /^[A-Za-z0-9_.-]+$/;
@@ -189,6 +190,7 @@ export function Onboard({ projectId, onCancel, onSaved }: { projectId?: string; 
   const [newId, setNewId] = useState("");
   const [source, setSource] = useState<ProjectSource | null>(null);
   const [asanaGid, setAsanaGid] = useState("");
+  const [notion, setNotion] = useState(emptyNotion);
   const [added, setAdded] = useState<NewRepo[]>([]);
   const [dflt, setDflt] = useState("");
   const [pending, setPending] = useState(false);
@@ -214,16 +216,18 @@ export function Onboard({ projectId, onCancel, onSaved }: { projectId?: string; 
   const usedGids = new Set(Object.values(c?.config.project ?? {}).map((p) => p.asana_gid).filter(Boolean));
   const takenRepos = [...Object.keys(c?.config.repo ?? {}), ...added.map((r) => r.name)];
   const rows = [...(existing?.repos.map((r) => ({ repo: r.repo, role: r.role ?? "", old: true })) ?? []), ...added.map((r) => ({ repo: r.name, role: r.role, old: false }))];
-  const linkable = Object.keys(c?.config.repo ?? {}).filter((n) => !rows.some((r) => r.repo === n));
+  const repoNames = rows.map((r) => r.repo);
+  const linkable = Object.keys(c?.config.repo ?? {}).filter((n) => !repoNames.includes(n));
   const repoErr = pending ? "고른 레포를 추가하거나 선택을 취소해 주세요" : !added.length ? "레포를 하나 이상 추가해 주세요" : "";
 
+  const sourceStep = { title: "소스 설정", err: source === "notion" ? notionError(notion) : source === "asana" && !asanaGid ? "Asana 프로젝트를 골라 주세요" : "" };
+  const repoStep = { title: "레포", err: repoErr || (!rows.some((r) => r.repo === dflt) ? "기본 레포를 골라 주세요" : "") };
   const steps = projectId
     ? [{ title: "레포", err: repoErr }, { title: "확인", err: "" }]
     : [
       { title: "이름", err: !name.trim() ? "이름을 정해 주세요" : idErr },
       { title: "작업 소스", err: source ? "" : "소스를 골라 주세요" },
-      { title: "소스 설정", err: source === "asana" && !asanaGid ? "Asana 프로젝트를 골라 주세요" : "" },
-      { title: "레포", err: repoErr || (!rows.some((r) => r.repo === dflt) ? "기본 레포를 골라 주세요" : "") },
+      sourceStep, repoStep,
       { title: "확인", err: "" },
     ];
   const last = step === steps.length - 1;
@@ -233,7 +237,8 @@ export function Onboard({ projectId, onCancel, onSaved }: { projectId?: string; 
     ...(unsorted ? [] : [{
       scope: `project.${pid}`, create: !existing,
       value: {
-        ...(existing ?? { name: name.trim(), source, asana_gid: source === "asana" ? asanaGid : null }),
+        ...(existing ?? { name: name.trim(), source, asana_gid: source === "asana" ? asanaGid : null,
+          ...(source === "notion" ? { notion } : {}) }),
         repos: rows.map((r) => ({ repo: r.repo, role: r.role, ...(r.repo === dflt ? { default: true } : {}) })),
       },
     }]),
@@ -311,13 +316,13 @@ export function Onboard({ projectId, onCancel, onSaved }: { projectId?: string; 
         {!projectId && pane("작업 소스", (
           <fieldset className="space-y-2">
             <legend className="mb-1 text-sm text-text-muted">티켓을 어디서 가져올까요?</legend>
-            {(["asana", "github", "none"] as const).map((k) => (
+            {(["asana", "github", "notion", "none"] as const).map((k) => (
               <label key={k} className="flex cursor-pointer items-start gap-2 text-sm">
                 <input type="radio" className="mt-1 accent-primary" name="source" checked={source === k} onChange={() => setSource(k)} />
                 <span>
                   <span className="font-semibold text-text-main">{k === "github" ? "GitHub 이슈 (tp 라벨)" : SOURCE_LABEL[k]}</span>
                   <span className="block text-xs text-text-muted">
-                    {k === "asana" ? "Asana 프로젝트에서 나에게 배정된 작업" : k === "github" ? "프로젝트 레포의 열린 이슈 중 tp 라벨이 붙은 것" : "티켓 없이 채팅과 레포 설정만 써요"}
+                    {k === "asana" ? "Asana 프로젝트에서 나에게 배정된 작업" : k === "github" ? "프로젝트 레포의 열린 이슈 중 tp 라벨이 붙은 것" : k === "notion" ? "공유한 DB에서 담당자·태그·상태 조건에 맞는 페이지" : "티켓 없이 채팅과 레포 설정만 써요"}
                   </span>
                 </span>
               </label>
@@ -337,6 +342,9 @@ export function Onboard({ projectId, onCancel, onSaved }: { projectId?: string; 
             </div>
             <p className="text-xs text-text-muted">다른 프로젝트에 이미 연결된 Asana 프로젝트는 빠져 있어요.</p>
           </>
+        ) : source === "notion" ? (
+          <NotionSource projectId={pid} value={notion} repos={repoNames.length ? repoNames : undefined}
+            workTag={c.config.global.asana_tag} onChange={setNotion} />
         ) : source === "github" ? (
           <p className="text-sm text-text-main">
             다음 단계에서 고르는 레포마다 <code className="rounded bg-grey-50 px-1 font-mono">tp</code> 라벨이 붙은 열린 이슈가 티켓으로 들어와요.
@@ -402,6 +410,7 @@ export function Onboard({ projectId, onCancel, onSaved }: { projectId?: string; 
                 <dt className="text-text-muted">레포</dt><dd className="font-mono text-text-main">{rows.map((r) => `${r.repo}${r.repo === dflt ? " (기본)" : ""}`).join(", ")}</dd>
               </dl>
             )}
+            {last && !projectId && source === "notion" && <NotionPreview projectId={pid} value={notion} repos={repoNames} />}
             <Errors errors={errors} />
             {busy && !changes && <p className="text-sm text-text-muted">확인 중…</p>}
             {changes && (

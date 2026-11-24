@@ -86,7 +86,7 @@ export function Start({ projects, onChanged }: { projects: Project[] | null; onC
         </Section>
       </div>
       <div id="start-project">
-        <Section title="첫 프로젝트 추가" desc="GitHub 레포를 고르고 티켓 출처(Asana 프로젝트나 GitHub 이슈)를 정해요."
+        <Section title="첫 프로젝트 추가" desc="GitHub 레포와 티켓 출처(Asana 프로젝트, GitHub 이슈, Notion 데이터베이스)를 고르세요."
           aside={<Button size="sm" variant={projects?.length ? "secondary" : undefined} onClick={() => { location.hash = "projects"; }}>
             {projects?.length ? "프로젝트 보기" : "프로젝트 추가"}
           </Button>}>

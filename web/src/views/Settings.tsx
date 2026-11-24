@@ -9,6 +9,7 @@ import type { AgentAccount, AgentAccounts, AgentConf, CodexLogin, AsanaStatus, C
 import { ConfirmButton } from "../components/ConfirmButton";
 import { Update } from "./Update";
 import { ModeSection } from "./Mode";
+import { emptyNotion, NotionAccounts, NotionSource } from "./NotionSource";
 import { LanShare, Tunnel } from "./Lan";
 import { modelsForTool } from "../agentModels";
 import { applyTheme, loadThemes, type ThemeList } from "../theme/theme";
@@ -259,7 +260,7 @@ export function AsanaConnect({ onStatus }: { onStatus?: (ready: boolean) => void
   const enabled = st?.enabled !== false;
   const form = enabled && (!st?.connected || replacing);
   return (
-    <Section title="Asana 연결" desc="선택 사항이에요. Asana를 끄면 GitHub 이슈만 동기화하고 저장된 연결 정보는 유지해요."
+    <Section title="Asana 연결" desc="Asana를 꺼도 GitHub 이슈와 Notion 동기화는 계속돼요."
       aside={st && (
         <div className="flex flex-wrap gap-2">
           <Button size="sm" variant="secondary" disabled={busy} onClick={() => void act("/api/config", { scope: "global", value: { asana_enabled: !enabled } })}>{enabled ? "Asana 사용 안 함" : "Asana 사용"}</Button>
@@ -923,6 +924,7 @@ const GLOBAL_SECTIONS: SectionDef[] = [
   ["agents", "에이전트", ["agent", "agents", "max_active_runs", "agent_max_min", "agent_asana_write", "review", "check"]],
   ["git", "Git · GitHub", ["git_user", "branch_prefix", "worktree_root", "clone_root", "github_issues"]],
   ["asana", "Asana", ["asana_tag", "milestone_tag", "hidden_projects"]],
+  ["notion", "Notion", []],
   ["release", "배포 열차", ["release", "deploy"]],
   ["theme", "테마", ["theme"]],
   ["advanced", "고급", ["owner_name", "update"]],
@@ -1296,6 +1298,11 @@ function GlobalEditor({ c, section, onReload }: { c: ConfigState; section: strin
             </Section>
           </div>
         )}
+        {shown === "notion" && (
+          <Section title="Notion 계정 연결" desc="회사·개인 계정을 각각 연결할 수 있어요. 로그인할 때 공유한 데이터베이스를 여러 프로젝트에서 쓸 수 있어요.">
+            <NotionAccounts />
+          </Section>
+        )}
         {shown === "release" && (
           <Section title="배포 열차" desc={<>정한 요일과 시각에 staging을 프로덕션으로 내보내요. 레포마다 배포 설정에서 열차에 태워요 · <Key k="release" /></>}>
             <Row group label="요일">
@@ -1416,7 +1423,7 @@ export function RepoSettings({ name, s, section, href, onChanged }: { name: stri
 
 // ---------------------------------------------------------------- 프로젝트 (TP-91)
 
-export const SOURCE_LABEL: Record<ProjectSource, string> = { asana: "Asana 프로젝트", github: "GitHub 이슈", none: "없음" };
+export const SOURCE_LABEL: Record<ProjectSource, string> = { asana: "Asana 프로젝트", github: "GitHub 이슈", notion: "Notion 데이터베이스", none: "없음" };
 export const ID_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
 export const slug = (name: string) => name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40).replace(/-+$/, "");
 const EMPTY: ProjectConf = { name: "", source: "none", asana_gid: null, repos: [] };
@@ -1440,7 +1447,6 @@ function ProjectEditor({ id, c, onReload, onSaved, onDeleted }: {
   // Asana projects another tp project already links are not offered again
   const usedGids = new Set(Object.entries(c.config.project).filter(([k]) => k !== id).map(([, p]) => p.asana_gid).filter(Boolean));
   const free = Object.keys(c.config.repo).filter((n) => !d.repos.some((r) => r.repo === n));
-  const value = () => ({ ...d, asana_gid: d.source === "asana" ? d.asana_gid : null });
   // before TP-91 a project's history was recorded under its Asana gid
   const hist = id ? c.history.filter((h) => h.scope === `project:${id}` || (!!orig.asana_gid && h.scope === `project:${orig.asana_gid}`)) : [];
   const remove = async () => {
@@ -1455,8 +1461,12 @@ function ProjectEditor({ id, c, onReload, onSaved, onDeleted }: {
         <Row label="id" desc={id ? "주소(#projects/<id>)에 쓰여요. 만든 뒤에는 바꿀 수 없어요" : idErr ? <span className="text-danger-700">{idErr}</span> : "주소(#projects/<id>)에 쓰여요"}>
           <Input className={cn(inputCls, "font-mono")} value={pid} disabled={!!id} onChange={(e) => setNewId(e.target.value)} />
         </Row>
-        <Row label="티켓 출처" desc="Asana 연결은 선택이에요. GitHub 이슈 티켓은 전역 설정의 GitHub 이슈 레포에서 들어와요">
-          <Select className={selectCls} value={d.source} onChange={(e) => set((x) => void (x.source = e.target.value as ProjectSource))}>
+        <Row label="티켓 출처">
+          <Select className={selectCls} value={d.source} onChange={(e) => set((x) => {
+            x.source = e.target.value as ProjectSource;
+            if (x.source !== "asana") x.asana_gid = null;
+            if (x.source !== "notion") delete x.notion;
+          })}>
             {Object.entries(SOURCE_LABEL).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
           </Select>
         </Row>
@@ -1478,6 +1488,10 @@ function ProjectEditor({ id, c, onReload, onSaved, onDeleted }: {
           </Row>
         )}
       </Section>
+      {d.source === "notion" && <Section title="Notion에서 가져오기">
+        <NotionSource projectId={pid} value={d.notion ?? emptyNotion} repos={d.repos.map((r) => r.repo)}
+          workTag={c.config.global.asana_tag} onChange={(v) => set((x) => { x.notion = v; })} />
+      </Section>}
       <Section title="레포" desc="한 레포를 여러 프로젝트에 넣을 수 있어요. GitHub에서 새 레포를 받아 등록하려면 위의 새 레포 등록을 눌러요.">
         <Block>
           {d.repos.length ? (
@@ -1523,7 +1537,7 @@ function ProjectEditor({ id, c, onReload, onSaved, onDeleted }: {
         </Section>
       )}
       <SaveBar dirty={!id || !same(d, orig)} onReset={() => setD(clone(orig))} onSaved={() => { onReload(); onSaved?.(pid); }}
-        run={(dry) => (idErr ? Promise.reject(new ConfigError(idErr, [`id: ${idErr}`])) : postConfig("/api/config", { scope: `project.${pid}`, value: value(), dry_run: dry, create: !id }))} />
+        run={(dry) => (idErr ? Promise.reject(new ConfigError(idErr, [`id: ${idErr}`])) : postConfig("/api/config", { scope: `project.${pid}`, value: d, dry_run: dry, create: !id }))} />
     </div>
   );
 }

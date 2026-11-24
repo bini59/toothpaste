@@ -293,7 +293,7 @@ export default function App({ me }: { me: LanMe }) {
             <>
               {/* first, so its width (방금 <-> 12분 전) never moves the buttons to its right; always there, so nothing jumps when state arrives (TP-174) */}
               <span className="hidden min-w-[16rem] whitespace-nowrap text-right text-xs font-medium tabular-nums text-text-muted sm:inline">
-                {s && <>Asana 동기화 {ago(s.meta.last_sync)} · GitHub 스캔 {ago(s.meta.last_scan)}</>}
+                {s && <>티켓 동기화 {ago(s.meta.last_sync)} · GitHub 스캔 {ago(s.meta.last_scan)}</>}
               </span>
               {/* input-looking trigger; below sm only the magnifier shows */}
               <button type="button" onClick={() => setPalette(true)} aria-label={`검색 (${MAC ? "⌘" : "Ctrl "}K)`}

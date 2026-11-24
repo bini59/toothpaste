@@ -2,6 +2,7 @@
 the file store on every OS (core.KEYCHAIN off); the keychain path is covered by test_github / test_asana_connect.
 Run: python3 -m unittest discover tests"""
 import json
+import multiprocessing
 import os
 import shutil
 import stat
@@ -11,6 +12,21 @@ from pathlib import Path
 from unittest import mock
 
 from ticket_pilot import core
+
+
+def _rotate_with_pending_delete(path, snapshot, deleting, deleted):
+    write = core._secrets_write
+
+    def hold(values):
+        snapshot.set()  # the rotation has read its snapshot but has not replaced the file
+        if not deleting.wait(10):
+            raise RuntimeError("delete process did not start")
+        deleted.wait(0.3)
+        write(values)
+
+    with mock.patch.object(core, "KEYCHAIN", False), mock.patch.object(core, "SECRETS_FILE", path), \
+            mock.patch.object(core, "_secrets_write", hold):
+        core.secret_set("notion", "account", "rotated")
 
 
 class FileStoreTest(unittest.TestCase):
@@ -72,7 +88,26 @@ class FileStoreTest(unittest.TestCase):
             with self.assertRaises(OSError):
                 core.secret_set("s", "a", "new")
         self.assertEqual(core.secret_get("s", "a"), "old")
-        self.assertEqual(os.listdir(self.f.parent), ["secrets.json"])  # temp file removed
+        self.assertEqual(sorted(os.listdir(self.f.parent)), ["secrets.json", "secrets.json.lock"])
+
+    def test_rotation_and_delete_from_different_processes(self):
+        core.secret_set("dashboard", "account", "old")
+        ctx = multiprocessing.get_context("spawn")
+        snapshot, deleting, deleted = ctx.Event(), ctx.Event(), ctx.Event()
+        worker = ctx.Process(target=_rotate_with_pending_delete, args=(self.f, snapshot, deleting, deleted))
+        worker.start()
+        try:
+            self.assertTrue(snapshot.wait(10))
+            deleting.set()
+            core.secret_delete("dashboard", "account")
+            deleted.set()
+            worker.join(10)
+            self.assertEqual(worker.exitcode, 0)
+        finally:
+            if worker.is_alive():
+                worker.terminate()
+                worker.join()
+        self.assertEqual(json.loads(self.f.read_text()), {"notion": {"account": "rotated"}})
 
     def test_folder_is_tightened(self):
         self.f.parent.mkdir(parents=True, mode=0o755)
