@@ -1044,13 +1044,14 @@ class H(BaseHTTPRequestHandler):
             origin = self.headers.get("Origin")
             if not L.origin_ok(origin, self.headers.get("Host")):
                 raise Forbidden("대시보드에서 연결을 시작하세요")
-            url, state = notion.start(self.actor, origin + notion.CALLBACK)
+            url, state, proof = notion.start(self.actor, origin + notion.CALLBACK)
             attrs = "HttpOnly; SameSite=Strict; Path=/api/notion/finish" + ("; Secure" if origin.startswith("https:") else "")
             return self._send(200, {"url": url}, headers=[
-                ("Set-Cookie", f"tp_notion={state}; Max-Age={notion.TTL}; {attrs}")])
+                ("Set-Cookie", f"tp_notion_{state}={proof}; Max-Age={notion.TTL}; {attrs}")])
         with closing(db()) as con:
             if action == "finish":
-                result = notion.finish(con, self.actor, body.get("state"), self._cookie("tp_notion"), body.get("code"))
+                state = body.get("state")
+                result = notion.finish(con, self.actor, state, self._cookie(f"tp_notion_{state}"), body.get("code"))
             elif action == "accounts":
                 result = {**notion.accounts(con), "admin": self.admin}
             elif action == "preview":

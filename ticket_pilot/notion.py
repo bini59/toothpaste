@@ -19,7 +19,7 @@ API = "https://api.notion.com/v1"
 SERVICE = "ticket-pilot-notion"
 CALLBACK = "/notion/callback"
 TTL = 600
-_pending: dict[str, tuple[float, str, str]] = {}
+_pending: dict[str, tuple[float, str, str, str]] = {}
 _state_lock = threading.Lock()
 
 
@@ -44,7 +44,10 @@ def _request(path, authorization, body=None):
     for attempt in range(3):
         try:
             with urllib.request.urlopen(req, timeout=30) as response:
-                return json.load(response)
+                result = json.load(response)
+                if not isinstance(result, dict):
+                    raise NotionError("Notion 응답 형식을 확인할 수 없어요")
+                return result
         except urllib.error.HTTPError as e:
             e.close()
             delay = e.headers.get("Retry-After", "1")
@@ -58,12 +61,18 @@ def _request(path, authorization, body=None):
 
 # Store each rotating token pair as one keychain item (keychain values use a restricted alphabet).
 def _store(key, value):
-    core.secret_set(SERVICE, key, base64.b64encode(json.dumps(value).encode()).decode())
+    try:
+        core.secret_set(SERVICE, key, base64.b64encode(json.dumps(value).encode()).decode())
+    except (OSError, RuntimeError) as e:
+        raise NotionError(f"Notion 자격 증명을 저장할 수 없어요. {core.secret_store()}을 확인하세요") from e
 
 
 def _stored(key):
-    raw = core.secret_get(SERVICE, key)
-    return json.loads(base64.b64decode(raw)) if raw else None
+    try:
+        raw = core.secret_get(SERVICE, key)
+        return json.loads(base64.b64decode(raw)) if raw else None
+    except (OSError, RuntimeError, ValueError) as e:
+        raise NotionError(f"Notion 자격 증명을 읽을 수 없어요. {core.secret_store()}을 확인하세요") from e
 
 
 @contextmanager
@@ -95,14 +104,14 @@ def _app():
 
 def start(actor, redirect):
     client_id, _ = _app()
-    state = secrets.token_urlsafe(32)
+    state, proof = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
     now = time.monotonic()
     with _state_lock:
-        for key in [k for k, (expiry, _, _) in _pending.items() if expiry <= now]:
+        for key in [k for k, entry in _pending.items() if entry[0] <= now]:
             del _pending[key]
-        _pending[state] = (now + TTL, actor, redirect)
+        _pending[state] = (now + TTL, actor, redirect, proof)
     params = {"owner": "user", "client_id": client_id, "redirect_uri": redirect, "response_type": "code", "state": state}
-    return "https://api.notion.com/v1/oauth/authorize?" + urllib.parse.urlencode(params), state
+    return "https://api.notion.com/v1/oauth/authorize?" + urllib.parse.urlencode(params), state, proof
 
 
 def _exchange(body):
@@ -114,15 +123,21 @@ def _exchange(body):
 
 
 def _save_tokens(key, result):
-    _store(key, [result["access_token"], result.get("refresh_token")])
+    tokens = [result["access_token"], result.get("refresh_token")]
+    _store(key, tokens)
+    return tokens
 
 
 def finish(con, actor, state, cookie, code):
-    if not isinstance(state, str) or not cookie or not secrets.compare_digest(state.encode(), cookie.encode()):
+    if not isinstance(state, str) or not cookie:
         raise NotionError("연결을 시작한 브라우저에서 다시 시도하세요")
     with _state_lock:
-        pending = _pending.pop(state, None)
-    if not pending or pending[0] <= time.monotonic() or pending[1] != actor or not isinstance(code, str) or not code:
+        pending = _pending.get(state)
+        if (not pending or pending[0] <= time.monotonic() or pending[1] != actor
+                or not secrets.compare_digest(pending[3].encode(), cookie.encode())):
+            raise NotionError("연결을 시작한 브라우저에서 다시 시도하세요")
+        del _pending[state]
+    if not isinstance(code, str) or not code:
         raise NotionError("인증 요청이 만료되었거나 취소됐어요. 다시 연결하세요")
     with _credential_lock():
         result = _exchange({"grant_type": "authorization_code", "code": code, "redirect_uri": pending[2]})
@@ -164,10 +179,12 @@ class Client:
                 raise
         with _credential_lock():
             latest = _stored(self.key)
+            if not latest:
+                raise NotionError("선택한 Notion 계정을 다시 연결하세요")
             if latest == self.tokens:
                 refreshed = _exchange({"grant_type": "refresh_token", "refresh_token": latest[1]})
-                _save_tokens(self.key, refreshed)
-            self.tokens = _stored(self.key)
+                latest = _save_tokens(self.key, refreshed)
+            self.tokens = latest
         return _request(path, f"Bearer {self.tokens[0]}", body)
 
     def items(self, path, body=None):

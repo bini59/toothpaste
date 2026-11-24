@@ -1,14 +1,16 @@
 """Project-scoped Notion filters, ticket projection and queue preview."""
 from __future__ import annotations
 
+import hashlib
 import json
 
 from . import notion
-from .core import event
+from .core import effective_config, event, meta_get, meta_set, read_config
 
 FILTER_TYPES = {"people": ("people",), "tag": ("select", "multi_select"), "status": ("status", "select")}
 FIELDS = {"connection_id", "data_source_id", "assignee", "people_property", "tag_property", "tag_option",
           "status_property", "status_option"}
+SYNC_STATE = "notion_sync"
 
 
 def validate(cfg):
@@ -89,20 +91,60 @@ def matches(con, project, work_tag):
     return found
 
 
-def _batches(con, projects, work_tag):
-    # A Notion page has one ticket even if two projects match. The first matching configured project owns it.
-    claimed = set()
+def _version(project, work_tag):
+    data = json.dumps([project.get("notion"), work_tag], sort_keys=True).encode()
+    return hashlib.sha256(data).hexdigest()
+
+
+def fetch(con, projects, work_tag):
+    """Finish each remote listing before taking the sync writer lock. Keep only complete project results."""
+    listings = {}
     for p in projects:
+        key = (p["id"], _version(p, work_tag))
         try:
-            rows = matches(con, p, work_tag)
+            listings[key] = matches(con, p, work_tag), None
         except (RuntimeError, OSError, ValueError, KeyError, TypeError) as e:
-            retained = {r[0] for r in con.execute("SELECT gid FROM tickets WHERE project_gid=? AND assigned=1",
-                                                  (f"notion:{p['id']}",))}
-            yield p, {}, retained, str(e)
-            claimed.update(retained)
-            continue
-        yield p, rows, claimed.intersection(rows), None
-        claimed.update(rows)
+            listings[key] = {}, str(e)
+    return listings
+
+
+def _batches(con, projects, work_tag, listings):
+    # A page has one owner, the first matching configured project. A failed query only reserves pages
+    # previously confirmed under the same settings. A concurrent edit invalidates the in-flight listing.
+    current, confirmed_sources = [], {}
+    for p in projects:
+        version = _version(p, work_tag)
+        rows, error = listings.get((p["id"], version), ({}, "조회 중 설정이 바뀌었어요. 다음 동기화에서 다시 읽어요"))
+        if rows:
+            confirmed_sources.update(dict.fromkeys(rows, p["notion"]["data_source_id"]))
+        current.append((p, version, rows, error))
+    previous = meta_get(con, SYNC_STATE, {})
+    claimed = set()
+    for p, version, rows, error in current:
+        pid = p["id"]
+        gids = rows.keys()
+        if error and previous.get(pid, {}).get("version") == version:
+            # A successful listing from another database confirms the page has moved there.
+            source = p["notion"]["data_source_id"]
+            gids = {r[0] for r in con.execute("SELECT gid FROM tickets WHERE project_gid=? AND assigned=1",
+                                              (f"notion:{pid}",)) if confirmed_sources.get(r[0], source) == source}
+        owned = gids - claimed
+        claimed.update(gids)
+        yield p, version, rows, owned, error
+
+
+def page_body(con, ticket):
+    doc = effective_config(read_config(con))
+    pid = ticket["project_gid"].removeprefix("notion:")
+    project = next((p for p in doc["project_map"]["projects"] if p["id"] == pid and p["source"] == "notion"), None)
+    state = meta_get(con, SYNC_STATE, {}).get(pid, {})
+    if not project or not state.get("ready") or state["version"] != _version(project, doc["settings"]["asana_tag"]):
+        raise notion.NotionError("현재 프로젝트 조건으로 동기화한 뒤 작업을 시작해요")
+    client = notion.Client(con, project["notion"]["connection_id"])
+    markdown = client.read(f"/pages/{ticket['gid'].removeprefix('notion:')}/markdown").get("markdown")
+    if not isinstance(markdown, str):
+        raise notion.NotionError("Notion 페이지의 본문을 읽을 수 없어요")
+    return markdown
 
 
 def _local_fields(old, row):
@@ -110,17 +152,25 @@ def _local_fields(old, row):
     return {"repo_override": old["repo_override"] if old and old["project_gid"] == row["project_gid"] else None}
 
 
-def sync(con, projects, work_tag, ts, new_tagged):
-    seen = set()
-    errors = {}
-    for p, rows, overlap, error in _batches(con, projects, work_tag):
+def sync(con, listings, ts, new_tagged):
+    if not (listings or meta_get(con, SYNC_STATE)):
+        return {}
+    # Settings may have changed during the network reads. Apply results against the same snapshot as the write.
+    if not con.in_transaction:
+        con.execute("BEGIN IMMEDIATE")
+    previous = con.execute("SELECT gid FROM tickets WHERE gid LIKE 'notion:%' AND assigned=1").fetchall()
+    doc = effective_config(read_config(con))
+    projects = [p for p in doc["project_map"]["projects"] if p["source"] == "notion"]
+    seen, errors, state = set(), {}, {}
+    for p, version, rows, owned, error in _batches(con, projects, doc["settings"]["asana_tag"], listings):
+        state[p["id"]] = {"version": version, "ready": not error}
+        seen.update(owned)
         if error:
             errors[p["id"]] = error
             event(con, "error", f"Notion 동기화 ({p['name']}): {error}")
-            seen.update(overlap)  # a failed/incomplete query cannot retire that project's last successful results
             continue
         for gid, row in rows.items():
-            if gid in overlap:
+            if gid not in owned:
                 continue
             old = con.execute("SELECT * FROM tickets WHERE gid=?", (gid,)).fetchone()
             if row["has_tag"] and not (old and (old["completed"] or (old["assigned"] and old["has_tag"]))):
@@ -133,9 +183,8 @@ def sync(con, projects, work_tag, ts, new_tagged):
                              project_name=excluded.project_name,notes=excluded.notes,section=excluded.section,tags=excluded.tags,
                              has_tag=excluded.has_tag,asana_modified_at=excluded.asana_modified_at,assigned=1,
                              last_seen=excluded.last_seen,repo_override=excluded.repo_override""",
-                        {**row, **_local_fields(old, row), "ts": ts})
-        seen.update(rows)
-    previous = con.execute("SELECT gid FROM tickets WHERE gid LIKE 'notion:%' AND assigned=1").fetchall()
+                        {**row, **_local_fields(old, row), "project_name": p["name"], "ts": ts})
+    meta_set(con, SYNC_STATE, state)
     con.executemany("UPDATE tickets SET assigned=0 WHERE gid=?", [(r[0],) for r in previous if r[0] not in seen])
     return errors
 
@@ -151,7 +200,9 @@ def preview(con, projects, project, work_tag):
             break
         if p["source"] == "notion" and p["notion"]["data_source_id"] == cfg["data_source_id"]:
             relevant.append(p)
-    for p, rows, overlap, error in _batches(con, [*relevant, project], work_tag):
+    relevant.append(project)
+    listings = fetch(con, relevant, work_tag)
+    for p, _, rows, owned, error in _batches(con, relevant, work_tag, listings):
         if p is not project:
             continue
         if error:
@@ -161,6 +212,6 @@ def preview(con, projects, project, work_tag):
             old = con.execute("SELECT * FROM tickets WHERE gid=?", (gid,)).fetchone()
             ticket = {"completed": 0, "skip": 0, "open_deps": 0, **(dict(old) if old else {}), **row,
                       **_local_fields(old, row), "assigned": 1}
-            stage = "other_project" if gid in overlap else compute_stage(con, ticket, repo_count=len(project["repos"]))
+            stage = "other_project" if gid not in owned else compute_stage(con, ticket, repo_count=len(project["repos"]))
             items.append({"gid": gid, "title": row["name"], "stage": stage, "auto_start": stage == "queued"})
         return {"count": len(items), "tickets": items}

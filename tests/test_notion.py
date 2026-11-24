@@ -49,6 +49,8 @@ class NotionFixture:
                           {"id": "todo-id", "name": "할 일"}, {"id": "done-id", "name": "완료"}]}}}
         self.queries = []
         self.fail_cursor = False
+        self.on_query = None
+        self.denied_page = None
         self.expired = False
         self.refreshes = 0
 
@@ -86,7 +88,10 @@ class NotionFixture:
         elif url.path == "/data_sources/" + source:
             return 200, {"properties": self.props}
         elif url.path == f"/data_sources/{source}/query":
-            if start and self.fail_cursor:
+            if self.on_query:
+                fn, self.on_query = self.on_query, None
+                fn()
+            if start and self.fail_cursor in (True, source):
                 return 503, {}
             conditions = body.get("filter", {})
             filters = conditions.get("and", [conditions] if conditions else [])
@@ -99,8 +104,11 @@ class NotionFixture:
                 elif "multi_select" in f:
                     rows = [r for r in rows if f["multi_select"]["contains"] in [v["name"] for v in r["properties"][column]["multi_select"]]]
                 else:
-                    rows = [r for r in rows if f["status"]["equals"] == r["properties"][column]["status"]["name"]]
+                    kind = "status" if "status" in f else "select"
+                    rows = [r for r in rows if f[kind]["equals"] == r["properties"][column][kind]["name"]]
         elif url.path.startswith("/pages/") and url.path.endswith("/markdown"):
+            if url.path == f"/pages/{self.denied_page}/markdown":
+                return 403, {}
             return 200, {"markdown": "페이지 본문에서 가져온 작업 설명"}
         else:
             return 404, {}
@@ -195,6 +203,25 @@ class NotionTest(unittest.TestCase):
     def stages(self):
         return {r["name"]: r["stage"] for r in self.con.execute("SELECT name,stage FROM tickets WHERE assigned=1")}
 
+    def dispatch_log(self):
+        lines = []
+        pipeline.dispatch(dry_run=True, log=lines.append)
+        return lines
+
+    def test_parallel_account_authorizations_in_one_browser(self):
+        flows, cookies = [], []
+        for name in ("team", "home"):
+            status, r, cookie = self.call("connect")
+            self.assertEqual(status, 200)
+            state = parse_qs(urlsplit(r["url"]).query)["state"][0]
+            flows.append({"state": state, "code": name})
+            cookies.append(cookie.split(";")[0])
+        self.assertNotEqual(cookies[0].partition("=")[0], cookies[1].partition("=")[0])
+        self.assertEqual(self.call("finish", flows[0], cookies[1])[0], 400)
+        for flow in reversed(flows):
+            self.assertEqual(self.call("finish", flow, "; ".join(cookies))[0], 200)
+        self.assertEqual(len(self.post("accounts")["connections"]), 2)
+
     def test_account_scoped_schema_members_and_rotating_tokens(self):
         home = self.connect("home")
         accounts = self.post("accounts")
@@ -263,6 +290,7 @@ class NotionTest(unittest.TestCase):
         self.fixture.fail_cursor = True
         self.assertIn("example", pipeline.sync(log=lambda *_: None)["notion_errors"])
         self.assertEqual(self.stages(), before)
+        self.assertFalse(any("would create" in s for s in self.dispatch_log()))
         self.fixture.fail_cursor = False
         del self.fixture.props["상태"]
         self.assertIn("example", pipeline.sync(log=lambda *_: None)["notion_errors"])
@@ -278,6 +306,74 @@ class NotionTest(unittest.TestCase):
         self.post("/api/config", {"scope": "project.example", "value": None})
         pipeline.sync(log=lambda *_: None)
         self.assertEqual(self.stages(), {})
+
+    def test_changed_source_does_not_dispatch_or_reserve_an_old_page(self):
+        self.save(self.cfg, "first")
+        pipeline.sync(log=lambda *_: None)
+        self.save({**self.cfg, "data_source_id": HOME_DB}, "first")  # team account cannot read the new source
+        self.assertFalse(any("would create" in s for s in self.dispatch_log()))
+        self.save(self.cfg, "second")
+        preview = self.preview(self.cfg, pid="second")
+        self.assertTrue(all(t["auto_start"] for t in preview))
+        self.assertIn("first", pipeline.sync(log=lambda *_: None)["notion_errors"])
+        self.assertEqual(self.stages(), {t["title"]: "queued" for t in preview})
+        owners = {r[0] for r in self.con.execute("SELECT project_gid FROM tickets WHERE assigned=1")}
+        self.assertEqual(owners, {"notion:second"})
+        self.assertEqual(sum("would create" in s for s in self.dispatch_log()), 2)
+
+    def test_filter_edit_during_query_discards_outdated_results(self):
+        self.save(self.cfg)
+        pipeline.sync(log=lambda *_: None)
+        change = {**self.cfg, "assignee": MEMBER}
+        self.fixture.on_query = lambda: self.save(change)
+        self.assertIn("example", pipeline.sync(log=lambda *_: None)["notion_errors"])
+        self.assertEqual(self.stages(), {})
+        pipeline.sync(log=lambda *_: None)
+        self.assertEqual(self.stages(), {"설정 저장": "queued", "계정 연결": "queued"})
+
+    def test_page_moved_between_databases_wins_over_an_old_failed_listing(self):
+        self.save({**self.cfg, "assignee": "all"}, "first")
+        pipeline.sync(log=lambda *_: None)
+        home = {**self.cfg, "connection_id": self.connect("home"), "data_source_id": HOME_DB, "assignee": "all"}
+        self.save(home, "second")
+        self.fixture.pages[HOME_DB].append(self.fixture.pages[TEAM_DB].pop(0))
+        self.fixture.fail_cursor = TEAM_DB
+        preview = self.preview(home, pid="second")
+        self.assertEqual({t["title"] for t in preview if t["auto_start"]}, {"계정 연결", "개인 일정"})
+        self.assertIn("first", pipeline.sync(log=lambda *_: None)["notion_errors"])
+        rows = self.con.execute("SELECT name FROM tickets WHERE project_gid='notion:second' AND stage='queued'")
+        self.assertEqual({r[0] for r in rows}, {"계정 연결", "개인 일정"})
+
+    def test_unreadable_first_page_leaves_the_slot_for_the_next_ticket(self):
+        self.save(self.cfg)
+        self.post("/api/config", {"scope": "global", "value": {"max_active_runs": 1}})
+        pipeline.sync(log=lambda *_: None)
+        self.fixture.denied_page = uid(101)
+        self.con.execute("UPDATE tickets SET due_on='2000-01-01' WHERE gid=?", ("notion:" + uid(101),))
+        self.con.commit()
+        lines = self.dispatch_log()
+        self.assertTrue(any("Notion HTTP 403" in s for s in lines), lines)
+        starts = [s for s in lines if "would create" in s]
+        self.assertEqual(len(starts), 1)
+        self.assertIn("팀 보드", starts[0])
+
+    def test_select_columns_and_renamed_options_use_stored_ids(self):
+        for old, new, kind in (("라벨", "분류", "multi_select"), ("상태", "진행", "status")):
+            prop = self.fixture.props.pop(old)
+            options = prop[kind]["options"]
+            if old == "상태":
+                options[0]["name"] = "예정"
+            self.fixture.props[new] = {"id": prop["id"], "type": "select", "select": {"options": options}}
+            for row in self.fixture.pages[TEAM_DB]:
+                value = row["properties"].pop(old)[kind]
+                selected = value[0] if isinstance(value, list) else value
+                row["properties"][new] = {"type": "select", "select": {
+                    "name": "예정" if selected["name"] == "할 일" else selected["name"]}}
+        tickets = self.preview(self.cfg)
+        self.assertEqual([t["title"] for t in tickets], ["계정 연결", "팀 보드"])
+        self.assertTrue(all(t["auto_start"] for t in tickets))
+        self.assertEqual(self.fixture.queries[-1][1][1:], [{"property": "분류", "select": {"equals": "tp"}},
+                                                          {"property": "진행", "select": {"equals": "예정"}}])
 
     def test_same_page_in_two_projects_gets_one_owner(self):
         self.save(self.cfg, "first")

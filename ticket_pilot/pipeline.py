@@ -357,6 +357,8 @@ def sync(log=print) -> dict:
     con = db()
     load_map(con)
     con.commit()
+    sources = [p for p in project_map()["projects"] if p["source"] == "notion"]
+    notion_listings = notion_tickets.fetch(con, sources, st["asana_tag"])
     mapped = {r["project_gid"] for r in con.execute("SELECT project_gid FROM project_map WHERE repo IS NOT NULL")}
     names = {r["project_gid"]: r["project_name"] for r in con.execute("SELECT project_gid, project_name FROM project_map")}
     hidden = list(project_map().get("hidden_projects") or {})
@@ -375,8 +377,7 @@ def sync(log=print) -> dict:
             asana_error = str(e)
             event(con, "error", f"Asana 동기화: {asana_error}")
     sync_issues(con, ts, new_tagged)
-    sources = [p for p in project_map()["projects"] if p["source"] == "notion"]
-    notion_errors = notion_tickets.sync(con, sources, st["asana_tag"], ts, new_tagged)
+    notion_errors = notion_tickets.sync(con, notion_listings, ts, new_tagged)
     for k in new_tagged:
         event(con, "tagged", f"{k} tagged")
     restage(con)
@@ -403,13 +404,7 @@ def build_brief(con, t, repo: dict) -> str:
     notes = t["notes"] or ""
     is_notion = t["gid"].startswith("notion:")
     if is_notion:
-        project = next((p for p in project_map()["projects"] if p["source"] == "notion"
-                        and f"notion:{p['id']}" == t["project_gid"]), None)
-        if not project:
-            raise notion.NotionError("티켓의 Notion 프로젝트 연결을 확인하세요")
-        client = notion.Client(con, project["notion"]["connection_id"])
-        page = client.read(f"/pages/{t['gid'][7:]}/markdown")
-        notes = "\n\n".join(filter(None, (notes, page["markdown"])))
+        notes = "\n\n".join(filter(None, (notes, notion_tickets.page_body(con, t))))
     try:
         if ref:
             j = _gh_issue_json(["issue", "view", ref[1], "--repo", ref[0], "--json", "comments"])
@@ -505,7 +500,10 @@ def dispatch(dry_run=False, log=print, only: str | None = None) -> list[str]:
                  and escalate_rework(con, t, cap, dry_run=dry_run, log=log)}
     done += [t["key"] for t in cands if t["gid"] in escalated]
     cands = [t for t in cands if t["gid"] not in escalated]
-    for t in cands[:slots] if gh_ok else ():
+    for t in cands if gh_ok else ():
+        if not slots:
+            break
+        slots -= 1
         if t["stage"] == "conflict":
             if resolve_conflict(con, t, dry_run=dry_run, log=log):
                 done.append(t["key"])
@@ -520,6 +518,7 @@ def dispatch(dry_run=False, log=print, only: str | None = None) -> list[str]:
         try:
             brief = build_brief(con, t, repo)
         except notion.NotionError as e:
+            slots += 1  # an unavailable page must not hold a slot ahead of the next ticket
             log(f"{t['key']}: {e}")
             if not dry_run:
                 event(con, "error", f"{t['key']}: {e}", t["gid"])
