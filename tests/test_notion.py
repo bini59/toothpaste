@@ -65,6 +65,7 @@ class NotionFixture:
         self.on_markdown = None
         self.markdown = {}
         self.truncate_path = None
+        self.truncate_method = None
         self.expired = False
         self.refreshes = 0
 
@@ -198,7 +199,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
     def handle_api(self):
         data = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         status, result = self.server.fixture.respond(self.command, self.path, self.headers, json.loads(data) if data else None)
-        if urlsplit(self.path).path == self.server.fixture.truncate_path:
+        if (urlsplit(self.path).path == self.server.fixture.truncate_path
+                and self.server.fixture.truncate_method in (None, self.command)):
             self.send_response(200)
             self.send_header("Content-Length", "100")
             self.end_headers()

@@ -39,11 +39,7 @@ def flush(con):
                     if (not con.execute("SELECT 1 FROM notion_status_queue WHERE id=?", (row["id"],)).fetchone()
                             or notion_tickets.project_config(con, row["project_id"]) != cfg):
                         continue
-                    if props:
-                        pages.patch(page_id, props)
-                    else:
-                        # A previous PATCH can have succeeded before its response reached the host.
-                        notion_tickets.page_edited(con, gid, page, pages.source, pages.schema)
+                    pages.apply_properties(page, props)
                     event(con, "notion_write", f"Notion 상태 반영 · {row['stage']} · {notion_tickets.ticket_key(page_id)}", gid)
                 con.execute("DELETE FROM notion_status_queue WHERE id=?", (row["id"],))
             except notion.NotionError as e:

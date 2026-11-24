@@ -108,6 +108,21 @@ class NotionWrites(NotionDashboard):
         pipeline.sync()
         self.assertEqual(len([s for s in self.dispatch_log() if "would create" in s]), 2)
 
+    def test_lost_patch_and_idempotent_retry_during_listing(self):
+        pipeline.sync()
+        def interrupted_patch():
+            self.fixture.truncate_path, self.fixture.truncate_method = self.path, "PATCH"
+            with self.assertRaisesRegex(SystemExit, "변경 내용을 확인"):
+                self.cmd("status", self.key, "완료")
+            self.fixture.truncate_path = None
+        self.fixture.after_listing = interrupted_patch
+        pipeline.sync()
+        self.assertFalse(any(self.key in s for s in self.dispatch_log() if "would create" in s))
+        self.cmd("status", self.key, "완료")
+        self.assertEqual(pipeline.find_ticket(self.con, self.key)["section"], "완료")
+        self.assertEqual(len(self.fixture.writes), 1)
+        self.assertFalse(any(self.key in s for s in self.dispatch_log() if "would create" in s))
+
     def test_permissions_and_partial_body_failure(self):
         self.fixture.deny_writes = {("POST", "/pages"), ("PATCH", self.path), ("POST", "/comments"), ("GET", "/users")}
         self.assertNotIn("notion_errors", pipeline.sync())

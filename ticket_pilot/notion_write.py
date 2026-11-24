@@ -96,23 +96,32 @@ class ProjectPages:
             body["markdown"] = args.body
         return self.client.write("POST", "/pages", body, "콘텐츠 추가")
 
-    def patch(self, page_id, props):
-        page = self.client.write("PATCH", f"/pages/{page_id}", {"properties": props})
+    def _remember(self, page_id, page):
         try:
             with self.con:
                 notion_tickets.page_edited(self.con, "notion:" + page_id, page, self.source, self.schema)
         except sqlite3.Error as e:
-            raise notion.NotionError(f"{notion_tickets.ticket_key(page_id)}의 Notion 속성은 변경했어요. 로컬 DB 저장을 확인하세요") from e
+            raise notion.NotionError(f"{notion_tickets.ticket_key(page_id)}의 로컬 DB 저장에 실패했어요. Notion 페이지를 확인하세요") from e
 
-    def update(self, page_id, args):
+    def apply_properties(self, page, props):
+        page_id = page["id"]
+        if props:
+            try:
+                page = self.client.write("PATCH", f"/pages/{page_id}", {"properties": props})
+            except notion.UncertainWrite:
+                self._remember(page_id, None)  # an older listing cannot safely dispatch this page
+                raise
+        self._remember(page_id, page)  # an idempotent retry can already see the requested value
+
+    def update(self, page, args):
         props = self.fields(args.title, args.assignee, args.due)
         if not props and args.body is None:
             raise notion.NotionError("수정할 제목, 본문, 담당자 또는 마감일을 지정하세요")
         if props:
-            self.patch(page_id, props)
+            self.apply_properties(page, props)
         if args.body is not None:
             try:
-                self.client.write("PATCH", f"/pages/{page_id}/markdown",
+                self.client.write("PATCH", f"/pages/{page['id']}/markdown",
                                   {"type": "replace_content", "replace_content": {"new_str": args.body}})
             except notion.NotionError as e:
                 if props:
@@ -134,7 +143,7 @@ class ProjectPages:
             return {}
         return {col["id"]: {col["type"]: choice}}
 
-    def tag(self, page, value, remove):
+    def tag_change(self, page, value, remove):
         col = self.column("tag")
         choice = _option(col, value, new_tag=True)
         current = self.current(page, col)
@@ -144,13 +153,13 @@ class ProjectPages:
         present = any(t[field] == wanted for t in tags)
         if remove:
             if not present:
-                return
+                return {}
             updated = [{"id": t["id"]} for t in tags if t[field] != wanted] if multi else None
         else:
             if present:
-                return
+                return {}
             updated = [{"id": t["id"]} for t in tags] + [choice] if multi else choice
-        self.patch(page["id"], {col["id"]: {col["type"]: updated}})
+        return {col["id"]: {col["type"]: updated}}
 
     def comment(self, page_id, text):
         result = self.client.write("POST", "/comments", {"parent": {"page_id": page_id}, "rich_text": _rich_text(text)}, "댓글 추가")
@@ -188,15 +197,13 @@ def run(args):
         with page_lock(page_id):
             page = pages.client.page(page_id, pages.source)
             if args.op == "update":
-                pages.update(page_id, args)
+                pages.update(page, args)
             elif args.op == "tag":
-                pages.tag(page, args.name, args.remove)
+                pages.apply_properties(page, pages.tag_change(page, args.name, args.remove))
             elif args.op == "status":
                 if args.value is None:
                     return {"key": key, "options": pages.column("status")["options"]}
-                props = pages.status_change(page, args.value)
-                if props:
-                    pages.patch(page_id, props)
+                pages.apply_properties(page, pages.status_change(page, args.value))
             else:
                 pages.comment(page_id, args.text)
     actor = os.environ.get("TP_AGENT") or "cli"

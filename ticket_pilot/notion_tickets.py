@@ -160,7 +160,7 @@ def page_edited(con, gid, page, source, schema):
     snapshot = meta_get(con, SYNC_STATE, {})
     snapshot.setdefault("edited", {})[gid] = meta_get(con, "notion_sync_generation", 0)
     meta_set(con, SYNC_STATE, snapshot)
-    if (page.get("id") != gid.removeprefix("notion:") or not page.get("properties")
+    if (not page or page.get("id") != gid.removeprefix("notion:") or not page.get("properties")
             or not page.get("url") or not page.get("last_edited_time")):
         return  # partial page response
     owner = con.execute("SELECT project_gid FROM tickets WHERE gid=?", (gid,)).fetchone()

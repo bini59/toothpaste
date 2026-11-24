@@ -28,6 +28,10 @@ class NotionError(RuntimeError):
     pass
 
 
+class UncertainWrite(NotionError):
+    """The connection may have applied this mutation before the response failed."""
+
+
 class APIError(NotionError):
     def __init__(self, status, capability="콘텐츠 읽기"):
         hints = {400: "요청 값과 OAuth 앱 설정을 확인하세요", 401: "계정을 다시 연결하세요",
@@ -44,7 +48,8 @@ def _request(path, authorization, body=None, method=None, capability="콘텐츠 
         "Authorization": authorization, "Notion-Version": "2026-03-11", "Content-Type": "application/json",
     })
     # Search, queries and OAuth use implicit POST. An explicit POST creates a page or comment.
-    uncertain = "Notion 요청 결과를 확인할 수 없어요. 다시 요청하기 전에 프로젝트 DB에서 페이지나 댓글을 확인하세요"
+    uncertain = ("Notion 요청 결과를 확인할 수 없어요. 다시 요청하기 전에 프로젝트 DB에서 페이지나 댓글을 확인하세요"
+                 if method == "POST" else "Notion 요청 결과를 확인할 수 없어요. 페이지에서 변경 내용을 확인하세요")
     for attempt in range(3):
         try:
             with urllib.request.urlopen(req, timeout=30) as response:
@@ -58,12 +63,12 @@ def _request(path, authorization, body=None, method=None, capability="콘텐츠 
             if e.code == 429 and attempt < 2 and delay.isdecimal() and int(delay) <= 10:
                 time.sleep(int(delay))
                 continue
-            if method == "POST" and e.code >= 500:
-                raise NotionError(f"Notion HTTP {e.code} · {uncertain}") from None
+            if method and e.code >= 500:
+                raise UncertainWrite(f"Notion HTTP {e.code} · {uncertain}") from None
             raise APIError(e.code, capability) from None  # an OAuth error body can contain credentials
         except (OSError, ValueError, http.client.HTTPException) as e:
-            if method == "POST":
-                raise NotionError(uncertain) from e
+            if method:
+                raise UncertainWrite(uncertain) from e
             raise NotionError("Notion 응답을 읽을 수 없어요. 잠시 뒤 다시 시도하세요") from e
 
 
