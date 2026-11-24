@@ -79,6 +79,7 @@ def _stored(key):
 @contextmanager
 def _credential_lock():
     # The dashboard and tick are separate processes. Only one may exchange a given refresh token.
+    core.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with (core.DB_PATH.parent / "notion-oauth.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         yield

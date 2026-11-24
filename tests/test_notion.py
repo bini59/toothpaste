@@ -1,6 +1,7 @@
 """Notion OAuth, schema/filter discovery and the dashboard preview -> saved project -> sync/dispatch path."""
 import base64
 import http.client
+import io
 import json
 import os
 import tempfile
@@ -12,7 +13,7 @@ from pathlib import Path
 from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
-from ticket_pilot import core, mode, notion, pipeline, release, server
+from ticket_pilot import cli, core, mode, notion, pipeline, release, server
 
 
 def uid(n):
@@ -20,7 +21,7 @@ def uid(n):
 
 
 OWNER, MEMBER, PERSONAL = (uid(n) for n in (1, 2, 3))
-TEAM_DB, HOME_DB = uid(20), uid(21)
+TEAM_DB, HOME_DB, DOCS_DB = uid(20), uid(21), uid(22)
 
 
 def page(n, title, people, tags, status):
@@ -32,8 +33,9 @@ def page(n, title, people, tags, status):
 
 
 class NotionFixture:
-    """Wire-format fixtures. A connection can only see its own data source. Force pagination on every listing."""
-    names = {"team": ("회사", OWNER, uid(10), TEAM_DB), "home": ("개인", PERSONAL, uid(11), HOME_DB)}
+    """Wire-format fixtures. Each account sees its shared sources. Force pagination on every listing."""
+    names = {"team": ("회사", OWNER, uid(10)), "home": ("개인", PERSONAL, uid(11))}
+    shared = {"team": {TEAM_DB: "회사 티켓", DOCS_DB: "문서 티켓"}, "home": {HOME_DB: "개인 티켓"}}
 
     def __init__(self):
         self.pages = {TEAM_DB: [page(101, "계정 연결", [OWNER, MEMBER], ["tp"], "할 일"),
@@ -41,7 +43,9 @@ class NotionFixture:
                                 page(103, "배포 완료", [MEMBER], ["tp"], "완료"),
                                 page(104, "팀 보드", [OWNER], ["tp"], "할 일"),
                                 page(105, "설정 저장", [MEMBER], ["tp"], "할 일")],
-                      HOME_DB: [page(201, "개인 일정", [PERSONAL], ["tp"], "할 일")]}
+                      HOME_DB: [page(201, "개인 일정", [PERSONAL], ["tp"], "할 일")],
+                      DOCS_DB: [page(301, "가이드 발행", [MEMBER], ["문서"], "완료"),
+                                page(302, "가이드 초안", [MEMBER], ["문서"], "할 일")]}
         self.props = {"개발 담당": {"type": "people", "id": "people-id", "people": {}},
                       "라벨": {"type": "multi_select", "id": "tag-id", "multi_select": {"options": [
                           {"id": "tp-id", "name": "tp"}, {"id": "docs-id", "name": "문서"}]}},
@@ -72,7 +76,7 @@ class NotionFixture:
             name = body["code"]
             if name not in self.names or not body["redirect_uri"].endswith("/notion/callback"):
                 return 400, {}
-            workspace, owner, wid, _ = self.names[name]
+            workspace, owner, wid = self.names[name]
             return 200, {"access_token": "access-" + name, "refresh_token": "refresh-" + name,
                          "owner": {"type": "user", "user": {"id": owner, "name": "민지" if name == "team" else "하늘"}},
                          "workspace_name": workspace, "workspace_id": wid, "bot_id": uid(900)}
@@ -80,17 +84,22 @@ class NotionFixture:
         name = token.split("-")[-1]
         if name not in self.names or (self.expired and token.startswith("access-")):
             return 401, {}
-        source = self.names[name][3]
+        shared = self.shared[name]
         args = body or {k: vs[0] for k, vs in parse_qs(url.query).items()}
         start = int(args.get("start_cursor", "0"))
         if url.path == "/search" and body["filter"] == {"property": "object", "value": "data_source"}:
-            rows = [{"id": source, "object": "data_source", "title": [{"plain_text": self.names[name][0] + " 티켓"}]}]
+            rows = [{"id": source, "object": "data_source", "title": [{"plain_text": title}]} for source, title in shared.items()]
         elif url.path == "/users":
             rows = [{"id": uid(900), "type": "bot"}, {"id": self.names[name][1], "name": "연결 사용자", "type": "person"},
                     {"id": MEMBER, "name": "서준", "type": "person"}]
-        elif url.path == "/data_sources/" + source:
-            return 200, {"properties": self.props}
-        elif url.path == f"/data_sources/{source}/query":
+        elif url.path.startswith("/data_sources/"):
+            source, _, action = url.path.removeprefix("/data_sources/").partition("/")
+            if source not in shared:
+                return 404, {}
+            if not action:
+                return 200, {"properties": self.props}
+            if action != "query":
+                return 404, {}
             if self.on_query:
                 fn, self.on_query = self.on_query, None
                 fn()
@@ -145,7 +154,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
         pass
 
 
-class NotionTest(unittest.TestCase):
+class NotionDashboard(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -165,10 +174,6 @@ class NotionTest(unittest.TestCase):
         mock.patch.object(notion, "API", f"http://127.0.0.1:{upstream.server_port}").start()
         self.port = self.serve(server.H).server_port
         self.origin = f"http://127.0.0.1:{self.port}"
-        self.post("app", {"client_id": "app-id", "client_secret": "app-secret"})
-        self.team = self.connect("team")
-        self.cfg = {"connection_id": self.team, "data_source_id": TEAM_DB, "people_property": "people-id",
-                    "tag_property": "tag-id", "tag_option": "tp-id", "status_property": "status-id", "status_option": "todo-id"}
 
     def serve(self, handler):
         srv = ThreadingHTTPServer(("127.0.0.1", 0), handler)
@@ -196,6 +201,7 @@ class NotionTest(unittest.TestCase):
         status, r, cookie = self.call("connect")
         self.assertEqual(status, 200, r)
         params = parse_qs(urlsplit(r["url"]).query)
+        self.assertEqual(params["client_id"], ["app-id"])
         self.assertEqual(params["redirect_uri"], [self.origin + "/notion/callback"])
         self.assertIn("HttpOnly", cookie)
         body = {"state": params["state"][0], "code": name}
@@ -223,6 +229,72 @@ class NotionTest(unittest.TestCase):
         pipeline.dispatch(dry_run=True, log=lines.append)
         return lines
 
+
+class NotionAppTest(NotionDashboard):
+    def test_server_provisioning_and_one_login_for_two_project_databases(self):
+        self.assertEqual(self.post("accounts"), {"configured": False, "connections": [], "admin": True})
+        self.assertEqual(self.call("connect")[0], 400)
+        self.assertEqual(self.call("app", {"client_id": "old", "client_secret": "unused"})[0], 404)
+        with mock.patch("sys.stdin", io.StringIO("app-secret\n")), mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            cli.main(["notion-app", "--client-id", "app-id"])
+        self.assertNotIn("app-secret", out.getvalue())
+        self.assertEqual(self.post("accounts"), {"configured": True, "connections": [], "admin": True})
+
+        connection = self.connect("team")
+        self.assertEqual(len(self.post("accounts")["connections"]), 1)
+        sources = self.post("sources", {"connection_id": connection})
+        self.assertEqual({s["id"] for s in sources}, {TEAM_DB, DOCS_DB})
+        team = {"connection_id": connection, "data_source_id": TEAM_DB, "people_property": "people-id",
+                "tag_property": "tag-id", "tag_option": "tp-id", "status_property": "status-id", "status_option": "todo-id"}
+        docs = {**team, "data_source_id": DOCS_DB, "assignee": MEMBER, "tag_option": "docs-id", "status_option": "done-id"}
+        expected = {"team": {"계정 연결", "팀 보드"}, "docs": {"가이드 발행"}}
+        for project, cfg in (("team", team), ("docs", docs)):
+            self.assertEqual({t["title"] for t in self.preview(cfg, pid=project)}, expected[project])
+            self.save(cfg, project)
+        self.assertNotIn("notion_errors", pipeline.sync(log=lambda *_: None))
+        for project, titles in expected.items():
+            rows = self.con.execute("SELECT name FROM tickets WHERE assigned=1 AND project_gid=?", ("notion:" + project,))
+            self.assertEqual({r["name"] for r in rows}, titles)
+
+    def test_existing_app_connection_and_project_survive_update(self):
+        # Records as written by the former dashboard app form and OAuth callback.
+        connection = f"{uid(10)}:{OWNER}"
+        for key, pair in (("oauth-app", ["app-id", "app-secret"]), (connection, ["access-team", "refresh-team"])):
+            core.secret_set("ticket-pilot-notion", key, base64.b64encode(json.dumps(pair).encode()).decode())
+        self.con.execute("INSERT INTO notion_connections(id, workspace_id, workspace_name, user_id, user_name) VALUES(?,?,?,?,?)",
+                         (connection, uid(10), "회사", OWNER, "민지"))
+        self.con.commit()
+        cfg = {"connection_id": connection, "data_source_id": TEAM_DB, "assignee": MEMBER, "people_property": "people-id",
+               "tag_property": "tag-id", "tag_option": "docs-id", "status_property": "status-id", "status_option": "todo-id"}
+        self.save(cfg)
+        accounts = self.post("accounts")
+        self.assertTrue(accounts["configured"])
+        self.assertEqual([c["id"] for c in accounts["connections"]], [connection])
+        self.fixture.expired = True
+        self.assertNotIn("notion_errors", pipeline.sync(log=lambda *_: None))
+        self.assertEqual(self.fixture.refreshes, 1)
+        self.assertEqual(self.stages(), {"사용 설명": "open"})
+        self.assertEqual(core.project_map()["projects"][0]["notion"], cfg)
+
+
+class NotionTest(NotionDashboard):
+    def setUp(self):
+        super().setUp()
+        notion.save_app("app-id", "app-secret")
+        self.team = self.connect("team")
+        self.cfg = {"connection_id": self.team, "data_source_id": TEAM_DB, "people_property": "people-id",
+                    "tag_property": "tag-id", "tag_option": "tp-id", "status_property": "status-id", "status_option": "todo-id"}
+
+    def test_member_can_use_the_shared_connection_while_login_requires_admin(self):
+        with mock.patch.dict(os.environ, TP_MODE="docker", TP_ADMINS="owner", TP_DOCKER_UPDATE_DIR=""), \
+                mock.patch.object(server.L, "session_login", return_value="member"):
+            accounts = self.post("accounts")
+            self.assertFalse(accounts["admin"])
+            self.assertEqual([c["id"] for c in accounts["connections"]], [self.team])
+            self.assertEqual(self.call("connect")[0], 403)
+            self.assertEqual(self.call("finish")[0], 403)
+            self.assertEqual({t["title"] for t in self.preview(self.cfg)}, {"계정 연결", "팀 보드"})
+
     def test_parallel_account_authorizations_in_one_browser(self):
         flows, cookies = [], []
         for name in ("team", "home"):
@@ -242,7 +314,8 @@ class NotionTest(unittest.TestCase):
         accounts = self.post("accounts")
         self.assertEqual({r["workspace_name"] for r in accounts["connections"]}, {"회사", "개인"})
         self.assertNotIn("access-", json.dumps(accounts))
-        self.assertEqual(self.post("sources", {"connection_id": self.team}), [{"name": "회사 티켓", "id": TEAM_DB}])
+        self.assertEqual(self.post("sources", {"connection_id": self.team}), [{"name": "회사 티켓", "id": TEAM_DB},
+                                                                            {"name": "문서 티켓", "id": DOCS_DB}])
         self.assertEqual(self.post("sources", {"connection_id": home}), [{"name": "개인 티켓", "id": HOME_DB}])
         self.assertEqual(self.post("people", {"connection_id": self.team})[-1], {"name": "서준", "id": MEMBER})
         properties = self.post("properties", self.cfg)
