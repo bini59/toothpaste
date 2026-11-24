@@ -1035,11 +1035,8 @@ class H(BaseHTTPRequestHandler):
         self._send(200, {"ok": True})
 
     def _notion(self, action, body):
-        if action in ("app", "connect", "finish") and not self.admin:
+        if action in ("connect", "finish") and not self.admin:
             raise Forbidden("Notion 계정 연결은 이 컴퓨터 또는 Docker 관리자만 할 수 있어요")
-        if action == "app":
-            notion.save_app(body.get("client_id"), body.get("client_secret"))
-            return self._send(200, {"ok": True})
         if action == "connect":
             origin = self.headers.get("Origin")
             if not L.origin_ok(origin, self.headers.get("Host")):

@@ -9,7 +9,7 @@ import type { AgentAccount, AgentAccounts, AgentConf, CodexLogin, AsanaStatus, C
 import { ConfirmButton } from "../components/ConfirmButton";
 import { Update } from "./Update";
 import { ModeSection } from "./Mode";
-import { emptyNotion, NotionSource } from "./NotionSource";
+import { emptyNotion, NotionAccounts, NotionSource } from "./NotionSource";
 import { LanShare, Tunnel } from "./Lan";
 import { applyTheme, loadThemes, type ThemeList } from "../theme/theme";
 
@@ -923,6 +923,7 @@ const GLOBAL_SECTIONS: SectionDef[] = [
   ["agents", "에이전트", ["agent", "agents", "max_active_runs", "agent_max_min", "agent_asana_write", "review", "check"]],
   ["git", "Git · GitHub", ["git_user", "branch_prefix", "worktree_root", "clone_root", "github_issues"]],
   ["asana", "Asana", ["asana_tag", "milestone_tag", "hidden_projects"]],
+  ["notion", "Notion", []],
   ["release", "배포 열차", ["release", "deploy"]],
   ["theme", "테마", ["theme"]],
   ["advanced", "고급", ["owner_name", "update"]],
@@ -1295,6 +1296,11 @@ function GlobalEditor({ c, section, onReload }: { c: ConfigState; section: strin
               </Row>
             </Section>
           </div>
+        )}
+        {shown === "notion" && (
+          <Section title="Notion 계정 연결" desc="회사·개인 계정을 각각 연결할 수 있어요. 로그인할 때 공유한 데이터베이스를 여러 프로젝트에서 쓸 수 있어요.">
+            <NotionAccounts />
+          </Section>
         )}
         {shown === "release" && (
           <Section title="배포 열차" desc={<>정한 요일과 시각에 staging을 프로덕션으로 내보내요. 레포마다 배포 설정에서 열차에 태워요 · <Key k="release" /></>}>

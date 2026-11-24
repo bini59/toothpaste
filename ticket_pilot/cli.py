@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import getpass
 import json
 import os
 import signal
@@ -24,6 +25,7 @@ from . import guide as GD
 from . import migrate as M
 from . import mode as MO
 from . import milestone as MS
+from . import notion
 from . import pipeline as P
 from . import release as R
 from . import setup as S
@@ -348,12 +350,25 @@ def cmd_asana(a):
     a.call(a)
 
 
+def cmd_notion_app(a):
+    """Provision the installation's OAuth app without passing the secret in argv."""
+    secret = getpass.getpass("Notion 클라이언트 시크릿: ") if sys.stdin.isatty() else sys.stdin.readline()
+    try:
+        notion.save_app(a.client_id, secret.rstrip("\r\n"))
+    except notion.NotionError as e:
+        raise SystemExit(str(e)) from None
+    print("Notion OAuth 앱을 저장했어요. 전역 설정 → Notion에서 로그인하세요.")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="tp", description="toothpaste (치약), tp = ToothPaste. 사용법: tp guide [주제]")
     sp = ap.add_subparsers(dest="cmd", required=True)
     gd = sp.add_parser("guide", help="사용 설명서 docs/guide.md: 주제 목록, 또는 한 주제 (milestone, deploy, ...)")
     gd.add_argument("topic", nargs="?")
     gd.set_defaults(fn=lambda a: sys.exit(GD.main(a.topic)))
+    na = sp.add_parser("notion-app", help="서버 비밀 저장소에 Notion OAuth 앱 등록 (시크릿은 숨김 입력 또는 표준 입력)")
+    na.add_argument("--client-id", required=True, help="Notion OAuth 클라이언트 ID")
+    na.set_defaults(fn=cmd_notion_app)
     sp.add_parser("sync").set_defaults(fn=_log_errors(lambda a: P.sync()))
     d = sp.add_parser("dispatch")
     d.add_argument("--dry-run", action="store_true")
