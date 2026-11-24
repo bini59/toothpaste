@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 
 from . import checks as K
 from . import milestone as M
+from . import notion_stages
 from . import notifications as N
 from .core import asana, current_actor, db, event, gh_json, meta_get, now, repo_rules, run, settings, train_repos
 from .pipeline import VIOLATION, active_deploy, active_release_pr_urls, latest_run, restage, review_overridden, run_pr
@@ -588,7 +589,7 @@ def complete_asana(con, ticket_gid: str, *, pr_url: str | None = None) -> str | 
         ref = issue_ref(ticket_gid)
         if ref:
             _gh(["issue", "close", ref[1], "--repo", ref[0], "--comment", "Live in production (ticket-pilot)."])
-        elif not ticket_gid.startswith("notion:"):  # Notion connections are read-only. Record verification locally.
+        elif not ticket_gid.startswith("notion:"):  # Notion writes its configured done status after the local commit.
             asana("PUT", f"/tasks/{ticket_gid}", body={"completed": True})
         con.execute("UPDATE tickets SET completed=1 WHERE gid=?", (ticket_gid,))
         return None
@@ -609,3 +610,4 @@ def finalize(con, rel):
     _finish(con, rel, "done", (note + "Asana 완료 처리 실패: " + "; ".join(asana_errors)) if asana_errors else (rel["reason"] or None))
     restage(con)
     con.commit()
+    notion_stages.flush(con)

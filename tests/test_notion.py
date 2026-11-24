@@ -22,14 +22,17 @@ def uid(n):
 
 OWNER, MEMBER, PERSONAL = (uid(n) for n in (1, 2, 3))
 TEAM_DB, HOME_DB, DOCS_DB = uid(20), uid(21), uid(22)
+TAG_IDS = {"tp": "tp-id", "문서": "docs-id", "버그": "bug-id"}
+STATUS_IDS = {"할 일": "todo-id", "진행 중": "doing-id", "완료": "done-id"}
 
 
 def page(n, title, people, tags, status):
     return {"id": uid(n), "object": "page", "url": f"https://www.notion.so/{uid(n)}", "last_edited_time": "2026-01-01",
             "properties": {"제목": {"type": "title", "title": [{"plain_text": title}]},
                            "개발 담당": {"type": "people", "people": [{"id": i} for i in people]},
-                           "라벨": {"type": "multi_select", "multi_select": [{"name": t} for t in tags]},
-                           "상태": {"type": "status", "status": {"name": status}}}}
+                           "라벨": {"type": "multi_select", "multi_select": [{"name": t, "id": TAG_IDS[t]} for t in tags]},
+                           "상태": {"type": "status", "status": {"name": status, "id": STATUS_IDS[status]}},
+                           "기한": {"type": "date", "date": None}}}
 
 
 class NotionFixture:
@@ -46,11 +49,15 @@ class NotionFixture:
                       HOME_DB: [page(201, "개인 일정", [PERSONAL], ["tp"], "할 일")],
                       DOCS_DB: [page(301, "가이드 발행", [MEMBER], ["문서"], "완료"),
                                 page(302, "가이드 초안", [MEMBER], ["문서"], "할 일")]}
-        self.props = {"개발 담당": {"type": "people", "id": "people-id", "people": {}},
-                      "라벨": {"type": "multi_select", "id": "tag-id", "multi_select": {"options": [
-                          {"id": "tp-id", "name": "tp"}, {"id": "docs-id", "name": "문서"}]}},
-                      "상태": {"type": "status", "id": "status-id", "status": {"options": [
-                          {"id": "todo-id", "name": "할 일"}, {"id": "done-id", "name": "완료"}]}}}
+        self.props = {"제목": {"type": "title", "id": "title", "title": {}}, "기한": {"type": "date", "id": "due-id", "date": {}},
+                      "개발 담당": {"type": "people", "id": "people-id", "people": {}},
+                      "라벨": {"type": "multi_select", "id": "tag-id", "multi_select": {
+                          "options": [{"id": i, "name": n} for n, i in TAG_IDS.items()]}},
+                      "상태": {"type": "status", "id": "status-id", "status": {
+                          "options": [{"id": i, "name": n} for n, i in STATUS_IDS.items()]}}}
+        self.writes = []
+        self.deny_writes = set()
+        self.created = 0
         self.queries = []
         self.fail_cursor = False
         self.on_query = None
@@ -61,7 +68,27 @@ class NotionFixture:
         self.expired = False
         self.refreshes = 0
 
-    def respond(self, path, headers, body):
+    def apply_properties(self, row, props):
+        for prop_id, field in props.items():
+            name, col = next((name, col) for name, col in self.props.items() if col["id"] == prop_id)
+            kind = col["type"]
+            value = field[kind]
+            if kind == "title":
+                value = [{"plain_text": t["text"]["content"]} for t in value]
+            elif kind in ("select", "multi_select", "status") and value:
+                options = col[kind]["options"]
+                selected = []
+                for option in (value if kind == "multi_select" else [value]):
+                    match = next((o for o in options if option.items() <= o.items()), None)
+                    if match is None:
+                        assert kind != "status" and set(option) == {"name"}
+                        match = {**option, "id": uid(500 + len(options))}
+                        options.append(match)
+                    selected.append(match.copy())
+                value = selected if kind == "multi_select" else selected[0]
+            row["properties"][name] = {"type": kind, kind: value}
+
+    def respond(self, method, path, headers, body):
         url = urlsplit(path)
         if headers["Notion-Version"] != "2026-03-11":
             return 400, {}
@@ -85,6 +112,39 @@ class NotionFixture:
         if name not in self.names or (self.expired and token.startswith("access-")):
             return 401, {}
         shared = self.shared[name]
+        if (method, url.path) in self.deny_writes:
+            return 403, {}
+        if url.path == "/pages" and method == "POST":
+            parent = body["parent"]
+            source = parent.get("data_source_id")
+            if parent["type"] != "data_source_id" or source not in shared:
+                return 404, {}
+            self.created += 1
+            row = page(1000 + self.created, "", [], [], "할 일")
+            self.apply_properties(row, body["properties"])
+            self.pages[source].append(row)
+            self.markdown[row["id"]] = (200, {"markdown": body.get("markdown", "")})
+            self.writes.append((method, path, body))
+            return 200, row
+        if url.path.startswith("/pages/") and (method == "PATCH" or not url.path.endswith("/markdown")):
+            page_id = url.path.split("/")[2]
+            for source in shared:
+                row = next((r for r in self.pages[source] if r["id"] == page_id), None)
+                if row:
+                    if method == "PATCH":
+                        if url.path.endswith("/markdown"):
+                            assert body["type"] == "replace_content"
+                            self.markdown[page_id] = (200, {"markdown": body["replace_content"]["new_str"]})
+                        else:
+                            self.apply_properties(row, body["properties"])
+                        self.writes.append((method, path, body))
+                    elif method != "GET":
+                        return 405, {}
+                    return 200, {**row, "parent": {"type": "data_source_id", "data_source_id": source}}
+            return 404, {}
+        if url.path == "/comments" and method == "POST":
+            self.writes.append((method, path, body))
+            return 200, {"object": "comment", "id": uid(401)}
         args = body or {k: vs[0] for k, vs in parse_qs(url.query).items()}
         start = int(args.get("start_cursor", "0"))
         if url.path == "/search" and body["filter"] == {"property": "object", "value": "data_source"}:
@@ -117,7 +177,7 @@ class NotionFixture:
                     rows = [r for r in rows if f["multi_select"]["contains"] in [v["name"] for v in r["properties"][column]["multi_select"]]]
                 else:
                     kind = "status" if "status" in f else "select"
-                    rows = [r for r in rows if f[kind]["equals"] == r["properties"][column][kind]["name"]]
+                    rows = [r for r in rows if f[kind]["equals"] == (r["properties"][column][kind] or {}).get("name")]
         elif url.path.startswith("/pages/") and url.path.endswith("/markdown"):
             if self.on_markdown:
                 fn, self.on_markdown = self.on_markdown, None
@@ -143,12 +203,12 @@ class FixtureHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b'{"results":')
             return
-        status, result = self.server.fixture.respond(self.path, self.headers, json.loads(data) if data else None)
+        status, result = self.server.fixture.respond(self.command, self.path, self.headers, json.loads(data) if data else None)
         self.send_response(status)
         self.end_headers()
         self.wfile.write(json.dumps(result).encode())
 
-    do_GET = do_POST = handle_api
+    do_GET = do_POST = do_PATCH = handle_api
 
     def log_message(self, *args):
         pass
@@ -319,7 +379,7 @@ class NotionTest(NotionDashboard):
         self.assertEqual(self.post("sources", {"connection_id": home}), [{"name": "개인 티켓", "id": HOME_DB}])
         self.assertEqual(self.post("people", {"connection_id": self.team})[-1], {"name": "서준", "id": MEMBER})
         properties = self.post("properties", self.cfg)
-        self.assertEqual([p["name"] for p in properties], ["개발 담당", "라벨", "상태"])
+        self.assertEqual([p["name"] for p in properties], ["제목", "기한", "개발 담당", "라벨", "상태"])
         self.assertEqual(properties[-1]["options"][0], {"name": "할 일", "id": "todo-id"})
         self.assertEqual(self.call("properties", {**self.cfg, "connection_id": home})[0], 400)
         mine = self.preview({**self.cfg, "connection_id": home, "data_source_id": HOME_DB})

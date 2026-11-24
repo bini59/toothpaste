@@ -20,7 +20,7 @@ from .core import (
 from . import runner as R
 from . import milestone as M
 from . import notifications as N
-from . import notion, notion_tickets
+from . import notion, notion_stages, notion_tickets
 
 # briefs call ticket-pilot's CLI by absolute path from inside the target repo's worktree
 TP_BIN = str(ROOT / "bin" / "tp")
@@ -210,6 +210,8 @@ def restage(con):
             con.execute("UPDATE tickets SET stage=?, done_at=? WHERE gid=?",
                         (s, (t["done_at"] or now()) if done else None, t["gid"]))
         if s != t["stage"]:
+            if t["gid"].startswith("notion:"):
+                notion_stages.enqueue(con, t, s)
             if t["stage"] is not None and s != "open":
                 event(con, "stage", f"{t['key']}: {t['stage']} -> {s}", t["gid"])
 
@@ -385,6 +387,7 @@ def sync(log=print) -> dict:
     restage(con)
     meta_set(con, "last_sync", ts)
     con.commit()
+    notion_stages.flush(con)
     res = {"incomplete": incomplete, "dropped": dropped, "new_tagged": new_tagged}
     if asana_error:
         res["asana_error"] = asana_error
@@ -398,6 +401,13 @@ def sync(log=print) -> dict:
 
 def slug(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")[:40]
+
+
+def _agent_brief(template, ticket):
+    gid = ticket["project_gid"] if "project_gid" in ticket.keys() else None
+    pid = gid.removeprefix("notion:") if gid and gid.startswith("notion:") else None
+    return (template.replace("{{NOTION}}", notion_tickets.agent_rules(pid)).replace("{{ASANA}}", R.asana_rules())
+            .replace("{{TP}}", TP_BIN).replace("{{OWNER}}", settings().get("owner_name", "the user")))
 
 
 def build_brief(con, t, repo: dict) -> str:
@@ -452,7 +462,7 @@ def build_brief(con, t, repo: dict) -> str:
         vals["BASE_FLAG"], vals["BASE_NOTE"] = "", ""
     for k, v in vals.items():
         tpl = tpl.replace("{{" + k + "}}", str(v))
-    return tpl.replace("{{ASANA}}", R.asana_rules()).replace("{{TP}}", TP_BIN).replace("{{OWNER}}", settings().get("owner_name", "the user"))
+    return _agent_brief(tpl, t)
 
 
 def chosen_repo(con, t):
@@ -567,6 +577,8 @@ def dispatch(dry_run=False, log=print, only: str | None = None) -> list[str]:
         done.append(t["key"])
     restage(con)
     con.commit()
+    if done and not dry_run:
+        notion_stages.flush(con)
     return done
 
 
@@ -635,7 +647,7 @@ def build_rework_brief(t, run, pr, rv, round_no=1) -> str:
     }
     for k, v in vals.items():
         tpl = tpl.replace("{{" + k + "}}", str(v))
-    return tpl.replace("{{ASANA}}", R.asana_rules()).replace("{{TP}}", TP_BIN).replace("{{OWNER}}", settings().get("owner_name", "the user"))
+    return _agent_brief(tpl, t)
 
 
 def rework(con, t, dry_run=False, log=print) -> bool:
@@ -682,7 +694,7 @@ def build_conflict_brief(t, run, pr) -> str:
     }
     for k, v in vals.items():
         tpl = tpl.replace("{{" + k + "}}", str(v))
-    return tpl.replace("{{ASANA}}", R.asana_rules()).replace("{{TP}}", TP_BIN).replace("{{OWNER}}", settings().get("owner_name", "the user"))
+    return _agent_brief(tpl, t)
 
 
 def resolve_conflict(con, t, dry_run=False, log=print) -> bool:
@@ -733,7 +745,7 @@ def unblock(con, t, dry_run=False, log=print) -> bool:
                  "BRIEF_FILE": str(orig) if orig.exists() else "(not available)",
                  "QUESTION": r["ws_comment"] or "", "REPLY": t["reply"]}.items():
         brief = brief.replace("{{" + k + "}}", str(v))
-    brief = brief.replace("{{ASANA}}", R.asana_rules()).replace("{{TP}}", TP_BIN).replace("{{OWNER}}", settings().get("owner_name", "the user"))
+    brief = _agent_brief(brief, t)
     if dry_run:
         log(f"--- would relaunch {st_agent()} in {r['worktree_path']}\n{brief}")
         return False
@@ -889,6 +901,7 @@ def scan(log=print) -> dict:
     restage(con)
     meta_set(con, "last_scan", now())
     con.commit()
+    notion_stages.flush(con)
     res = {"active_runs": len(runs), "prs": found_prs}
     log(f"scan: {res}")
     return res

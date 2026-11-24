@@ -25,7 +25,7 @@ from . import guide as GD
 from . import migrate as M
 from . import mode as MO
 from . import milestone as MS
-from . import notion
+from . import notion, notion_write
 from . import pipeline as P
 from . import release as R
 from . import setup as S
@@ -369,6 +369,7 @@ def main(argv=None):
     na = sp.add_parser("notion-app", help="서버 비밀 저장소에 Notion OAuth 앱 등록 (시크릿은 숨김 입력 또는 표준 입력)")
     na.add_argument("--client-id", required=True, help="Notion OAuth 클라이언트 ID")
     na.set_defaults(fn=cmd_notion_app)
+    notion_write.register(sp)
     sp.add_parser("sync").set_defaults(fn=_log_errors(lambda a: P.sync()))
     d = sp.add_parser("dispatch")
     d.add_argument("--dry-run", action="store_true")

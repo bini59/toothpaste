@@ -363,6 +363,10 @@ SCHEMA = PROJECT_TABLES + """
 CREATE TABLE IF NOT EXISTS notion_connections (
   id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, workspace_name TEXT NOT NULL, user_id TEXT NOT NULL, user_name TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS notion_status_queue (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_gid TEXT UNIQUE NOT NULL, project_id TEXT NOT NULL,
+  data_source_id TEXT NOT NULL, stage TEXT NOT NULL, last_error TEXT
+);
 CREATE TABLE IF NOT EXISTS tickets (
   gid TEXT PRIMARY KEY,
   key TEXT,                -- Asana "ID" custom field (CRSC-340) or AS-<gid>

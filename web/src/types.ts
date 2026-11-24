@@ -477,10 +477,12 @@ export interface NotionFilters {
   data_source_id: string;
   assignee?: string;
   people_property?: string;
+  date_property?: string;
   tag_property?: string;
   tag_option?: string;
   status_property?: string;
   status_option?: string;
+  stage_statuses?: Record<string, string>;
 }
 /** project.<id> (TP-91): a project's own name, where its tickets come from, and its repos */
 export interface ProjectConf {

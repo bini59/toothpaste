@@ -3,18 +3,29 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shlex
 
 from . import notion
-from .core import effective_config, event, meta_get, meta_set, read_config
+from .core import ROOT, effective_config, event, meta_get, meta_set, read_config
 
 FILTER_TYPES = {"people": ("people",), "tag": ("select", "multi_select"), "status": ("status", "select")}
 FIELDS = {"connection_id", "data_source_id", "assignee", "people_property", "tag_property", "tag_option",
-          "status_property", "status_option"}
+          "status_property", "status_option", "date_property"}
+# Stages of an actual Notion run. Filter membership and the pre-dispatch queue are read-only.
+WRITE_STAGES = {"dispatched", "in_progress", "blocked", "agent_done", "pr_open", "rework", "conflict",
+                "reviewed", "approving", "staged", "merged", "deploying", "closed", "done"}
 SYNC_STATE = "notion_sync"
 
 
+def agent_rules(project_id):
+    if not project_id:
+        return ""
+    return (ROOT / "prompts" / "notion.md").read_text().strip().replace("{{PROJECT_ID}}", shlex.quote(project_id))
+
+
 def validate(cfg):
-    if not isinstance(cfg, dict) or set(cfg) - FIELDS or any(not isinstance(v, str) for v in cfg.values()):
+    if (not isinstance(cfg, dict) or cfg.keys() - FIELDS - {"stage_statuses"}
+            or any(not isinstance(cfg[k], str) for k in FIELDS & cfg.keys())):
         raise notion.NotionError("Notion 연결과 가져오기 조건을 확인하세요")
     account = cfg.get("connection_id", "").split(":")
     if len(account) != 2 or not all(notion.valid_id(v) for v in account):
@@ -29,6 +40,20 @@ def validate(cfg):
     for role in ("tag", "status"):
         if cfg.get(f"{role}_option") and not cfg.get(f"{role}_property"):
             raise notion.NotionError("선택한 값에 해당하는 열을 골라 주세요")
+    stages = cfg.get("stage_statuses", {})
+    if (not isinstance(stages, dict) or stages.keys() - WRITE_STAGES
+            or any(not isinstance(v, str) or not v for v in stages.values())
+            or (stages and not cfg.get("status_property"))):
+        raise notion.NotionError("단계별로 반영할 Notion 상태 열과 선택지를 골라 주세요")
+
+
+def project_config(con, pid):
+    row = con.execute("SELECT extra FROM config_projects WHERE id=? AND source='notion'", (pid,)).fetchone()
+    return json.loads(row["extra"])["notion"] if row else None
+
+
+def ticket_key(page_id):
+    return "NT-" + page_id.replace("-", "")
 
 
 def _query(client, cfg):
@@ -36,6 +61,12 @@ def _query(client, cfg):
     schema = {p["id"]: p for p in client.properties(cfg["data_source_id"])}
     who = cfg.get("assignee", "me")
     filters, columns = [], {}
+    date = schema.get(cfg.get("date_property"))
+    if not cfg.get("date_property"):
+        dates = [col for col in schema.values() if col["type"] == "date"]
+        date = dates[0] if len(dates) == 1 else None
+    if date and date["type"] == "date":
+        columns["date"] = date["name"]
     for role, types in FILTER_TYPES.items():
         prop = cfg.get(f"{role}_property")
         if not prop or (role == "people" and who == "all"):
@@ -84,7 +115,8 @@ def matches(con, project, work_tag):
         status = _options(props.get(columns.get("status"), {}))
         notes = [f"{k}: {notion.plain(p['rich_text'])}" for k, p in props.items() if p["type"] == "rich_text" and p["rich_text"]]
         gid = f"notion:{page_id}"
-        found[gid] = {"gid": gid, "key": "NT-" + page_id.replace("-", ""), "name": title or "제목 없음",
+        due = props.get(columns.get("date"), {}).get("date") or {}
+        found[gid] = {"gid": gid, "key": ticket_key(page_id), "name": title or "제목 없음", "due_on": due.get("start"),
                       "url": page["url"], "project_gid": f"notion:{project['id']}", "project_name": project["name"],
                       "notes": "\n".join(notes), "section": next(iter(status), None), "tags": json.dumps(tags, ensure_ascii=False),
                       "has_tag": work_tag.casefold() in [v.casefold() for v in tags], "asana_modified_at": page["last_edited_time"]}
@@ -92,7 +124,8 @@ def matches(con, project, work_tag):
 
 
 def _version(project, work_tag):
-    data = json.dumps([project.get("notion"), work_tag], sort_keys=True).encode()
+    cfg = {k: v for k, v in project["notion"].items() if k != "stage_statuses"}
+    data = json.dumps([cfg, work_tag], sort_keys=True).encode()
     return hashlib.sha256(data).hexdigest()
 
 
@@ -117,7 +150,14 @@ def fetch(con, projects, work_tag):
     return listings
 
 
-def _batches(con, projects, work_tag, listings):
+def _run_owners(con):
+    # Once dispatched, a different project's filter must not take over this page's run or status writes.
+    return dict(con.execute("""SELECT t.gid, t.project_gid FROM tickets t JOIN runs r ON r.id=(
+                                 SELECT max(id) FROM runs WHERE ticket_gid=t.gid)
+                               WHERE t.gid LIKE 'notion:%' AND r.state != 'abandoned'"""))
+
+
+def _batches(con, projects, work_tag, listings, run_owners):
     # A page has one owner, the first matching configured project. A failed query only reserves pages
     # previously confirmed under the same settings. A concurrent edit invalidates the in-flight listing.
     current, confirmed_sources = [], {}
@@ -137,8 +177,8 @@ def _batches(con, projects, work_tag, listings):
             source = p["notion"]["data_source_id"]
             gids = {r[0] for r in con.execute("SELECT gid FROM tickets WHERE project_gid=? AND assigned=1",
                                               (f"notion:{pid}",)) if confirmed_sources.get(r[0], source) == source}
-        owned = gids - claimed
-        claimed.update(gids)
+        owned = {gid for gid in gids - claimed if gid not in run_owners or run_owners[gid] == f"notion:{pid}"}
+        claimed.update(owned)
         yield p, version, rows, owned, error
 
 
@@ -185,7 +225,8 @@ def sync(con, generation, listings, ts, new_tagged):
     doc = effective_config(read_config(con))
     projects = [p for p in doc["project_map"]["projects"] if p["source"] == "notion"]
     seen, errors, state = set(), {}, {}
-    for p, version, rows, owned, error in _batches(con, projects, doc["settings"]["asana_tag"], listings):
+    run_owners = _run_owners(con)
+    for p, version, rows, owned, error in _batches(con, projects, doc["settings"]["asana_tag"], listings, run_owners):
         state[p["id"]] = {"version": version, "ready": not error}
         seen.update(owned)
         if error:
@@ -196,16 +237,17 @@ def sync(con, generation, listings, ts, new_tagged):
             if gid not in owned:
                 continue
             old = con.execute("SELECT * FROM tickets WHERE gid=?", (gid,)).fetchone()
-            if row["has_tag"] and not (old and (old["completed"] or (old["assigned"] and old["has_tag"]))):
+            already_tagged = old and (old["completed"] or (old["assigned"] and old["has_tag"]))
+            if row["has_tag"] and gid not in run_owners and not already_tagged:
                 new_tagged.append(row["key"])
             con.execute("""INSERT INTO tickets(gid,key,name,url,project_gid,project_name,notes,section,tags,has_tag,
-                                               asana_modified_at,assigned,deps_json,first_seen,last_seen,repo_override)
+                                               asana_modified_at,assigned,deps_json,first_seen,last_seen,repo_override,due_on)
                            VALUES(:gid,:key,:name,:url,:project_gid,:project_name,:notes,:section,:tags,:has_tag,
-                                  :asana_modified_at,1,'[]',:ts,:ts,:repo_override)
+                                  :asana_modified_at,1,'[]',:ts,:ts,:repo_override,:due_on)
                            ON CONFLICT(gid) DO UPDATE SET name=excluded.name,url=excluded.url,project_gid=excluded.project_gid,
                              project_name=excluded.project_name,notes=excluded.notes,section=excluded.section,tags=excluded.tags,
                              has_tag=excluded.has_tag,asana_modified_at=excluded.asana_modified_at,assigned=1,
-                             last_seen=excluded.last_seen,repo_override=excluded.repo_override""",
+                             last_seen=excluded.last_seen,repo_override=excluded.repo_override,due_on=excluded.due_on""",
                         {**row, "repo_override": _repo_override(old, row["project_gid"], doc["project_map"]["repos"]),
                          "project_name": p["name"], "ts": ts})
     meta_set(con, SYNC_STATE, {"generation": generation, "projects": state})
@@ -226,7 +268,7 @@ def preview(con, projects, project, work_tag):
             relevant.append(p)
     relevant.append(project)
     listings = fetch(con, relevant, work_tag)
-    for p, _, rows, owned, error in _batches(con, relevant, work_tag, listings):
+    for p, _, rows, owned, error in _batches(con, relevant, work_tag, listings, _run_owners(con)):
         if p is not project:
             continue
         if error:
