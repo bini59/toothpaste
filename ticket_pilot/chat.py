@@ -25,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
 
+from . import notion_tickets
 from . import runner as R
 from .core import DATA, ROOT, UNSORTED, db, now, project_map, settings
 
@@ -331,6 +332,7 @@ def prompt(p: dict, text: str) -> str:
     others = "\n".join(f"  - {r['name']} ({r['role'] or '-'}, GitHub {r['github'] or '-'}): {r['path']}"
                        for r in p["repos"][1:] if r["path_ok"]) or "  (없음)"
     return ((ROOT / "prompts" / "chat.md").read_text().replace("{{PROJECT}}", p["name"]).replace("{{OTHER_REPOS}}", others)
+            .replace("{{NOTION}}", notion_tickets.agent_rules(p["id"] if p.get("source") == "notion" else None))
             .replace("{{REPO}}", p["repo"]).replace("{{GITHUB}}", p["github"] or "(GitHub 정보 없음)")
             .replace("{{PATH}}", p["path"]).replace("{{OWNER}}", settings().get("owner_name", "the user")).replace("{{MESSAGE}}", text))
 
@@ -393,6 +395,10 @@ def send(ident: str, text: str, files: list | None = None) -> int:
             (_dir(ident) / a["file"]).unlink(missing_ok=True)
         raise
     msg = with_files(text, ident, atts)
+    if resume and p.get("source") == "notion":
+        # Existing conversations can predate Notion writes or a change of project source.
+        msg = ("For requested Notion ticket edits, use `{{TP}} notion` "
+               f"with `--project {p['id']}`. " + "See `{{TP}} notion --help`.\n\n" + msg)
     if handoff:
         msg = (f"Earlier chat summary (background only):\n{handoff['text']}\n\n"
                f"Current user message:\n{msg}")

@@ -25,7 +25,7 @@ from . import guide as GD
 from . import migrate as M
 from . import mode as MO
 from . import milestone as MS
-from . import notion
+from . import notion, notion_stages, notion_write
 from . import pipeline as P
 from . import release as R
 from . import setup as S
@@ -212,6 +212,10 @@ def cmd_tick(a):
     meta_set(con, "automation_runs", history[-RUN_HISTORY:])
     con.commit()
     try:
+        notion_stages.start_worker(con)
+    except OSError as e:
+        print(f"Notion 상태 반영 작업 시작 실패: {e}", file=sys.stderr, flush=True)
+    try:
         # every update.check_min: fetch the tags, keep the latest release for the dashboard's 업데이트 item
         chk = U.check_latest(con)
         con.commit()
@@ -369,6 +373,7 @@ def main(argv=None):
     na = sp.add_parser("notion-app", help="서버 비밀 저장소에 Notion OAuth 앱 등록 (시크릿은 숨김 입력 또는 표준 입력)")
     na.add_argument("--client-id", required=True, help="Notion OAuth 클라이언트 ID")
     na.set_defaults(fn=cmd_notion_app)
+    notion_write.register(sp)
     sp.add_parser("sync").set_defaults(fn=_log_errors(lambda a: P.sync()))
     d = sp.add_parser("dispatch")
     d.add_argument("--dry-run", action="store_true")

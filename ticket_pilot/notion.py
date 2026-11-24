@@ -1,4 +1,4 @@
-"""Notion OAuth connections and read-only data API (2026-03-11)."""
+"""Notion OAuth connections and data API (2026-03-11)."""
 from __future__ import annotations
 
 import base64
@@ -28,26 +28,34 @@ class NotionError(RuntimeError):
     pass
 
 
+class UncertainWrite(NotionError):
+    """The connection may have applied this mutation before the response failed."""
+
+
 class APIError(NotionError):
-    def __init__(self, status):
+    def __init__(self, status, capability="콘텐츠 읽기"):
         hints = {400: "요청 값과 OAuth 앱 설정을 확인하세요", 401: "계정을 다시 연결하세요",
-                 403: "연결의 읽기 권한을 확인하세요", 404: "선택한 항목이 연결에 공유돼 있는지 확인하세요",
+                 403: f"Notion OAuth 앱에서 {capability} 권한을 켜고 전역 설정 → Notion → Notion으로 로그인에서 다시 승인하세요",
+                 404: "선택한 항목이 연결에 공유돼 있는지 확인하세요",
                  429: "잠시 뒤 다시 시도하세요"}
         super().__init__(f"Notion HTTP {status} · {hints.get(status, '잠시 뒤 다시 시도하세요')}")
         self.status = status
 
 
-def _request(path, authorization, body=None):
+def _request(path, authorization, body=None, method=None, capability="콘텐츠 읽기"):
     data = None if body is None else json.dumps(body).encode()
-    req = urllib.request.Request(API + path, data=data, headers={
+    req = urllib.request.Request(API + path, data=data, method=method, headers={
         "Authorization": authorization, "Notion-Version": "2026-03-11", "Content-Type": "application/json",
     })
+    # Search, queries and OAuth use implicit POST. An explicit POST creates a page or comment.
+    uncertain = ("Notion 요청 결과를 확인할 수 없어요. 다시 요청하기 전에 프로젝트 DB에서 페이지나 댓글을 확인하세요"
+                 if method == "POST" else "Notion 요청 결과를 확인할 수 없어요. 페이지에서 변경 내용을 확인하세요")
     for attempt in range(3):
         try:
             with urllib.request.urlopen(req, timeout=30) as response:
                 result = json.load(response)
                 if not isinstance(result, dict):
-                    raise NotionError("Notion 응답 형식을 확인할 수 없어요")
+                    raise ValueError("Notion 응답 형식을 확인할 수 없어요")
                 return result
         except urllib.error.HTTPError as e:
             e.close()
@@ -55,8 +63,12 @@ def _request(path, authorization, body=None):
             if e.code == 429 and attempt < 2 and delay.isdecimal() and int(delay) <= 10:
                 time.sleep(int(delay))
                 continue
-            raise APIError(e.code) from None  # an OAuth error body can contain credentials
+            if method and e.code >= 500:
+                raise UncertainWrite(f"Notion HTTP {e.code} · {uncertain}") from None
+            raise APIError(e.code, capability) from None  # an OAuth error body can contain credentials
         except (OSError, ValueError, http.client.HTTPException) as e:
+            if method:
+                raise UncertainWrite(uncertain) from e
             raise NotionError("Notion 응답을 읽을 수 없어요. 잠시 뒤 다시 시도하세요") from e
 
 
@@ -173,9 +185,9 @@ class Client:
         if not self.tokens:
             raise NotionError("선택한 Notion 계정을 다시 연결하세요")
 
-    def read(self, path, body=None):
+    def _call(self, path, body, method, capability):
         try:
-            return _request(path, f"Bearer {self.tokens[0]}", body)
+            return _request(path, f"Bearer {self.tokens[0]}", body, method, capability)
         except APIError as e:
             if e.status != 401 or not self.tokens[1]:
                 raise
@@ -187,7 +199,24 @@ class Client:
                 refreshed = _exchange({"grant_type": "refresh_token", "refresh_token": latest[1]})
                 latest = _save_tokens(self.key, refreshed)
             self.tokens = latest
-        return _request(path, f"Bearer {self.tokens[0]}", body)
+        return _request(path, f"Bearer {self.tokens[0]}", body, method, capability)
+
+    def read(self, path, body=None):
+        capability = "사용자 정보 읽기(이메일 제외)" if path.partition("?")[0] == "/users" else "콘텐츠 읽기"
+        return self._call(path, body, None, capability)
+
+    def write(self, method, path, body, capability="콘텐츠 수정"):
+        return self._call(path, body, method, capability)
+
+    def page(self, page_id, source):
+        page = self.read(f"/pages/{page_id}")
+        if page.get("id") != page_id or not isinstance(page.get("properties"), dict):
+            raise NotionError("Notion 페이지의 속성을 확인할 수 없어요")
+        if (page.get("parent") or {}).get("data_source_id") != source:
+            raise NotionError("페이지가 프로젝트에 연결된 Notion 데이터베이스에 없어요")
+        if page.get("in_trash") or page.get("is_archived") or page.get("archived"):
+            raise NotionError("휴지통에 있는 Notion 페이지예요")
+        return page
 
     def items(self, path, body=None):
         params = {"page_size": 100}
@@ -244,7 +273,7 @@ class Client:
         schema = self.read(f"/data_sources/{source}")["properties"]
         return [{"id": p["id"], "name": name, "type": p["type"],
                  "options": [{"id": o["id"], "name": o["name"]} for o in p[p["type"]].get("options", [])]}
-                for name, p in schema.items() if p["type"] in ("people", "select", "multi_select", "status")]
+                for name, p in schema.items() if p["type"] in ("title", "date", "people", "select", "multi_select", "status")]
 
 
 def plain(rich_text):

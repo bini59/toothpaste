@@ -588,7 +588,7 @@ def complete_asana(con, ticket_gid: str, *, pr_url: str | None = None) -> str | 
         ref = issue_ref(ticket_gid)
         if ref:
             _gh(["issue", "close", ref[1], "--repo", ref[0], "--comment", "Live in production (ticket-pilot)."])
-        elif not ticket_gid.startswith("notion:"):  # Notion connections are read-only. Record verification locally.
+        elif not ticket_gid.startswith("notion:"):  # Notion writes its configured done status after the local commit.
             asana("PUT", f"/tasks/{ticket_gid}", body={"completed": True})
         con.execute("UPDATE tickets SET completed=1 WHERE gid=?", (ticket_gid,))
         return None

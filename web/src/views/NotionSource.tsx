@@ -182,12 +182,24 @@ export function NotionSource({ projectId, value, repos, workTag, onChange }: {
     ? { ...connection, data_source_id: value.data_source_id } : null, refresh);
   const props = schema?.data ?? [];
   const members = [{ id: "me", name: "연결한 나" }, { id: "all", name: "전체" }, ...(users?.data ?? [])];
+  const statusOptions = props.find((p) => p.id === value.status_property)?.options ?? [];
+  const stagePicker = (stage: string, label = STAGES[stage][0]) => (
+    <Picker key={stage} label={label} choices={statusOptions} value={value.stage_statuses?.[stage] || ""}
+      placeholder="반영 안 함" disabled={!schema?.data} onChange={(id) => {
+        const stages = { ...value.stage_statuses };
+        if (id) stages[stage] = id;
+        else delete stages[stage];
+        onChange({ ...value, stage_statuses: stages });
+      }} />
+  );
   const optionRow = (role: "tag" | "status", label: string, types: string[]) => {
     const prop = `${role}_property` as const, option = `${role}_option` as const;
     return <div className="grid gap-3 sm:grid-cols-2">
       <Picker label={`${label} 열`} choices={props.filter((p) => types.includes(p.type))} value={value[prop] || ""}
-        placeholder="사용 안 함" disabled={!schema?.data} onChange={(id) => onChange({ ...value, [prop]: id, [option]: "" })} />
-      <Picker label={`${label} 값`} choices={props.find((p) => p.id === value[prop])?.options ?? []} value={value[option] || ""}
+        placeholder="사용 안 함" disabled={!schema?.data} onChange={(id) => onChange({
+          ...value, [prop]: id, [option]: "", ...(role === "status" && { stage_statuses: {} }),
+        })} />
+      <Picker label={`가져올 ${label}`} choices={props.find((p) => p.id === value[prop])?.options ?? []} value={value[option] || ""}
         placeholder="전체" disabled={!value[prop] || !schema?.data} onChange={(id) => onChange({ ...value, [option]: id })} />
     </div>;
   };
@@ -213,13 +225,33 @@ export function NotionSource({ projectId, value, repos, workTag, onChange }: {
     {connection && value.data_source_id && <>
       <div className="grid gap-3 sm:grid-cols-2">
         <Picker label="담당자 열" value={value.people_property || ""} placeholder="사람 속성 고르기…" choices={props.filter((p) => p.type === "people")}
-          disabled={value.assignee === "all" || !schema?.data} onChange={(id) => onChange({ ...value, people_property: id })} />
-        <Picker label="담당자" value={value.assignee ?? "me"} choices={members} onChange={(id) => onChange({ ...value, assignee: id })} />
+          disabled={!schema?.data} onChange={(id) => onChange({ ...value, people_property: id })} />
+        <Picker label="가져올 담당자" value={value.assignee ?? "me"} choices={members} onChange={(id) => onChange({ ...value, assignee: id })} />
       </div>
       {optionRow("tag", "태그", ["multi_select", "select"])}
       {optionRow("status", "상태", ["status", "select"])}
       <p className="text-xs text-text-muted">선택한 조건을 모두 만족하는 페이지를 가져와요. 태그 열에 <strong>{workTag}</strong>가 있고 작업 레포가 정해진 티켓이 자동 시작 대상이에요.</p>
       <NotionPreview key={JSON.stringify([projectId, value, repos, workTag])} projectId={projectId} value={value} repos={repos} />
+      <Picker label="마감일 열" value={value.date_property || ""} placeholder="날짜 열이 하나면 자동 선택"
+        choices={props.filter((p) => p.type === "date")} disabled={!schema?.data}
+        onChange={(id) => onChange({ ...value, date_property: id })} />
+      {value.status_property && <fieldset className="space-y-3 border-t border-border pt-3">
+        <legend className="text-sm font-semibold text-text-main">작업 단계별 Notion 상태</legend>
+        <div className="grid gap-3 sm:grid-cols-2">
+          {stagePicker("in_progress", "작업 시작 · 작업 중")}
+          {stagePicker("done", "운영 배포 확인")}
+        </div>
+        <details>
+          <summary className="cursor-pointer text-sm text-primary">다른 작업 단계</summary>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            {["dispatched", "blocked", "agent_done", "pr_open", "rework", "conflict", "reviewed", "approving"].map((s) => stagePicker(s))}
+            {stagePicker("staged", "스테이징 반영")}
+            {stagePicker("merged", "머지 후 배포 대기")}
+            {stagePicker("deploying")}
+            {stagePicker("closed", "PR 닫힘")}
+          </div>
+        </details>
+      </fieldset>}
     </>}
     {[sources, users, schema].map((r, i) => r?.error && <p key={i} role="alert" className="text-sm text-danger-700">{r.error}</p>)}
   </div>;

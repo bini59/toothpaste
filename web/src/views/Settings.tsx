@@ -1487,7 +1487,7 @@ function ProjectEditor({ id, c, onReload, onSaved, onDeleted }: {
           </Row>
         )}
       </Section>
-      {d.source === "notion" && <Section title="Notion에서 가져오기">
+      {d.source === "notion" && <Section title="Notion 티켓 설정">
         <NotionSource projectId={pid} value={d.notion ?? emptyNotion} repos={d.repos.map((r) => r.repo)}
           workTag={c.config.global.asana_tag} onChange={(v) => set((x) => { x.notion = v; })} />
       </Section>}
