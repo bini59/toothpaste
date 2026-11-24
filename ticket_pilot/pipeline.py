@@ -152,6 +152,9 @@ def compute_stage(con, t, *, repo_count=None) -> str:
         if r["ws_status"] == "in-progress":
             return "in_progress"
         return "dispatched"
+    if r and t["skip"] and t["gid"].startswith("notion:"):
+        # A dropped run still needs skipped-worktree cleanup after its page leaves the import filter.
+        return "skipped"
     if not t["assigned"]:
         return "closed"
     if not t["has_tag"]:

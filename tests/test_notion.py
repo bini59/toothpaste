@@ -197,13 +197,13 @@ class NotionFixture:
 class FixtureHandler(BaseHTTPRequestHandler):
     def handle_api(self):
         data = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        status, result = self.server.fixture.respond(self.command, self.path, self.headers, json.loads(data) if data else None)
         if urlsplit(self.path).path == self.server.fixture.truncate_path:
             self.send_response(200)
             self.send_header("Content-Length", "100")
             self.end_headers()
             self.wfile.write(b'{"results":')
             return
-        status, result = self.server.fixture.respond(self.command, self.path, self.headers, json.loads(data) if data else None)
         self.send_response(status)
         self.end_headers()
         self.wfile.write(json.dumps(result).encode())

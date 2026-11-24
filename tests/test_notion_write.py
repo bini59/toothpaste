@@ -4,7 +4,7 @@ import json
 from unittest import mock
 
 from test_notion import DOCS_DB, MEMBER, OWNER, TEAM_DB, NotionDashboard, uid
-from ticket_pilot import chat, cli, core, notion, notion_tickets, pipeline, release, track
+from ticket_pilot import chat, cli, core, notion, notion_stages, notion_tickets, pipeline, release, track
 
 
 class NotionWrites(NotionDashboard):
@@ -80,24 +80,60 @@ class NotionWrites(NotionDashboard):
     def test_reject_wrong_project_or_moved_page(self):
         pipeline.sync()
         self.save({**self.cfg, "data_source_id": DOCS_DB}, "docs")
-        with self.assertRaisesRegex(SystemExit, "지정한 프로젝트"):
+        with self.assertRaisesRegex(SystemExit, "데이터베이스에 없어요"):
             self.cmd("comment", self.key, "메모", "--project", "docs")
         self.fixture.pages[DOCS_DB].append(self.fixture.pages[TEAM_DB].pop(0))
         with self.assertRaisesRegex(SystemExit, "데이터베이스에 없어요"):
             self.cmd("status", self.key, "완료")
         self.assertEqual(self.fixture.writes, [])
 
+    def test_shared_db_creator_can_edit_after_another_project_imports_it(self):
+        self.save(self.cfg, "second")
+        created = self.cmd("create", "--project", "second", "--title", "새 티켓", "--assignee", "me", "--tag", "tp")
+        pipeline.sync()
+        self.assertEqual(pipeline.find_ticket(self.con, created["key"])["project_gid"], "notion:example")
+        self.cmd("comment", "--project", "second", created["key"], "후속 메모")
+        self.assertEqual(self.fixture.writes[-1][2]["parent"]["page_id"], self.fixture.pages[TEAM_DB][-1]["id"])
+
+    def test_edit_during_listing_holds_only_the_edited_candidate(self):
+        pipeline.sync()
+        self.fixture.after_listing = lambda: self.cmd("status", self.key, "완료")
+        pipeline.sync()
+        starts = [s for s in self.dispatch_log() if "would create" in s]
+        self.assertEqual(len(starts), 1)
+        self.assertIn("팀 보드", starts[0])
+        pipeline.sync()
+        self.assertEqual(pipeline.find_ticket(self.con, self.key)["stage"], "closed")
+        self.cmd("status", self.key, "할 일")
+        pipeline.sync()
+        self.assertEqual(len([s for s in self.dispatch_log() if "would create" in s]), 2)
+
     def test_permissions_and_partial_body_failure(self):
-        self.fixture.deny_writes = {("POST", "/pages"), ("PATCH", self.path), ("POST", "/comments")}
+        self.fixture.deny_writes = {("POST", "/pages"), ("PATCH", self.path), ("POST", "/comments"), ("GET", "/users")}
         self.assertNotIn("notion_errors", pipeline.sync())
         for args, capability in ((["create", "--project", "example", "--title", "새 티켓"], "콘텐츠 추가"),
-                                 (["status", self.key, "진행 중"], "콘텐츠 수정"), (["comment", self.key, "메모"], "댓글 추가")):
+                                 (["status", self.key, "진행 중"], "콘텐츠 수정"), (["comment", self.key, "메모"], "댓글 추가"),
+                                 (["update", self.key, "--assignee", "서준"], "사용자 정보 읽기")):
             with self.subTest(capability=capability), self.assertRaisesRegex(SystemExit, capability + ".*전역 설정.*다시 승인"):
                 self.cmd(*args)
         self.fixture.deny_writes = {("PATCH", self.path + "/markdown")}
         with self.assertRaisesRegex(SystemExit, "속성은 저장.*본문.*콘텐츠 수정"):
             self.cmd("update", self.key, "--title", "수정한 제목", "--body", "다시 쓸 본문")
         self.assertEqual(self.page["properties"]["제목"]["title"][0]["plain_text"], "수정한 제목")
+
+    def test_interrupted_post_and_local_failure_after_create(self):
+        pipeline.sync()
+        for path, args in (("/pages", ["create", "--project", "example", "--title", "오류"]),
+                           ("/comments", ["comment", self.key, "메모"])):
+            self.fixture.truncate_path = path
+            with self.assertRaisesRegex(SystemExit, "다시 요청하기 전에.*확인"):
+                self.cmd(*args)
+        self.assertEqual([p for _, p, _ in self.fixture.writes], ["/pages", "/comments"])
+        self.fixture.truncate_path = None
+        self.con.execute("""CREATE TRIGGER reject_ticket BEFORE INSERT ON tickets
+                            BEGIN SELECT RAISE(FAIL,'fixture'); END""")
+        with self.assertRaisesRegex(SystemExit, r"NT-\w+ https://www.notion.so/.*로컬 DB"):
+            self.cmd("create", "--project", "example", "--title", "로컬 기록 실패")
 
     def start_ticket(self):
         pipeline.sync()
@@ -130,6 +166,11 @@ class NotionWrites(NotionDashboard):
             self.assertEqual(pipeline.dispatch(only=self.key, dry_run=True), [])
         row = pipeline.find_ticket(self.con, self.key)
         self.assertEqual((row["project_gid"], row["stage"], row["assigned"]), ("notion:example", "in_progress", 0))
+        self.assertEqual(row["section"], "진행 중")
+        self.cmd("update", self.key, "--title", "채팅에서 바꾼 제목", "--due", "2027-02-01")
+        pipeline.sync()
+        row = pipeline.find_ticket(self.con, self.key)
+        self.assertEqual((row["name"], row["due_on"], row["assigned"]), ("채팅에서 바꾼 제목", "2027-02-01", 0))
         url = self.merged_pr(run_id)
         self.assertEqual(self.page["properties"]["상태"]["status"]["name"], "진행 중")
         rid = self.con.execute("INSERT INTO releases(repo,status,prs_json) VALUES('app','deploying',?)",
@@ -140,7 +181,8 @@ class NotionWrites(NotionDashboard):
         pipeline.sync()
         self.assertEqual(pipeline.find_ticket(self.con, self.key)["stage"], "done")
         self.assertEqual(self.con.execute("SELECT count(*) FROM runs").fetchone()[0], 1)
-        self.assertEqual([(p, b["properties"]["status-id"]["status"]["id"]) for _, p, b in self.fixture.writes],
+        self.assertEqual([(p, b["properties"]["status-id"]["status"]["id"]) for _, p, b in self.fixture.writes
+                          if "status-id" in b["properties"]],
                          [(self.path, "doing-id"), (self.path, "done-id")])
 
     def test_verified_external_merge_retries_failed_write(self):
@@ -160,6 +202,31 @@ class NotionWrites(NotionDashboard):
         pipeline.sync()
         self.assertEqual(self.page["properties"]["상태"]["status"]["name"], "완료")
         self.assertEqual(len(self.fixture.writes), 1)
+
+    def test_dropped_run_remains_skipped_after_leaving_filter(self):
+        self.save({**self.cfg, "stage_statuses": {"in_progress": "doing-id"}})
+        self.start_ticket()
+        pipeline.sync()
+        self.assertFalse(pipeline.find_ticket(self.con, self.key)["assigned"])
+        pipeline.drop(self.key)
+        pipeline.sync()
+        self.assertEqual(pipeline.find_ticket(self.con, self.key)["stage"], "skipped")
+
+    def test_stage_disabled_while_retry_is_reading_the_schema(self):
+        self.save({**self.cfg, "stage_statuses": {"in_progress": "doing-id"}})
+        self.fixture.deny_writes = {("PATCH", self.path)}
+        self.start_ticket()
+        self.fixture.deny_writes.clear()
+        read_schema = notion.Client.properties
+        def disable(client, source):
+            schema = read_schema(client, source)
+            self.save(self.cfg)
+            return schema
+        with mock.patch.object(notion.Client, "properties", disable):
+            notion_stages.flush(self.con)
+        pipeline.sync()
+        self.assertEqual(self.fixture.writes, [])
+        self.assertEqual(self.con.execute("SELECT count(*) FROM notion_status_queue").fetchone()[0], 0)
 
     def test_read_only_and_project_chat_instructions(self):
         run_id = self.start_ticket()

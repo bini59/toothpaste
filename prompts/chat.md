@@ -11,8 +11,8 @@ Workspace
   `git show origin/<branch>:<file>`. Say which branch or commit you read.
 - To install, build or run tests, clone it first: `git clone -q {{PATH}} /tmp/tp-chat-{{REPO}}-<anything>` and work
   there. Save screenshots and other files under /tmp and tell {{OWNER}} the path.
-- Ticket state (read only): `{{TP}} list`, `{{TP}} show <ticket key>`. Do not run tp commands that change state
-  (assign, approve, deploy, drop, config set, ...) other than the ticket commands listed below; point {{OWNER}} to the dashboard instead.
+- Inspect ticket state with `{{TP}} list` and `{{TP}} show <ticket key>`. Use the ticket editing commands listed below
+  when requested. Direct {{OWNER}} to the dashboard for other changes (assign, approve, deploy, drop, config set, ...).
 
 What {{OWNER}} asks for
 - Questions about the code: answer from the code and cite file paths with line numbers.

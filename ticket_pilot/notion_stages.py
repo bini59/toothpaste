@@ -34,7 +34,16 @@ def flush(con):
                 if option and cfg["data_source_id"] == row["data_source_id"]:
                     pages = notion_write.ProjectPages(con, cfg)
                     page = pages.client.page(page_id, pages.source)
-                    pages.status(page, option, by_id=True)
+                    props = pages.status_change(page, option, by_id=True)
+                    # A host transition or settings save may have finished during the page/schema reads.
+                    if (not con.execute("SELECT 1 FROM notion_status_queue WHERE id=?", (row["id"],)).fetchone()
+                            or notion_tickets.project_config(con, row["project_id"]) != cfg):
+                        continue
+                    if props:
+                        pages.patch(page_id, props)
+                    else:
+                        # A previous PATCH can have succeeded before its response reached the host.
+                        notion_tickets.page_edited(con, gid, page, pages.source, pages.schema)
                     event(con, "notion_write", f"Notion 상태 반영 · {row['stage']} · {notion_tickets.ticket_key(page_id)}", gid)
                 con.execute("DELETE FROM notion_status_queue WHERE id=?", (row["id"],))
             except notion.NotionError as e:

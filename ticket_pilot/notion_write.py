@@ -4,6 +4,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import sqlite3
 from contextlib import contextmanager
 from datetime import date
 from functools import cached_property
@@ -41,24 +42,19 @@ def _option(column, value, *, new_tag=False, by_id=False):
 
 class ProjectPages:
     def __init__(self, con, cfg):
+        self.con = con
         self.cfg = cfg
         self.client = notion.Client(con, cfg["connection_id"])
         self.source = cfg["data_source_id"]
 
     @cached_property
     def schema(self):
-        return self.client.properties(self.source)
+        return {col["id"]: col for col in self.client.properties(self.source)}
 
     def column(self, role):
-        kinds = notion_tickets.FILTER_TYPES.get(role, (role,))
-        columns = [c for c in self.schema if c["type"] in kinds]
-        selected = self.cfg.get(role + "_property")
-        if selected:
-            col = next((c for c in columns if c["id"] == selected), None)
-            if col:
-                return col
-        elif role in ("title", "date", "people") and len(columns) == 1:
-            return columns[0]
+        col = notion_tickets.column(self.schema, self.cfg, role)
+        if col:
+            return col
         label = {"people": "담당자", "date": "마감일", "tag": "태그", "status": "상태", "title": "제목"}[role]
         raise notion.NotionError(f"프로젝트 설정에서 {label} 열을 확인하세요")
 
@@ -101,7 +97,12 @@ class ProjectPages:
         return self.client.write("POST", "/pages", body, "콘텐츠 추가")
 
     def patch(self, page_id, props):
-        self.client.write("PATCH", f"/pages/{page_id}", {"properties": props})
+        page = self.client.write("PATCH", f"/pages/{page_id}", {"properties": props})
+        try:
+            with self.con:
+                notion_tickets.page_edited(self.con, "notion:" + page_id, page, self.source, self.schema)
+        except sqlite3.Error as e:
+            raise notion.NotionError(f"{notion_tickets.ticket_key(page_id)}의 Notion 속성은 변경했어요. 로컬 DB 저장을 확인하세요") from e
 
     def update(self, page_id, args):
         props = self.fields(args.title, args.assignee, args.due)
@@ -125,12 +126,13 @@ class ProjectPages:
             raise notion.NotionError(f"{col['name']} 열이 바뀌었어요. 다시 시도하세요")
         return prop[col["type"]]
 
-    def status(self, page, value, *, by_id=False):
+    def status_change(self, page, value, *, by_id=False):
         col = self.column("status")
         choice = _option(col, value, by_id=by_id)
         current = self.current(page, col)
-        if not current or current["id"] != choice["id"]:
-            self.patch(page["id"], {col["id"]: {col["type"]: choice}})
+        if current and current["id"] == choice["id"]:
+            return {}
+        return {col["id"]: {col["type"]: choice}}
 
     def tag(self, page, value, remove):
         col = self.column("tag")
@@ -151,7 +153,9 @@ class ProjectPages:
         self.patch(page["id"], {col["id"]: {col["type"]: updated}})
 
     def comment(self, page_id, text):
-        self.client.write("POST", "/comments", {"parent": {"page_id": page_id}, "rich_text": _rich_text(text)}, "댓글 추가")
+        result = self.client.write("POST", "/comments", {"parent": {"page_id": page_id}, "rich_text": _rich_text(text)}, "댓글 추가")
+        if not result.get("id"):
+            raise notion.NotionError("댓글 ID를 확인할 수 없어요. 다시 요청하기 전에 Notion 페이지에서 댓글을 확인하세요")
 
 
 def run(args):
@@ -164,10 +168,9 @@ def run(args):
                                 AND (lower(key)=lower(?) OR gid=?)""", (args.ticket, args.ticket)).fetchone()
         if not ticket:
             raise notion.NotionError(f"Notion 티켓을 찾을 수 없어요: {args.ticket}")
-        owner = ticket["project_gid"].removeprefix("notion:")
-        if pid is not None and pid != owner:
-            raise notion.NotionError("이 티켓은 지정한 프로젝트의 Notion 티켓이 아니에요")
-        pid = owner
+        # Shared databases can have several projects; dispatch ownership does not select the chat's account.
+        if pid is None:
+            pid = ticket["project_gid"].removeprefix("notion:")
     cfg = notion_tickets.project_config(con, pid)
     if not cfg:
         raise notion.NotionError(f"프로젝트 {pid}에 연결된 Notion 데이터베이스가 없어요")
@@ -179,11 +182,6 @@ def run(args):
             raise notion.NotionError("생성 응답의 페이지 ID를 확인할 수 없어요. 프로젝트 DB를 확인하세요")
         gid, key = "notion:" + page_id, notion_tickets.ticket_key(page_id)
         url = page.get("url") or "https://www.notion.so/" + page_id.replace("-", "")
-        # Return a usable key even before sync and when the new page doesn't match the import filter.
-        ts = core.now()
-        con.execute("""INSERT INTO tickets(gid,key,name,url,project_gid,assigned,first_seen,last_seen)
-                       VALUES(?,?,?,?,?,0,?,?) ON CONFLICT(gid) DO NOTHING""",
-                    (gid, key, args.title, url, "notion:" + pid, ts, ts))
     else:
         gid, key, url = ticket["gid"], ticket["key"], ticket["url"]
         page_id = gid.removeprefix("notion:")
@@ -196,12 +194,25 @@ def run(args):
             elif args.op == "status":
                 if args.value is None:
                     return {"key": key, "options": pages.column("status")["options"]}
-                pages.status(page, args.value)
+                props = pages.status_change(page, args.value)
+                if props:
+                    pages.patch(page_id, props)
             else:
                 pages.comment(page_id, args.text)
     actor = os.environ.get("TP_AGENT") or "cli"
-    core.event(con, "notion_write", f"{actor} · {pid} · {key} · {args.op}", gid)
-    con.commit()
+    try:
+        with con:
+            if args.op == "create":
+                # Return a usable key before sync, including when the page doesn't match the import filter.
+                ts = core.now()
+                inserted = con.execute("""INSERT INTO tickets(gid,key,name,url,project_gid,assigned,first_seen,last_seen)
+                                          VALUES(?,?,?,?,?,0,?,?) ON CONFLICT(gid) DO NOTHING""",
+                                       (gid, key, args.title, url, "notion:" + pid, ts, ts))
+                if inserted.rowcount:
+                    notion_tickets.page_edited(con, gid, page, pages.source, pages.schema)
+            core.event(con, "notion_write", f"{actor} · {pid} · {key} · {args.op}", gid)
+    except sqlite3.Error as e:
+        raise notion.NotionError(f"Notion 요청은 처리됐어요 ({key} {url}). 로컬 DB 기록을 저장할 수 없어요") from e
     return {"key": key, "url": url}
 
 

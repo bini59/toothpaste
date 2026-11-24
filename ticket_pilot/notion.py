@@ -38,17 +38,19 @@ class APIError(NotionError):
         self.status = status
 
 
-def _request(path, authorization, body=None, method=None):
+def _request(path, authorization, body=None, method=None, capability="콘텐츠 읽기"):
     data = None if body is None else json.dumps(body).encode()
     req = urllib.request.Request(API + path, data=data, method=method, headers={
         "Authorization": authorization, "Notion-Version": "2026-03-11", "Content-Type": "application/json",
     })
+    # Search, queries and OAuth use implicit POST. An explicit POST creates a page or comment.
+    uncertain = "Notion 요청 결과를 확인할 수 없어요. 다시 요청하기 전에 프로젝트 DB에서 페이지나 댓글을 확인하세요"
     for attempt in range(3):
         try:
             with urllib.request.urlopen(req, timeout=30) as response:
                 result = json.load(response)
                 if not isinstance(result, dict):
-                    raise NotionError("Notion 응답 형식을 확인할 수 없어요")
+                    raise ValueError("Notion 응답 형식을 확인할 수 없어요")
                 return result
         except urllib.error.HTTPError as e:
             e.close()
@@ -56,8 +58,12 @@ def _request(path, authorization, body=None, method=None):
             if e.code == 429 and attempt < 2 and delay.isdecimal() and int(delay) <= 10:
                 time.sleep(int(delay))
                 continue
-            raise APIError(e.code) from None  # an OAuth error body can contain credentials
+            if method == "POST" and e.code >= 500:
+                raise NotionError(f"Notion HTTP {e.code} · {uncertain}") from None
+            raise APIError(e.code, capability) from None  # an OAuth error body can contain credentials
         except (OSError, ValueError, http.client.HTTPException) as e:
+            if method == "POST":
+                raise NotionError(uncertain) from e
             raise NotionError("Notion 응답을 읽을 수 없어요. 잠시 뒤 다시 시도하세요") from e
 
 
@@ -174,9 +180,9 @@ class Client:
         if not self.tokens:
             raise NotionError("선택한 Notion 계정을 다시 연결하세요")
 
-    def _call(self, path, body, method):
+    def _call(self, path, body, method, capability):
         try:
-            return _request(path, f"Bearer {self.tokens[0]}", body, method)
+            return _request(path, f"Bearer {self.tokens[0]}", body, method, capability)
         except APIError as e:
             if e.status != 401 or not self.tokens[1]:
                 raise
@@ -188,24 +194,22 @@ class Client:
                 refreshed = _exchange({"grant_type": "refresh_token", "refresh_token": latest[1]})
                 latest = _save_tokens(self.key, refreshed)
             self.tokens = latest
-        return _request(path, f"Bearer {self.tokens[0]}", body, method)
+        return _request(path, f"Bearer {self.tokens[0]}", body, method, capability)
 
     def read(self, path, body=None):
-        return self._call(path, body, None)
+        capability = "사용자 정보 읽기(이메일 제외)" if path.partition("?")[0] == "/users" else "콘텐츠 읽기"
+        return self._call(path, body, None, capability)
 
     def write(self, method, path, body, capability="콘텐츠 수정"):
-        try:
-            return self._call(path, body, method)
-        except APIError as e:
-            if e.status == 403:
-                raise APIError(403, capability) from None
-            raise
+        return self._call(path, body, method, capability)
 
     def page(self, page_id, source):
         page = self.read(f"/pages/{page_id}")
+        if page.get("id") != page_id or not isinstance(page.get("properties"), dict):
+            raise NotionError("Notion 페이지의 속성을 확인할 수 없어요")
         if (page.get("parent") or {}).get("data_source_id") != source:
             raise NotionError("페이지가 프로젝트에 연결된 Notion 데이터베이스에 없어요")
-        if page.get("in_trash") or page.get("is_archived"):
+        if page.get("in_trash") or page.get("is_archived") or page.get("archived"):
             raise NotionError("휴지통에 있는 Notion 페이지예요")
         return page
 
