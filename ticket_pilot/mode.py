@@ -212,17 +212,22 @@ def _github_login() -> str | None:
 
 
 def _secret_names() -> list[tuple[str, str]]:
-    """(service, account) of every token tp keeps (core secrets: GitHub, Asana, a custom OAuth client id)."""
+    """Named credentials to carry alongside the DB when moving to Docker."""
+    from . import notion
     from .server import GITHUB_OAUTH_KEYCHAIN
+    connections = core.db().execute("SELECT id FROM notion_connections").fetchall()
     return [(core.GITHUB_KEYCHAIN, "github"), (core.settings()["asana_keychain_service"], "asana"),
-            (GITHUB_OAUTH_KEYCHAIN, "client_id")]
+            (GITHUB_OAUTH_KEYCHAIN, "client_id"), (notion.SERVICE, "oauth-app"),
+            *((notion.SERVICE, r["id"]) for r in connections)]
 
 
 def host_secrets() -> dict:
     """{service: {account: value}} of the stored tokens. Never printed."""
     out: dict = {}
+    from . import notion
     for svc, acct in _secret_names():
-        v = core.secret_get(svc)  # any account: older Asana entries were saved under another name
+        # Legacy single-account services may use an older account name. Notion tokens belong to a specific user.
+        v = core.secret_get(svc, acct) if svc == notion.SERVICE else core.secret_get(svc)
         if v:
             out.setdefault(svc, {})[acct] = v
     return out

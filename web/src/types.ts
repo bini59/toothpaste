@@ -460,6 +460,7 @@ export type GlobalConf = Record<string, unknown> & {
   branch_prefix: string;
   agent_max_min: number;
   agent_asana_write: boolean;
+  asana_tag: string;
   owner_name: string;
   theme: string;
   review: { max_rework_rounds: number; [k: string]: unknown };
@@ -470,12 +471,23 @@ export type GlobalConf = Record<string, unknown> & {
   github_issues: Record<string, string>;
   hidden_projects: Record<string, string>;
 };
-export type ProjectSource = "asana" | "github" | "none";
+export type ProjectSource = "asana" | "github" | "notion" | "none";
+export interface NotionFilters {
+  connection_id: string;
+  data_source_id: string;
+  assignee?: string;
+  people_property?: string;
+  tag_property?: string;
+  tag_option?: string;
+  status_property?: string;
+  status_option?: string;
+}
 /** project.<id> (TP-91): a project's own name, where its tickets come from, and its repos */
 export interface ProjectConf {
   name: string;
   source: ProjectSource;
   asana_gid: string | null;
+  notion?: NotionFilters;
   repos: { repo: string; role: string | null; default?: boolean }[];
   [k: string]: unknown;
 }

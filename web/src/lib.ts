@@ -104,7 +104,7 @@ export function ago(v?: string | number | null): string {
 export const byDue = (a: Ticket, b: Ticket) => ((a.due_on || "9999") > (b.due_on || "9999") ? 1 : -1);
 export const openTickets = (s: State) => s.tickets.filter((t) => !t.completed && t.assigned);
 export const reposFor = (s: State, projectGid: string | null) =>
-  // projectGid null = no Asana project; tp projects without Asana have project_gid null too (TP-91), never match them
+  // Asana and Notion have project keys. A null key must never match an unrelated project's null key.
   s.project_map.filter((m) => projectGid != null && m.project_gid === projectGid && m.repo);
 
 export function indexState(s: State) {

@@ -1,6 +1,7 @@
 """Shared plumbing: paths, settings, SQLite, Asana, gh helpers (and Orca for legacy runs)."""
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -11,6 +12,7 @@ import tempfile
 import threading
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -178,9 +180,9 @@ def effective_config(stored: dict | None) -> dict:
 
 
 # Projects (TP-91): a project has its own id (slug), a name and 1..N repos; source says where its tickets come from
-# (asana = an Asana project, asana_gid; github = issues of its repos; none). Repos no project links show under the
+# (Asana project, GitHub issues, Notion data source or none). Repos no project links show under the
 # virtual project UNSORTED (미분류) on the 프로젝트 page.
-PROJECT_SOURCES = ("asana", "github", "none")
+PROJECT_SOURCES = ("asana", "github", "notion", "none")
 PROJECT_COLS = ("id", "name", "source", "asana_gid", "repos")
 UNSORTED = "unsorted"
 
@@ -342,8 +344,7 @@ def _pin_old_defaults(con, mark: str, old: dict, note: str) -> bool:
 # ---------------------------------------------------------------- SQLite
 
 # TP-91 project tables (also what _migrate_projects recreates). project_map: derived from config_projects (load_map);
-# project_gid = its Asana project (NULL without one). config_projects: id = tp's own slug, source asana | github | none,
-# asana_gid only for source asana.
+# project_gid links tickets to repos: Asana gid or notion:<tp project id>, otherwise NULL.
 PROJECT_TABLES = """
 CREATE TABLE IF NOT EXISTS project_map (
   project_gid TEXT, project_name TEXT, repo TEXT, role TEXT, is_default INTEGER,
@@ -359,6 +360,9 @@ CREATE TABLE IF NOT EXISTS config_project_repos (
 """
 
 SCHEMA = PROJECT_TABLES + """
+CREATE TABLE IF NOT EXISTS notion_connections (
+  id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, workspace_name TEXT NOT NULL, user_id TEXT NOT NULL, user_name TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS tickets (
   gid TEXT PRIMARY KEY,
   key TEXT,                -- Asana "ID" custom field (CRSC-340) or AS-<gid>
@@ -734,7 +738,8 @@ def load_map(con, m: dict | None = None):
             con.execute(
                 "INSERT OR REPLACE INTO project_map(project_gid,project_name,repo,role,is_default,confidence,note,"
                 "project_id) VALUES(?,?,?,?,?,?,?,?)",
-                (p.get("asana_gid"), p["name"], rr.get("repo"), rr.get("role"), 1 if rr.get("default") else 0,
+                (f"notion:{p['id']}" if p.get("source") == "notion" else p.get("asana_gid"),
+                 p["name"], rr.get("repo"), rr.get("role"), 1 if rr.get("default") else 0,
                  p.get("confidence"), p.get("note"), p["id"]),
             )
     # completed tickets are not re-synced; keep their project names in line with the map too
@@ -868,7 +873,18 @@ KEYCHAIN = sys.platform == "darwin"
 # Docker mode: TP_SECRETS_FILE points into the data volume
 SECRETS_FILE = Path(os.environ.get("TP_SECRETS_FILE") or Path.home() / ".config" / "ticket-pilot" / "secrets.json")
 _SECRET_RE = re.compile(r"[\w./:+=-]+")  # names and values go into a `security -i` command line on macOS
-_secrets_lock = threading.Lock()  # dashboard threads: two saves must not drop each other's entry
+
+
+@contextmanager
+def _secret_update():
+    if KEYCHAIN:
+        yield
+        return
+    # Both the dashboard and tick update this JSON file. The lock stays in place across atomic replacements.
+    SECRETS_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with SECRETS_FILE.with_name(SECRETS_FILE.name + ".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
 
 
 def secret_store() -> str:
@@ -923,34 +939,34 @@ def secret_set(service: str, account: str, value: str):
     """Store value (replacing the old one) and read it back; RuntimeError when that fails. Never logs the value."""
     if not all(isinstance(x, str) and _SECRET_RE.fullmatch(x) for x in (service, account, value)):
         raise RuntimeError("저장할 수 없는 형식이에요")
-    if KEYCHAIN:
-        # through stdin (`security -i`) so the value never shows up in the process list
-        subprocess.run(["security", "-i"], input=f"add-generic-password -U -s {service} -a {account} -w {value}\n",
-                       capture_output=True, text=True, timeout=30)
-    else:
-        with _secrets_lock:
+    with _secret_update():
+        if KEYCHAIN:
+            # through stdin (`security -i`) so the value never shows up in the process list
+            subprocess.run(["security", "-i"], input=f"add-generic-password -U -s {service} -a {account} -w {value}\n",
+                           capture_output=True, text=True, timeout=30)
+        else:
             d = _secrets_read()
             d.setdefault(service, {})[account] = value
             _secrets_write(d)
-    if secret_get(service, account) != value:
-        raise RuntimeError(f"{secret_store()}에 저장하지 못했어요")
+        if secret_get(service, account) != value:
+            raise RuntimeError(f"{secret_store()}에 저장하지 못했어요")
 
 
 def secret_delete(service: str, account: str):
     """Remove the value; RuntimeError when it is still there afterwards. Missing is fine."""
-    if KEYCHAIN:
-        subprocess.run(["security", "delete-generic-password", "-s", service, "-a", account], capture_output=True,
-                       timeout=30)
-    else:
-        with _secrets_lock:
+    with _secret_update():
+        if KEYCHAIN:
+            subprocess.run(["security", "delete-generic-password", "-s", service, "-a", account], capture_output=True,
+                           timeout=30)
+        else:
             d = _secrets_read()
             if account in (d.get(service) or {}):
                 del d[service][account]
                 if not d[service]:
                     del d[service]
                 _secrets_write(d)
-    if secret_get(service, account):
-        raise RuntimeError(f"{secret_store()}에서 지우지 못했어요")
+        if secret_get(service, account):
+            raise RuntimeError(f"{secret_store()}에서 지우지 못했어요")
 
 
 def github_token() -> str | None:
