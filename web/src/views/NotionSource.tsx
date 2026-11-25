@@ -4,7 +4,7 @@ import { Select } from "../components/Select";
 import { Table } from "../components/Table";
 import { STAGES } from "../lib";
 import type { NotionFilters } from "../types";
-import { Badge, Button } from "../ui";
+import { Badge, Button, Input } from "../ui";
 
 type Choice = { id: string; name: string };
 type Property = Choice & { type: string; options: Choice[] };
@@ -20,11 +20,16 @@ const accountName = (c: Connection) => `${c.user_name} · ${c.workspace_name}`;
 const message = (e: unknown) => e instanceof Error ? e.message : String(e);
 const request = <T,>(path: string, body: unknown) => postJson<T>(`/api/notion/${path}`, body);
 
+function taskIdError(value: NotionFilters) {
+  if (!value.task_id_property) return value.task_id_prefix ? "Task ID Prefix에 사용할 수식 열을 골라 주세요" : "";
+  return /^[A-Za-z0-9]{1,10}$/.test(value.task_id_prefix ?? "") ? "" : "Task ID Prefix는 영문·숫자 1~10자로 입력하세요";
+}
+
 export function notionError(value: NotionFilters) {
   if (!value.connection_id) return "프로젝트에 사용할 Notion 계정이 필요해요";
   if (!value.data_source_id) return "데이터베이스를 골라 주세요";
   if (value.assignee !== "all" && !value.people_property) return "담당자 열을 고르거나 담당자를 전체로 바꿔 주세요";
-  return "";
+  return taskIdError(value);
 }
 
 // A response belongs to the connection and data source that requested it, including after a rapid switch.
@@ -181,6 +186,7 @@ export function NotionSource({ projectId, value, repos, workTag, onChange }: {
   const schema = useNotionList<Property[]>("properties", connection && value.data_source_id
     ? { ...connection, data_source_id: value.data_source_id } : null, refresh);
   const props = schema?.data ?? [];
+  const prefixError = taskIdError(value);
   const members = [{ id: "me", name: "연결한 나" }, { id: "all", name: "전체" }, ...(users?.data ?? [])];
   const statusOptions = props.find((p) => p.id === value.status_property)?.options ?? [];
   const stagePicker = (stage: string, label = STAGES[stage][0]) => (
@@ -230,6 +236,18 @@ export function NotionSource({ projectId, value, repos, workTag, onChange }: {
       </div>
       {optionRow("tag", "태그", ["multi_select", "select"])}
       {optionRow("status", "상태", ["status", "select"])}
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Picker label="Task ID 열 (문자열 수식)" choices={props.filter((p) => p.type === "formula")} value={value.task_id_property ?? ""}
+          placeholder="사용 안 함" disabled={!schema?.data} onChange={(id) => onChange({
+            ...value, task_id_property: id || undefined, task_id_prefix: id ? value.task_id_prefix : undefined,
+          })} />
+        <label className="block min-w-0 space-y-1">
+          <span className="block text-sm font-semibold text-text-main">Task ID Prefix</span>
+          <Input value={value.task_id_prefix ?? ""} placeholder="CRSC" aria-invalid={!!prefixError}
+            disabled={!value.task_id_property || !schema?.data} onChange={(e) => onChange({ ...value, task_id_prefix: e.target.value })} />
+        </label>
+      </div>
+      {prefixError && <p role="alert" className="text-sm text-danger-700">{prefixError}</p>}
       <p className="text-xs text-text-muted">선택한 조건을 모두 만족하는 페이지를 가져와요. 태그 열에 <strong>{workTag}</strong>가 있고 작업 레포가 정해진 티켓이 자동 시작 대상이에요.</p>
       <NotionPreview key={JSON.stringify([projectId, value, repos, workTag])} projectId={projectId} value={value} repos={repos} />
       <Picker label="마감일 열" value={value.date_property || ""} placeholder="날짜 열이 하나면 자동 선택"

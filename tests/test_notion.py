@@ -168,7 +168,7 @@ class NotionFixture:
                 return 503, {}
             conditions = body.get("filter", {})
             filters = conditions.get("and", [conditions] if conditions else [])
-            self.queries.append((name, filters))
+            self.queries.append(body)
             rows = self.pages[source]
             for f in filters:
                 column = f["property"]
@@ -176,6 +176,9 @@ class NotionFixture:
                     rows = [r for r in rows if f["people"]["contains"] in [a["id"] for a in r["properties"][column]["people"]]]
                 elif "multi_select" in f:
                     rows = [r for r in rows if f["multi_select"]["contains"] in [v["name"] for v in r["properties"][column]["multi_select"]]]
+                elif "formula" in f:
+                    prefix = f["formula"]["string"]["starts_with"]
+                    rows = [r for r in rows if (r["properties"][column]["formula"]["string"] or "").startswith(prefix)]
                 else:
                     kind = "status" if "status" in f else "select"
                     rows = [r for r in rows if f[kind]["equals"] == (r["properties"][column][kind] or {}).get("name")]
@@ -386,7 +389,7 @@ class NotionTest(NotionDashboard):
         self.assertEqual(self.call("properties", {**self.cfg, "connection_id": home})[0], 400)
         mine = self.preview({**self.cfg, "connection_id": home, "data_source_id": HOME_DB})
         self.assertEqual([r["title"] for r in mine], ["개인 일정"])
-        self.assertEqual(self.fixture.queries[-1][1][0]["people"], {"contains": PERSONAL})
+        self.assertEqual(self.fixture.queries[-1]["filter"]["and"][0]["people"], {"contains": PERSONAL})
         first, second = notion.Client(self.con, self.team), notion.Client(self.con, self.team)
         self.fixture.expired = True
         self.assertEqual(first.sources(), second.sources())
@@ -399,14 +402,16 @@ class NotionTest(NotionDashboard):
                     ("tickets", "runs", "config_projects", "events", "settings_history")]
         before = counts()
         self.assertEqual({x["title"] for x in self.preview(self.cfg)}, {"계정 연결", "팀 보드"})
-        self.assertEqual(self.fixture.queries[-1][1][0]["people"], {"contains": OWNER})
+        self.assertEqual(self.fixture.queries[-1]["filter"]["and"][0]["people"], {"contains": OWNER})
         cfg = {**self.cfg, "assignee": MEMBER}
         only_member = self.preview(cfg)
         self.assertEqual({t["title"] for t in only_member}, {"계정 연결", "설정 저장"})
-        self.assertEqual(self.fixture.queries[-1][1], [{"property": "개발 담당", "people": {"contains": MEMBER}},
-                         {"property": "라벨", "multi_select": {"contains": "tp"}}, {"property": "상태", "status": {"equals": "할 일"}}])
+        self.assertEqual(self.fixture.queries[-1]["filter"]["and"], [
+            {"property": "개발 담당", "people": {"contains": MEMBER}}, {"property": "라벨", "multi_select": {"contains": "tp"}},
+            {"property": "상태", "status": {"equals": "할 일"}},
+        ])
         self.assertEqual({x["title"] for x in self.preview({**cfg, "assignee": "all"})}, {"계정 연결", "팀 보드", "설정 저장"})
-        self.assertEqual(len(self.fixture.queries[-1][1]), 2)
+        self.assertEqual(len(self.fixture.queries[-1]["filter"]["and"]), 2)
         self.assertEqual(counts(), before)
 
         cfg["tag_option"] = ""  # import other labels while only the work tag starts an agent
@@ -431,6 +436,43 @@ class NotionTest(NotionDashboard):
         self.assertEqual(self.stages(), {t["title"]: t["stage"] for t in next_preview})
         self.assertEqual(self.stages()["계정 다시 연결"], "skipped")
         self.assertEqual(self.con.execute("SELECT COUNT(*) FROM tickets").fetchone()[0], 3)
+
+    def test_task_id_prefix_preview_and_sync(self):
+        task = {"id": "task-option", "name": "Task"}
+        self.fixture.props["Type"] = {"id": "type-id", "type": "select", "select": {"options": [task]}}
+        self.fixture.props["Task ID"] = {"id": "formula-id", "type": "formula", "formula": {}}
+        values = [("CRSC-3", task), ("CRS-4", task), ("", task), ("CRSC-5", None), ("CRSC-6", task)]
+        for row, (task_id, kind) in zip(self.fixture.pages[TEAM_DB], values):
+            row["properties"]["Task ID"] = {"type": "formula", "formula": {"type": "string", "string": task_id}}
+            row["properties"]["Type"] = {"type": "select", "select": kind}
+
+        base = {"connection_id": self.team, "data_source_id": TEAM_DB, "assignee": "all"}
+        self.assertEqual(len(self.preview(base)), 5)
+        self.assertNotIn("filter", self.fixture.queries[-1])
+        cfg = {**base, "task_id_property": "formula-id", "task_id_prefix": "CRS"}
+        self.assertEqual([t["title"] for t in self.preview(cfg)], ["사용 설명"])
+        self.assertEqual(self.fixture.queries[-1]["filter"],
+                         {"property": "Task ID", "formula": {"string": {"starts_with": "CRS-"}}})
+
+        cfg.update(task_id_prefix="CRSC", tag_property="type-id", tag_option="task-option")
+        expected = {"계정 연결", "설정 저장"}
+        self.assertEqual({t["title"] for t in self.preview(cfg)}, expected)
+        self.assertEqual(self.fixture.queries[-1]["filter"], {"and": [
+            {"property": "Type", "select": {"equals": "Task"}},
+            {"property": "Task ID", "formula": {"string": {"starts_with": "CRSC-"}}},
+        ]})
+        self.save(cfg)
+        self.assertNotIn("notion_errors", pipeline.sync(log=lambda *_: None))
+        self.assertEqual(set(self.stages()), expected)
+
+    def test_task_id_filter_requires_current_formula_column(self):
+        for prop in ("missing-id", "status-id"):
+            with self.subTest(prop=prop):
+                cfg = {**self.cfg, "task_id_property": prop, "task_id_prefix": "Qa2"}
+                status, result, _ = self.call("preview", {"project_id": "example", "repos": [], "notion": cfg})
+                self.assertEqual(status, 400)
+                self.assertIn("Notion 열이 바뀌었어요", result["error"])
+                self.assertFalse(self.fixture.queries)
 
     def test_reconciliation_completion_and_read_failures(self):
         cfg = {**self.cfg, "assignee": "all"}
@@ -641,8 +683,9 @@ class NotionTest(NotionDashboard):
         tickets = self.preview(self.cfg)
         self.assertEqual([t["title"] for t in tickets], ["계정 연결", "팀 보드"])
         self.assertTrue(all(t["auto_start"] for t in tickets))
-        self.assertEqual(self.fixture.queries[-1][1][1:], [{"property": "분류", "select": {"equals": "tp"}},
-                                                          {"property": "진행", "select": {"equals": "예정"}}])
+        self.assertEqual(self.fixture.queries[-1]["filter"]["and"][1:], [
+            {"property": "분류", "select": {"equals": "tp"}}, {"property": "진행", "select": {"equals": "예정"}},
+        ])
 
     def test_same_page_in_two_projects_gets_one_owner(self):
         self.save(self.cfg, "first")
@@ -656,7 +699,11 @@ class NotionTest(NotionDashboard):
         self.assertEqual(row[0], "notion:first")
 
     def test_draft_cannot_save_partial_filters(self):
-        for cfg in ({**self.cfg, "people_property": ""}, {**self.cfg, "status_property": ""}, {**self.cfg, "token": "no"}):
-            value = {"name": "x", "source": "notion", "notion": cfg, "repos": []}
-            self.assertEqual(self.call("/api/config", {"scope": "project.x", "value": value})[0], 400)
+        invalid = [{"people_property": ""}, {"status_property": ""}, {"token": "no"}, {"task_id_prefix": "CRSC"}]
+        invalid.extend({"task_id_property": "formula-id", "task_id_prefix": prefix}
+                       for prefix in ("", " ", " CRSC", "CRSC-", "한글", "A" * 11))
+        for fields in invalid:
+            with self.subTest(fields=fields):
+                value = {"name": "x", "source": "notion", "notion": {**self.cfg, **fields}, "repos": []}
+                self.assertEqual(self.call("/api/config", {"scope": "project.x", "value": value})[0], 400)
         self.assertEqual(self.con.execute("SELECT count(*) FROM config_projects").fetchone()[0], 0)

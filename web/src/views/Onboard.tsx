@@ -322,7 +322,7 @@ export function Onboard({ projectId, onCancel, onSaved }: { projectId?: string; 
                 <span>
                   <span className="font-semibold text-text-main">{k === "github" ? "GitHub 이슈 (tp 라벨)" : SOURCE_LABEL[k]}</span>
                   <span className="block text-xs text-text-muted">
-                    {k === "asana" ? "Asana 프로젝트에서 나에게 배정된 작업" : k === "github" ? "프로젝트 레포의 열린 이슈 중 tp 라벨이 붙은 것" : k === "notion" ? "공유한 DB에서 담당자·태그·상태 조건에 맞는 페이지" : "티켓 없이 채팅과 레포 설정만 써요"}
+                    {k === "asana" ? "Asana 프로젝트에서 나에게 배정된 작업" : k === "github" ? "프로젝트 레포의 열린 이슈 중 tp 라벨이 붙은 것" : k === "notion" ? "공유한 DB에서 담당자·태그·상태·Task ID 조건에 맞는 페이지" : "티켓 없이 채팅과 레포 설정만 써요"}
                   </span>
                 </span>
               </label>
