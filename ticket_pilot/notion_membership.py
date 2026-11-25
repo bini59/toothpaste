@@ -131,6 +131,7 @@ class Membership:
                 rule.needle in readable_text(current["properties"].get(rule.text, {})) for current in level.values())}
             if matches:
                 return matches, ancestors
-            if "contains" in self.missing:
-                return UNRESOLVED, []
+        # A peer's missing text column matters only if the whole chain has no known match.
+        if "contains" in self.missing:
+            return UNRESOLVED, []
         return None, ancestors

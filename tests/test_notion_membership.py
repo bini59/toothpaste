@@ -157,6 +157,40 @@ class NotionMembershipTest(NotionDashboard):
         self.assertEqual(set(self.stages()), {"TP-17 로그인 오류"})
         self.assertEqual(pipeline.find_ticket(self.con, notion_tickets.ticket_key(uid(101)))["project_gid"], "notion:toothpaste")
 
+    def test_deleted_peer_text_column_keeps_child_and_inherited_text_matches(self):
+        cfg = {**self.cfg, **self.text_rule, "parent_property": "parent"}
+        other = {**self.cfg, "contains_property": "calc", "contains_text": "OTHER-"}
+        child = self.fixture.pages[TEAM_DB][3]
+        child["properties"]["상위 항목"] = relation(self.parent["id"])
+        child["properties"]["업무 코드"] = self.parent["properties"].pop("업무 코드")
+        self.save(other, "other")
+        self.save(self.cfg, "fallback")
+        self.assert_imports(cfg, ["팀 보드"])
+
+        column = self.fixture.props.pop("수식")
+        grandchild = page(901, "재현 테스트", [OWNER], ["tp"], "할 일")
+        grandchild["properties"]["상위 항목"] = relation(child["id"])
+        self.fixture.pages[TEAM_DB].append(grandchild)
+
+        tickets = self.preview(cfg, pid="toothpaste")
+        self.assertEqual({t["title"]: t["auto_start"] for t in tickets}, {"팀 보드": True, "재현 테스트": True})
+        self.assertEqual(self.preview(self.cfg, pid="fallback"), [])
+        status, error, _ = self.call("preview", {"project_id": "other", "notion": other, "repos": ["app"]})
+        self.assertEqual(status, 400)
+        self.assertIn("문자열", error["error"])
+        self.assertEqual(pipeline.sync(log=lambda *_: None)["notion_errors"], {"other": error["error"]})
+        owners = dict(self.con.execute("SELECT name, project_gid FROM tickets WHERE assigned=1"))
+        self.assertEqual(owners, {"TP-17 로그인 오류": "notion:fallback", "팀 보드": "notion:toothpaste",
+                                  "재현 테스트": "notion:toothpaste"})
+        starts = {s.splitlines()[0] for s in self.dispatch_log() if "would create" in s}
+        self.assertEqual(starts, {f"--- would create app/{notion_tickets.ticket_key(p['id']).lower()}"
+                                  for p in (child, grandchild)})
+
+        self.fixture.props["수식"] = column
+        self.parent["properties"]["수식"] = {"type": "formula", "formula": {"type": "string", "string": "OTHER-1"}}
+        self.assert_imports(cfg, [])
+        self.assertEqual({t["title"] for t in self.preview(other, pid="other")}, {"TP-17 로그인 오류", "팀 보드", "재현 테스트"})
+
     def test_deleted_peer_project_column_holds_only_unresolved_tickets(self):
         cfg = {**self.cfg, **self.external, **self.text_rule}
         other = {**self.cfg, **self.external, "project_page_id": uid(302), "project_property": "other-project"}
