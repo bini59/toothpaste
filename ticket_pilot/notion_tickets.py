@@ -3,14 +3,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shlex
 
 from . import notion
 from .core import ROOT, effective_config, event, meta_get, meta_set, read_config
 
-FILTER_TYPES = {"people": ("people",), "tag": ("select", "multi_select"), "status": ("status", "select")}
+FILTER_TYPES = {"people": ("people",), "tag": ("select", "multi_select"), "status": ("status", "select"),
+                "task_id": ("formula",)}
 FIELDS = {"connection_id", "data_source_id", "assignee", "people_property", "tag_property", "tag_option",
-          "status_property", "status_option", "date_property"}
+          "status_property", "status_option", "date_property", "task_id_property", "task_id_prefix"}
 # Stages of an actual Notion run. Filter membership and the pre-dispatch queue are read-only.
 WRITE_STAGES = {"dispatched", "in_progress", "blocked", "agent_done", "pr_open", "rework", "conflict",
                 "reviewed", "approving", "staged", "merged", "deploying", "closed", "done"}
@@ -40,6 +42,11 @@ def validate(cfg):
     for role in ("tag", "status"):
         if cfg.get(f"{role}_option") and not cfg.get(f"{role}_property"):
             raise notion.NotionError("선택한 값에 해당하는 열을 골라 주세요")
+    prefix = cfg.get("task_id_prefix", "")
+    if prefix and not cfg.get("task_id_property"):
+        raise notion.NotionError("Task ID Prefix에 사용할 수식 열을 골라 주세요")
+    if cfg.get("task_id_property") and not re.fullmatch(r"[A-Za-z0-9]{1,10}", prefix):
+        raise notion.NotionError("Task ID Prefix는 영문·숫자 1~10자로 입력하세요")
     stages = cfg.get("stage_statuses", {})
     if (not isinstance(stages, dict) or stages.keys() - WRITE_STAGES
             or any(not isinstance(v, str) or not v for v in stages.values())
@@ -81,6 +88,8 @@ def _query(client, cfg):
             raise notion.NotionError("선택한 Notion 열이 바뀌었어요. 프로젝트 설정에서 다시 골라 주세요")
         if role == "people":
             condition = {"contains": client.account["user_id"] if who == "me" else who}
+        elif role == "task_id":
+            condition = {"string": {"starts_with": cfg["task_id_prefix"] + "-"}}
         elif option := cfg.get(f"{role}_option"):
             name = next((o["name"] for o in col["options"] if o["id"] == option), None)
             if name is None:

@@ -482,6 +482,8 @@ export interface NotionFilters {
   tag_option?: string;
   status_property?: string;
   status_option?: string;
+  task_id_property?: string;
+  task_id_prefix?: string;
   stage_statuses?: Record<string, string>;
 }
 /** project.<id> (TP-91): a project's own name, where its tickets come from, and its repos */

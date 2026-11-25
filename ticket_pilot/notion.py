@@ -271,9 +271,10 @@ class Client:
         if not valid_id(source):
             raise NotionError("공유한 데이터베이스를 골라 주세요")
         schema = self.read(f"/data_sources/{source}")["properties"]
+        supported = ("title", "date", "people", "select", "multi_select", "status", "formula")
         return [{"id": p["id"], "name": name, "type": p["type"],
                  "options": [{"id": o["id"], "name": o["name"]} for o in p[p["type"]].get("options", [])]}
-                for name, p in schema.items() if p["type"] in ("title", "date", "people", "select", "multi_select", "status")]
+                for name, p in schema.items() if p["type"] in supported]
 
 
 def plain(rich_text):
