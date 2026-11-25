@@ -518,7 +518,8 @@ Downgrades are not supported.
 agent turns in the repo's main checkout, with the repo's agent settings (`repo.<name>.agent`, else the global agent).
 The first turn sends `prompts/chat.md` (read-only checkout, experiments in a /tmp clone, Asana writes only through `tp asana`, GitHub
 issues only when the owner asks) with the message; later turns resume the recorded session (`codex exec resume <id>` /
-`claude --resume <id>`) with the message alone. Changing the repo's agent tool starts a new session. Rows live in
+`claude --resume <id>`) with the new message and a reminder to use `tp chat attach <path>...` for reply attachments.
+Changing the repo's agent tool starts a new session. Rows live in
 `chat_conversations` / `chat_messages`; an assistant row with `text` NULL is the running turn (one per conversation).
 Reading the conversation finalizes finished turns from the runner log: stdout is the reply (codex `-o` file first),
 stderr goes to `<log>.err` and is shown as the progress log while the turn runs.

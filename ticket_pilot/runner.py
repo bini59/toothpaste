@@ -278,6 +278,8 @@ def launch(cwd: str, prompt: str, tag: str, setup: str | None = None, repo_path:
     if chat_turn:
         ident, turn = chat_turn
         env.update(TP_CHAT_ID=ident, TP_CHAT_TURN_ID=str(turn))
+        if env.get("TP_DB"):  # the agent invokes tp from the project's checkout
+            env["TP_DB"] = str(Path(env["TP_DB"]).resolve())
     if repo_path:
         for k in ("TP_ROOT_PATH", "ORCA_ROOT_PATH"):
             env[k] = repo_path

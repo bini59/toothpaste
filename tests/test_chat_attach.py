@@ -82,10 +82,12 @@ class AttachTest(unittest.TestCase):
     def test_send_keeps_a_conversation_in_its_repo(self):
         self.con.execute("UPDATE chat_conversations SET repo='r2', session='s1', tool='claude' WHERE id=?", (self.id,))
         self.con.commit()
-        CH.send(self.id, "hi")  # r2 is not p's default, but still in p: same checkout, the session resumes
+        turn = CH.send(self.id, "hi")  # r2 is not p's default, but still in p: same checkout, the session resumes
         self.assertEqual((self.launch.call_args.args[0], self.launch.call_args.kwargs["resume"]),
                          (str(Path(self.tmp.name) / "r2"), "s1"))
         self.assertEqual(self.launch.call_args.kwargs["add_dirs"], [self.tmp.name])
+        self.assertEqual(self.launch.call_args.kwargs["chat_turn"], (self.id, turn))
+        self.assertIn("{{TP}} chat attach <path>...", self.launch.call_args.args[1])
 
     def test_send_stores_files_and_passes_paths(self):
         CH.send(self.id, "이거 봐줘", [{"name": "image.png", "data": b64(b"\x89PNG")},

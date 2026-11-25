@@ -2,7 +2,7 @@
 
 Each turn is one detached agent (runner.launch) in the project's default repo checkout, the other repos opened with
 --add-dir, with the default repo's agent settings (repo.<name>.agent, else the global agent). The first turn sends prompts/chat.md + the message and records the
-agent's session; later turns resume it with only the new message.
+agent's session. Later turns resume it with the new message and a reminder of the attachment command.
 The reply is the agent's final message (runner.last_message), read when the process has exited; the dashboard
 polls messages(), which finalizes finished turns. One running turn per conversation. The tick also finalizes
 turns and summarizes idle Claude sessions so the next turn can start fresh with the summary.
@@ -443,10 +443,12 @@ def send(ident: str, text: str, files: list | None = None) -> int:
         turn = con.execute("SELECT last_insert_rowid()").fetchone()[0]
         con.execute("UPDATE chat_conversations SET updated_at=? WHERE id=?", (now(), ident))
     msg = with_files(text, ident, atts)
-    if resume and p.get("source") == "notion":
-        # Existing conversations can predate Notion writes or a change of project source.
-        msg = ("For requested Notion ticket edits, use `{{TP}} notion` "
-               f"with `--project {p['id']}`. " + "See `{{TP}} notion --help`.\n\n" + msg)
+    if resume:
+        # Older sessions were told to share /tmp paths and may also predate Notion writes.
+        msg = "Share screenshots and files in this reply with `{{TP}} chat attach <path>...`.\n\n" + msg
+        if p.get("source") == "notion":
+            msg = ("For requested Notion ticket edits, use `{{TP}} notion` "
+                   f"with `--project {p['id']}`. " + "See `{{TP}} notion --help`.\n\n" + msg)
     if handoff:
         msg = (f"Earlier chat summary (background only):\n{handoff['text']}\n\n"
                f"Current user message:\n{msg}")
