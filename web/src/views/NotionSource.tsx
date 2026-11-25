@@ -4,10 +4,10 @@ import { Select } from "../components/Select";
 import { Table } from "../components/Table";
 import { STAGES } from "../lib";
 import type { NotionFilters } from "../types";
-import { Badge, Button } from "../ui";
+import { Badge, Button, Input } from "../ui";
 
 type Choice = { id: string; name: string };
-type Property = Choice & { type: string; options: Choice[] };
+type Property = Choice & { type: string; options: Choice[]; data_source_id?: string };
 type Connection = { id: string; workspace_name: string; user_name: string };
 type Accounts = { configured: boolean; admin: boolean; connections: Connection[] };
 type Preview = { count: number; tickets: { gid: string; title: string; auto_start: boolean; stage: string }[] };
@@ -24,6 +24,10 @@ export function notionError(value: NotionFilters) {
   if (!value.connection_id) return "프로젝트에 사용할 Notion 계정이 필요해요";
   if (!value.data_source_id) return "데이터베이스를 골라 주세요";
   if (value.assignee !== "all" && !value.people_property) return "담당자 열을 고르거나 담당자를 전체로 바꿔 주세요";
+  if (!!value.contains_property !== !!value.contains_text?.trim()) return "문자열을 검사할 열과 포함할 문자열을 함께 입력하세요";
+  if (value.project_data_source_id && !value.project_page_id) return "선택한 DB에서 프로젝트 행을 골라 주세요";
+  if (value.project_data_source_id && value.project_data_source_id !== value.data_source_id && !value.project_property)
+    return "프로젝트 행이 있는 DB를 가리키는 관계형 열을 골라 주세요";
   return "";
 }
 
@@ -180,7 +184,16 @@ export function NotionSource({ projectId, value, repos, workTag, onChange }: {
   const users = useNotionList<Choice[]>("people", value.data_source_id ? connection : null, refresh);
   const schema = useNotionList<Property[]>("properties", connection && value.data_source_id
     ? { ...connection, data_source_id: value.data_source_id } : null, refresh);
+  const rows = useNotionList<Choice[]>("rows", connection && value.project_data_source_id
+    ? { ...connection, data_source_id: value.project_data_source_id } : null, refresh);
   const props = schema?.data ?? [];
+  const relationsTo = (source?: string) => props.filter((p) => p.type === "relation" && p.data_source_id === source);
+  const chooseProjectSource = (source: string) => {
+    const relations = relationsTo(source).filter((p) => p.id !== value.parent_property);
+    const project = relations.find((p) => p.name === "프로젝트" || p.name.toLowerCase() === "project")
+      ?? (source !== value.data_source_id && relations.length === 1 ? relations[0] : undefined);
+    onChange({ ...value, project_data_source_id: source || undefined, project_page_id: undefined, project_property: project?.id });
+  };
   const members = [{ id: "me", name: "연결한 나" }, { id: "all", name: "전체" }, ...(users?.data ?? [])];
   const statusOptions = props.find((p) => p.id === value.status_property)?.options ?? [];
   const stagePicker = (stage: string, label = STAGES[stage][0]) => (
@@ -230,7 +243,36 @@ export function NotionSource({ projectId, value, repos, workTag, onChange }: {
       </div>
       {optionRow("tag", "태그", ["multi_select", "select"])}
       {optionRow("status", "상태", ["status", "select"])}
-      <p className="text-xs text-text-muted">선택한 조건을 모두 만족하는 페이지를 가져와요. 태그 열에 <strong>{workTag}</strong>가 있고 작업 레포가 정해진 티켓이 자동 시작 대상이에요.</p>
+      <fieldset className="space-y-3 border-t border-border pt-3">
+        <legend className="text-sm font-semibold text-text-main">프로젝트 소속과 하위 작업</legend>
+        <Picker label="상위 항목 관계 열" value={value.parent_property ?? ""} placeholder="사용 안 함"
+          choices={relationsTo(value.data_source_id).filter((p) => p.id !== value.project_property)} disabled={!schema?.data}
+          onChange={(id) => onChange({ ...value, parent_property: id || undefined })} />
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Picker label="프로젝트 행이 있는 DB" value={value.project_data_source_id ?? ""} placeholder="사용 안 함"
+            choices={sources?.data ?? []} disabled={!schema?.data} onChange={chooseProjectSource} />
+          {value.project_data_source_id && <Picker label="프로젝트 행" value={value.project_page_id ?? ""}
+            placeholder={rows?.data ? "행 고르기…" : "불러오는 중…"} choices={rows?.data ?? []} disabled={!rows?.data}
+            onChange={(id) => onChange({ ...value, project_page_id: id || undefined })} />}
+        </div>
+        {value.project_data_source_id && <Picker label="작업 DB의 프로젝트 관계 열" value={value.project_property ?? ""}
+          choices={relationsTo(value.project_data_source_id).filter((p) => p.id !== value.parent_property)}
+          placeholder={value.project_data_source_id === value.data_source_id ? "사용 안 함" : "관계 열 고르기…"}
+          disabled={!schema?.data} onChange={(id) => onChange({ ...value, project_property: id || undefined })} />}
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Picker label="문자열을 검사할 열" value={value.contains_property ?? ""} placeholder="사용 안 함"
+            choices={props.filter((p) => ["title", "rich_text", "formula", "unique_id"].includes(p.type))}
+            disabled={!schema?.data} onChange={(id) => onChange({ ...value, contains_property: id || undefined,
+              contains_text: id ? value.contains_text : undefined })} />
+          <label className="block min-w-0 space-y-1">
+            <span className="block text-sm font-semibold text-text-main">포함할 문자열</span>
+            <Input value={value.contains_text ?? ""} placeholder="예: TP-" disabled={!value.contains_property || !schema?.data}
+              onChange={(e) => onChange({ ...value, contains_text: e.target.value })} />
+          </label>
+        </div>
+        <p className="text-xs text-text-muted">직접 연결된 프로젝트 행, 상위 작업의 프로젝트, 문자열 일치 순으로 소속을 정해요.</p>
+      </fieldset>
+      <p className="text-xs text-text-muted">해당 프로젝트에서 담당자·태그·상태 조건을 모두 만족하는 페이지를 가져와요. 태그 열에 <strong>{workTag}</strong>가 있고 작업 레포가 정해진 티켓이 자동 시작 대상이에요.</p>
       <NotionPreview key={JSON.stringify([projectId, value, repos, workTag])} projectId={projectId} value={value} repos={repos} />
       <Picker label="마감일 열" value={value.date_property || ""} placeholder="날짜 열이 하나면 자동 선택"
         choices={props.filter((p) => p.type === "date")} disabled={!schema?.data}
@@ -253,6 +295,6 @@ export function NotionSource({ projectId, value, repos, workTag, onChange }: {
         </details>
       </fieldset>}
     </>}
-    {[sources, users, schema].map((r, i) => r?.error && <p key={i} role="alert" className="text-sm text-danger-700">{r.error}</p>)}
+    {[sources, users, schema, rows].map((r, i) => r?.error && <p key={i} role="alert" className="text-sm text-danger-700">{r.error}</p>)}
   </div>;
 }

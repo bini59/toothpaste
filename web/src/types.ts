@@ -475,6 +475,12 @@ export type ProjectSource = "asana" | "github" | "notion" | "none";
 export interface NotionFilters {
   connection_id: string;
   data_source_id: string;
+  parent_property?: string;
+  contains_property?: string;
+  contains_text?: string;
+  project_data_source_id?: string;
+  project_page_id?: string;
+  project_property?: string;
   assignee?: string;
   people_property?: string;
   date_property?: string;

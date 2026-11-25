@@ -56,6 +56,7 @@ class NotionFixture:
                       "상태": {"type": "status", "id": "status-id", "status": {
                           "options": [{"id": i, "name": n} for n, i in STATUS_IDS.items()]}}}
         self.writes = []
+        self.relation_items = {}
         self.deny_writes = set()
         self.created = 0
         self.queries = []
@@ -127,7 +128,7 @@ class NotionFixture:
             self.markdown[row["id"]] = (200, {"markdown": body.get("markdown", "")})
             self.writes.append((method, path, body))
             return 200, row
-        if url.path.startswith("/pages/") and (method == "PATCH" or not url.path.endswith("/markdown")):
+        if url.path.startswith("/pages/") and "/properties/" not in url.path and (method == "PATCH" or not url.path.endswith("/markdown")):
             page_id = url.path.split("/")[2]
             for source in shared:
                 row = next((r for r in self.pages[source] if r["id"] == page_id), None)
@@ -148,7 +149,9 @@ class NotionFixture:
             return 200, {"object": "comment", "id": uid(401)}
         args = body or {k: vs[0] for k, vs in parse_qs(url.query).items()}
         start = int(args.get("start_cursor", "0"))
-        if url.path == "/search" and body["filter"] == {"property": "object", "value": "data_source"}:
+        if url.path in self.relation_items:
+            rows = [{"type": "relation", "relation": {"id": i}} for i in self.relation_items[url.path]]
+        elif url.path == "/search" and body["filter"] == {"property": "object", "value": "data_source"}:
             rows = [{"id": source, "object": "data_source", "title": [{"plain_text": title}]} for source, title in shared.items()]
         elif url.path == "/users":
             rows = [{"id": uid(900), "type": "bot"}, {"id": self.names[name][1], "name": "연결 사용자", "type": "person"},

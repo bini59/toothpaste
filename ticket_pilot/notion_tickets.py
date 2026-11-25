@@ -5,12 +5,12 @@ import hashlib
 import json
 import shlex
 
-from . import notion
+from . import notion, notion_membership
 from .core import ROOT, effective_config, event, meta_get, meta_set, read_config
 
 FILTER_TYPES = {"people": ("people",), "tag": ("select", "multi_select"), "status": ("status", "select")}
 FIELDS = {"connection_id", "data_source_id", "assignee", "people_property", "tag_property", "tag_option",
-          "status_property", "status_option", "date_property"}
+          "status_property", "status_option", "date_property"} | notion_membership.FIELDS
 # Stages of an actual Notion run. Filter membership and the pre-dispatch queue are read-only.
 WRITE_STAGES = {"dispatched", "in_progress", "blocked", "agent_done", "pr_open", "rework", "conflict",
                 "reviewed", "approving", "staged", "merged", "deploying", "closed", "done"}
@@ -40,6 +40,7 @@ def validate(cfg):
     for role in ("tag", "status"):
         if cfg.get(f"{role}_option") and not cfg.get(f"{role}_property"):
             raise notion.NotionError("선택한 값에 해당하는 열을 골라 주세요")
+    notion_membership.validate(cfg)
     stages = cfg.get("stage_statuses", {})
     if (not isinstance(stages, dict) or stages.keys() - WRITE_STAGES
             or any(not isinstance(v, str) or not v for v in stages.values())
@@ -110,7 +111,7 @@ def _page_fields(page, cfg, schema, work_tag=None):
         col = column(schema, cfg, role)
         return props.get(col["name"], {}) if col else {}
 
-    title = next((notion.plain(p["title"]) for p in props.values() if p["type"] == "title"), "")
+    title = notion.page_title(page)
     tags = _options(prop("tag"))
     notes = [f"{k}: {notion.plain(p['rich_text'])}" for k, p in props.items() if p["type"] == "rich_text" and p["rich_text"]]
     fields = {"name": title or "제목 없음", "due_on": (prop("date").get("date") or {}).get("start"),
@@ -121,26 +122,37 @@ def _page_fields(page, cfg, schema, work_tag=None):
     return fields
 
 
-def matches(con, project, work_tag):
+def matches(con, project, work_tag, rules):
     cfg = project["notion"]
     validate(cfg)
-    pages, schema = _query(notion.Client(con, cfg["connection_id"]), cfg)
+    client = notion.Client(con, cfg["connection_id"])
+    pages, schema = _query(client, cfg)
+    membership = notion_membership.Membership(client, cfg["data_source_id"], schema, rules)
+    if cfg.get("project_page_id"):
+        client.page(cfg["project_page_id"], cfg["project_data_source_id"])
+    elif cfg.get("parent_property") and project["id"] not in rules:
+        notion_membership.relation_column(schema, cfg, "parent")
     found = {}
     for page in pages:
-        if page["object"] != "page" or page.get("in_trash") or page.get("is_archived") or page.get("archived"):
+        if not notion.active_page(page):
             continue
         page_id = page["id"]
         if not notion.valid_id(page_id):
             raise notion.NotionError("Notion 페이지 ID를 확인할 수 없어요")
+        if not membership.includes(page, project["id"]):
+            continue
         gid = f"notion:{page_id}"
         found[gid] = {**_page_fields(page, cfg, schema, work_tag), "gid": gid, "key": ticket_key(page_id),
                       "project_gid": f"notion:{project['id']}", "project_name": project["name"]}
     return found
 
 
-def _version(project, work_tag):
+def _version(project, work_tag, rules):
     cfg = {k: v for k, v in project["notion"].items() if k != "stage_statuses"}
-    data = json.dumps([cfg, work_tag], sort_keys=True).encode()
+    inputs = [cfg, work_tag]
+    if peers := {k: v for k, v in rules.items() if k != project["id"]}:
+        inputs.append(peers)
+    data = json.dumps(inputs, sort_keys=True).encode()
     return hashlib.sha256(data).hexdigest()
 
 
@@ -172,15 +184,18 @@ def page_edited(con, gid, page, source, schema):
                     {**fields, "gid": gid})
 
 
-def fetch(con, projects, work_tag):
+def fetch(con, projects, work_tag, *, through=None):
     """Finish each remote listing before taking the sync writer lock. Keep only complete project results."""
     listings = {}
     for p in projects:
-        key = (p["id"], _version(p, work_tag))
+        rules = notion_membership.settings(projects, p["notion"]["data_source_id"])
+        key = (p["id"], _version(p, work_tag, rules))
         try:
-            listings[key] = matches(con, p, work_tag), None
+            listings[key] = matches(con, p, work_tag, rules), None
         except (RuntimeError, OSError, ValueError, KeyError, TypeError) as e:
             listings[key] = {}, str(e)
+        if p is through:
+            break
     return listings
 
 
@@ -196,7 +211,8 @@ def _batches(con, projects, work_tag, listings, run_owners):
     # previously confirmed under the same settings. A concurrent edit invalidates the in-flight listing.
     current, confirmed_sources = [], {}
     for p in projects:
-        version = _version(p, work_tag)
+        rules = notion_membership.settings(projects, p["notion"]["data_source_id"])
+        version = _version(p, work_tag, rules)
         rows, error = listings.get((p["id"], version), ({}, "조회 중 설정이 바뀌었어요. 다음 동기화에서 다시 읽어요"))
         if rows:
             confirmed_sources.update(dict.fromkeys(rows, p["notion"]["data_source_id"]))
@@ -219,12 +235,14 @@ def _batches(con, projects, work_tag, listings, run_owners):
 def _dispatch_source(con, project_gid, gid):
     doc = effective_config(read_config(con))
     pid = project_gid.removeprefix("notion:")
-    project = next((p for p in doc["project_map"]["projects"] if p["id"] == pid and p["source"] == "notion"), None)
+    projects = [p for p in doc["project_map"]["projects"] if p["source"] == "notion"]
+    project = next((p for p in projects if p["id"] == pid), None)
     snapshot = meta_get(con, SYNC_STATE, {})
     if gid in snapshot.get("edited", {}):
         raise notion.NotionError("수정한 페이지의 가져오기 조건을 다음 동기화에서 확인한 뒤 작업을 시작해요")
     state = snapshot.get("projects", {}).get(pid, {})
-    if not project or not state.get("ready") or state["version"] != _version(project, doc["settings"]["asana_tag"]):
+    rules = notion_membership.settings(projects, project["notion"]["data_source_id"]) if project else {}
+    if not project or not state.get("ready") or state["version"] != _version(project, doc["settings"]["asana_tag"], rules):
         raise notion.NotionError("현재 프로젝트 조건으로 동기화한 뒤 작업을 시작해요")
     return project["notion"]["connection_id"], state["version"]
 
@@ -298,15 +316,16 @@ def preview(con, projects, project, work_tag):
     from .pipeline import compute_stage
     cfg = project["notion"]
     validate(cfg)
-    # Earlier projects can claim pages only from this same data source.
+    # All rules on the same source determine membership. Only earlier projects break ties.
     relevant = []
     for p in projects:
         if p["id"] == project["id"]:
-            break
-        if p["source"] == "notion" and p["notion"]["data_source_id"] == cfg["data_source_id"]:
+            relevant.append(project)
+        elif p["source"] == "notion" and p["notion"]["data_source_id"] == cfg["data_source_id"]:
             relevant.append(p)
-    relevant.append(project)
-    listings = fetch(con, relevant, work_tag)
+    if project not in relevant:
+        relevant.append(project)
+    listings = fetch(con, relevant, work_tag, through=project)
     for p, _, rows, owned, error in _batches(con, relevant, work_tag, listings, _run_owners(con)):
         if p is not project:
             continue

@@ -264,6 +264,20 @@ class Client:
         rows = self.items("/search", {"filter": {"property": "object", "value": "data_source"}})
         return [{"id": r["id"], "name": plain(r.get("title")) or r["id"]} for r in rows if r["object"] == "data_source"]
 
+    def rows(self, source):
+        if not valid_id(source):
+            raise NotionError("공유한 데이터베이스를 골라 주세요")
+        pages = self.items(f"/data_sources/{source}/query", {"result_type": "page"})
+        return [{"id": p["id"], "name": page_title(p) or p["id"]} for p in pages if active_page(p)]
+
+    def relation_ids(self, page, column):
+        prop = page["properties"].get(column["name"], {})
+        if prop.get("has_more"):
+            # Notion property IDs are already URL encoded.
+            items = self.items(f"/pages/{page['id']}/properties/{column['id']}")
+            return [item["relation"]["id"] for item in items]
+        return [row["id"] for row in prop.get("relation", [])]
+
     def people(self):
         return [{"id": r["id"], "name": r.get("name") or r["id"]} for r in self.items("/users") if r.get("type") == "person"]
 
@@ -271,10 +285,20 @@ class Client:
         if not valid_id(source):
             raise NotionError("공유한 데이터베이스를 골라 주세요")
         schema = self.read(f"/data_sources/{source}")["properties"]
+        supported = ("title", "date", "people", "select", "multi_select", "status", "relation", "rich_text", "formula", "unique_id")
         return [{"id": p["id"], "name": name, "type": p["type"],
+                 **({"data_source_id": p["relation"]["data_source_id"]} if p["type"] == "relation" else {}),
                  "options": [{"id": o["id"], "name": o["name"]} for o in p[p["type"]].get("options", [])]}
-                for name, p in schema.items() if p["type"] in ("title", "date", "people", "select", "multi_select", "status")]
+                for name, p in schema.items() if p["type"] in supported]
 
 
 def plain(rich_text):
     return "".join(part.get("plain_text") or "" for part in rich_text or [])
+
+
+def page_title(page):
+    return next((plain(p["title"]) for p in page["properties"].values() if p["type"] == "title"), "")
+
+
+def active_page(page):
+    return page["object"] == "page" and not (page.get("in_trash") or page.get("is_archived") or page.get("archived"))
