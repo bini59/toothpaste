@@ -76,8 +76,10 @@ function Attachments({ items }: { items: ChatAttachment[] }) {
           <img src={a.url} alt={a.name} className="h-24 max-w-48 rounded-md border border-border object-cover" />
         </a>
       ) : (
-        <a key={a.url} href={a.url} target="_blank" rel="noreferrer" className="flex items-center gap-1 rounded-md border border-border bg-surface px-2 py-1 text-xs text-primary hover:underline">
-          <FileText className="h-4 w-4" /> {a.name} <span className="text-text-muted">({Math.ceil(a.size / 1024)}KB)</span>
+        <a key={a.url} href={a.url} target="_blank" rel="noreferrer" className="flex max-w-full items-center gap-1 rounded-md border border-border bg-surface px-2 py-1 text-xs text-primary hover:underline">
+          <FileText className="h-4 w-4 shrink-0" />
+          <span className="wrap-anywhere">{a.name}</span>
+          <span className="shrink-0 text-text-muted">({Math.ceil(a.size / 1024)}KB)</span>
         </a>
       ))}
     </div>
