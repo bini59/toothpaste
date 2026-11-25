@@ -148,12 +148,71 @@ class NotionMembershipTest(NotionDashboard):
         self.assertEqual(pipeline.find_ticket(self.con, notion_tickets.ticket_key(uid(101)))["project_gid"], "notion:other")
         self.parent["properties"]["프로젝트"] = relation(uid(301))
         del self.fixture.props["업무 코드"]
+        self.save(self.cfg, "fallback")
         tickets = self.preview(cfg, pid="toothpaste")
         self.assertEqual([(r["title"], r["stage"]) for r in tickets], [("TP-17 로그인 오류", "queued")])
+        self.assertEqual(self.preview(self.cfg, pid="fallback"), [])
         errors = pipeline.sync(log=lambda *_: None)["notion_errors"]
         self.assertEqual(set(errors), {"other"})
         self.assertEqual(set(self.stages()), {"TP-17 로그인 오류"})
         self.assertEqual(pipeline.find_ticket(self.con, notion_tickets.ticket_key(uid(101)))["project_gid"], "notion:toothpaste")
+
+    def test_deleted_peer_project_column_holds_only_unresolved_tickets(self):
+        cfg = {**self.cfg, **self.external, **self.text_rule}
+        other = {**self.cfg, **self.external, "project_page_id": uid(302), "project_property": "other-project"}
+        self.fixture.props["다른 프로젝트"] = {**self.fixture.props["프로젝트"], "id": "other-project"}
+        self.parent["properties"]["다른 프로젝트"] = relation(uid(302))
+        board = self.fixture.pages[TEAM_DB][3]
+        board["properties"]["업무 코드"] = self.parent["properties"]["업무 코드"]
+        self.save(other, "other")
+        self.save(cfg, "toothpaste")
+        pipeline.sync(log=lambda *_: None)
+        self.assertEqual(pipeline.find_ticket(self.con, notion_tickets.ticket_key(uid(101)))["project_gid"], "notion:other")
+        self.assertEqual(self.stages(), {"TP-17 로그인 오류": "queued", "팀 보드": "queued"})
+
+        column = self.fixture.props.pop("다른 프로젝트")
+        del self.parent["properties"]["다른 프로젝트"]
+        self.parent["properties"]["프로젝트"] = relation(uid(301))
+        new = page(901, "새 텍스트 작업", [OWNER], ["tp"], "할 일")
+        new["properties"]["업무 코드"] = board["properties"]["업무 코드"]
+        self.fixture.pages[TEAM_DB].append(new)
+
+        tickets = self.preview(cfg, pid="toothpaste")
+        self.assertEqual([(r["title"], r["auto_start"]) for r in tickets], [("TP-17 로그인 오류", True)])
+        status, error, _ = self.call("preview", {"project_id": "other", "notion": other, "repos": ["app"]})
+        self.assertEqual(status, 400)
+        self.assertIn("프로젝트 관계 열", error["error"])
+        self.assertEqual(set(pipeline.sync(log=lambda *_: None)["notion_errors"]), {"other"})
+        owners = dict(self.con.execute("SELECT name, project_gid FROM tickets WHERE assigned=1"))
+        self.assertEqual(owners, {"TP-17 로그인 오류": "notion:toothpaste", "팀 보드": "notion:toothpaste"})
+        starts = [s.splitlines()[0] for s in self.dispatch_log() if "would create" in s]
+        self.assertEqual(starts, [f"--- would create app/{notion_tickets.ticket_key(uid(101)).lower()}"])
+
+        self.fixture.props["다른 프로젝트"] = column
+        self.assert_imports(cfg, ["TP-17 로그인 오류", "팀 보드", "새 텍스트 작업"])
+        self.assertEqual(sum("would create" in s for s in self.dispatch_log()), 3)
+
+    def test_retargeted_peer_parent_allows_direct_links_and_holds_fallback(self):
+        cfg = {**self.cfg, **self.external, "parent_property": "parent"}
+        other = {**self.cfg, "parent_property": "other-parent", **self.text_rule}
+        self.fixture.props["다른 상위 항목"] = {"id": "other-parent", "type": "relation",
+                                            "relation": {"data_source_id": TEAM_DB}}
+        self.save(cfg, "toothpaste")
+        self.save(other, "other")
+        self.save(self.cfg, "fallback")
+        self.parent["properties"]["프로젝트"] = relation(uid(301))
+        child = self.fixture.pages[TEAM_DB][3]
+        child["properties"]["상위 항목"] = relation(uid(101))
+        self.fixture.pages[TEAM_DB].append(page(901, "소속 미확정", [OWNER], ["tp"], "할 일"))
+        self.fixture.props["다른 상위 항목"]["relation"]["data_source_id"] = DOCS_DB
+
+        tickets = self.preview(cfg, pid="toothpaste")
+        self.assertEqual({r["title"] for r in tickets if r["auto_start"]}, {"TP-17 로그인 오류", "팀 보드"})
+        self.assertEqual(self.preview(self.cfg, pid="fallback"), [])
+        errors = pipeline.sync(log=lambda *_: None)["notion_errors"]
+        self.assertEqual(set(errors), {"other"})
+        self.assertIn("상위 항목 관계 열", errors["other"])
+        self.assertEqual(self.stages(), {"TP-17 로그인 오류": "queued", "팀 보드": "queued"})
 
     def test_same_source_project_row_and_parent_cycles(self):
         cfg = {**self.cfg, "project_data_source_id": TEAM_DB, "project_page_id": uid(103), "parent_property": "parent"}

@@ -1,13 +1,12 @@
 """Resolve project ownership within a shared Notion task data source."""
 from __future__ import annotations
 
-from functools import cached_property
-
 from . import notion
 
 FIELDS = {"parent_property", "contains_property", "contains_text", "project_data_source_id", "project_page_id",
           "project_property"}
 TEXT_TYPES = ("title", "rich_text", "formula", "unique_id")
+UNRESOLVED = object()
 
 
 def validate(cfg):
@@ -22,14 +21,15 @@ def validate(cfg):
         raise notion.NotionError("상위 항목 열과 프로젝트 관계 열을 각각 골라 주세요")
 
 
-def relation_column(schema, cfg, role):
+def relation_column(schema, cfg, role, *, strict=True):
     if prop := cfg.get(f"{role}_property"):
         target = cfg["data_source_id"] if role == "parent" else cfg.get("project_data_source_id")
         col = schema.get(prop)
-        if not col or col["type"] != "relation" or col["data_source_id"] != target:
+        if col and col["type"] == "relation" and col["data_source_id"] == target:
+            return col
+        if strict:
             label = "상위 항목" if role == "parent" else "프로젝트"
             raise notion.NotionError(f"{label} 관계 열과 연결 대상 DB를 다시 확인하세요")
-        return col
 
 
 def readable_text(prop):
@@ -56,36 +56,27 @@ def settings(projects, source):
 
 
 class Rule:
-    def __init__(self, schema, cfg):
-        self.schema, self.cfg = schema, cfg
+    def __init__(self, schema, cfg, *, strict):
+        self.parent = relation_column(schema, cfg, "parent", strict=strict)
+        self.project = relation_column(schema, cfg, "project", strict=strict)
         self.row = cfg.get("project_page_id")
         self.parent_row = self.row if cfg.get("project_data_source_id") == cfg["data_source_id"] else None
         self.needle = cfg.get("contains_text")
         col = schema.get(cfg.get("contains_property"))
         self.text = col["name"] if col and col["type"] in TEXT_TYPES else None
-
-    def validate_columns(self):
-        for role in ("parent", "project"):
-            relation_column(self.schema, self.cfg, role)
-        if self.needle and not self.text:
+        if strict and self.needle and not self.text:
             raise notion.NotionError("문자열을 검사할 Notion 열이 바뀌었어요. 다시 골라 주세요")
-
-    @cached_property
-    def parent(self):
-        return relation_column(self.schema, self.cfg, "parent")
-
-    @cached_property
-    def project(self):
-        return relation_column(self.schema, self.cfg, "project")
+        self.missing = {role for role, column in (("parent", self.parent), ("project", self.project), ("contains", self.text))
+                        if cfg.get(f"{role}_property") and not column}
 
 
 class Membership:
     def __init__(self, client, source, schema, settings, project_id):
         self.client, self.source = client, source
-        self.rules = {pid: Rule(schema, {**cfg, "data_source_id": source}) for pid, cfg in settings.items()}
-        if own := self.rules.get(project_id):
-            # Report this project's stale settings even if its import filters return no rows.
-            own.validate_columns()
+        # Report this project's stale settings even if its import filters return no rows.
+        self.rules = {pid: Rule(schema, {**cfg, "data_source_id": source}, strict=pid == project_id)
+                      for pid, cfg in settings.items()}
+        self.missing = set().union(*(rule.missing for rule in self.rules.values()))
         self.scoped = any(rule.row or rule.needle for rule in self.rules.values())
         self.parent_pages = {}
         self.relations = {}
@@ -99,12 +90,13 @@ class Membership:
         return self.relations[key]
 
     def resolve(self, page):
-        """Return eligible projects (None for unscoped defaults) and ancestors used in the decision."""
+        """Return owners and ancestors. None permits unscoped defaults. UNRESOLVED holds the page."""
         if not self.scoped:
             return None, []
         root = page["id"]
         level, seen, levels = {root: page}, {root}, []
-        while level:
+        incomplete_level = False
+        while level or incomplete_level:
             levels.append(level)
             linked, has_link = set(), False
             for page_id, current in level.items():
@@ -118,9 +110,13 @@ class Membership:
                             linked.add(pid)
             if has_link:
                 return linked, sorted(seen - {root})
+            # A known link at this level wins. An unreadable link here could outrank any deeper match.
+            if "project" in self.missing or incomplete_level:
+                return UNRESOLVED, []
             # The parent may belong to a peer that only defines a project row or a text rule.
             parents = {parent for current in level.values() for rule in self.rules.values()
                        for parent in self.links(current, rule.parent)}
+            incomplete_level = "parent" in self.missing
             level = {}
             for parent in parents - seen:
                 if parent not in self.parent_pages:
@@ -135,4 +131,6 @@ class Membership:
                 rule.needle in readable_text(current["properties"].get(rule.text, {})) for current in level.values())}
             if matches:
                 return matches, ancestors
+            if "contains" in self.missing:
+                return UNRESOLVED, []
         return None, ancestors
