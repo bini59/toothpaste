@@ -4,13 +4,14 @@ from __future__ import annotations
 import hashlib
 import json
 import shlex
+from dataclasses import dataclass, field
 
-from . import notion
+from . import notion, notion_membership
 from .core import ROOT, effective_config, event, meta_get, meta_set, read_config
 
 FILTER_TYPES = {"people": ("people",), "tag": ("select", "multi_select"), "status": ("status", "select")}
 FIELDS = {"connection_id", "data_source_id", "assignee", "people_property", "tag_property", "tag_option",
-          "status_property", "status_option", "date_property"}
+          "status_property", "status_option", "date_property"} | notion_membership.FIELDS
 # Stages of an actual Notion run. Filter membership and the pre-dispatch queue are read-only.
 WRITE_STAGES = {"dispatched", "in_progress", "blocked", "agent_done", "pr_open", "rework", "conflict",
                 "reviewed", "approving", "staged", "merged", "deploying", "closed", "done"}
@@ -40,6 +41,7 @@ def validate(cfg):
     for role in ("tag", "status"):
         if cfg.get(f"{role}_option") and not cfg.get(f"{role}_property"):
             raise notion.NotionError("선택한 값에 해당하는 열을 골라 주세요")
+    notion_membership.validate(cfg)
     stages = cfg.get("stage_statuses", {})
     if (not isinstance(stages, dict) or stages.keys() - WRITE_STAGES
             or any(not isinstance(v, str) or not v for v in stages.values())
@@ -110,7 +112,7 @@ def _page_fields(page, cfg, schema, work_tag=None):
         col = column(schema, cfg, role)
         return props.get(col["name"], {}) if col else {}
 
-    title = next((notion.plain(p["title"]) for p in props.values() if p["type"] == "title"), "")
+    title = notion.page_title(page)
     tags = _options(prop("tag"))
     notes = [f"{k}: {notion.plain(p['rich_text'])}" for k, p in props.items() if p["type"] == "rich_text" and p["rich_text"]]
     fields = {"name": title or "제목 없음", "due_on": (prop("date").get("date") or {}).get("start"),
@@ -121,26 +123,50 @@ def _page_fields(page, cfg, schema, work_tag=None):
     return fields
 
 
-def matches(con, project, work_tag):
+@dataclass
+class Listing:
+    rows: dict[str, dict] = field(default_factory=dict)
+    unresolved: set[str] = field(default_factory=set)
+    error: str | None = None
+
+
+def matches(con, project, work_tag, rules):
     cfg = project["notion"]
     validate(cfg)
-    pages, schema = _query(notion.Client(con, cfg["connection_id"]), cfg)
-    found = {}
+    client = notion.Client(con, cfg["connection_id"])
+    pages, schema = _query(client, cfg)
+    membership = notion_membership.Membership(client, cfg["data_source_id"], schema, rules, project["id"])
+    if cfg.get("project_page_id"):
+        client.page(cfg["project_page_id"], cfg["project_data_source_id"])
+    listing = Listing()
     for page in pages:
-        if page["object"] != "page" or page.get("in_trash") or page.get("is_archived") or page.get("archived"):
+        if not notion.active_page(page):
             continue
         page_id = page["id"]
         if not notion.valid_id(page_id):
             raise notion.NotionError("Notion 페이지 ID를 확인할 수 없어요")
         gid = f"notion:{page_id}"
-        found[gid] = {**_page_fields(page, cfg, schema, work_tag), "gid": gid, "key": ticket_key(page_id),
-                      "project_gid": f"notion:{project['id']}", "project_name": project["name"]}
-    return found
+        owners, ancestors = membership.resolve(page)
+        if owners is notion_membership.UNRESOLVED:
+            listing.unresolved.add(gid)
+            continue
+        if owners is None:
+            if cfg.get("project_page_id") or cfg.get("contains_property"):
+                continue
+        elif project["id"] not in owners:
+            continue
+        listing.rows[gid] = {**_page_fields(page, cfg, schema, work_tag), "gid": gid, "key": ticket_key(page_id),
+                             "project_gid": f"notion:{project['id']}", "project_name": project["name"],
+                             "ancestors": [f"notion:{i}" for i in ancestors], "owners": owners}
+    return listing
 
 
-def _version(project, work_tag):
+def _version(project, work_tag, rules):
     cfg = {k: v for k, v in project["notion"].items() if k != "stage_statuses"}
-    data = json.dumps([cfg, work_tag], sort_keys=True).encode()
+    inputs = [cfg, work_tag]
+    if peers := {k: v for k, v in rules.items() if k != project["id"]}:
+        inputs.append(peers)
+    data = json.dumps(inputs, sort_keys=True).encode()
     return hashlib.sha256(data).hexdigest()
 
 
@@ -158,7 +184,12 @@ def page_edited(con, gid, page, source, schema):
     if not con.in_transaction:
         con.execute("BEGIN IMMEDIATE")
     snapshot = meta_get(con, SYNC_STATE, {})
-    snapshot.setdefault("edited", {})[gid] = meta_get(con, "notion_sync_generation", 0)
+    generation = meta_get(con, "notion_sync_generation", 0)
+    edited = snapshot.setdefault("edited", {})
+    edited[gid] = generation
+    for child, ancestors in snapshot.get("ancestors", {}).items():
+        if gid in ancestors:
+            edited[child] = generation
     meta_set(con, SYNC_STATE, snapshot)
     if (not page or page.get("id") != gid.removeprefix("notion:") or not page.get("properties")
             or not page.get("url") or not page.get("last_edited_time")):
@@ -172,15 +203,18 @@ def page_edited(con, gid, page, source, schema):
                     {**fields, "gid": gid})
 
 
-def fetch(con, projects, work_tag):
+def fetch(con, projects, work_tag, *, through=None):
     """Finish each remote listing before taking the sync writer lock. Keep only complete project results."""
     listings = {}
     for p in projects:
-        key = (p["id"], _version(p, work_tag))
+        rules = notion_membership.settings(projects, p["notion"]["data_source_id"])
+        key = (p["id"], _version(p, work_tag, rules))
         try:
-            listings[key] = matches(con, p, work_tag), None
+            listings[key] = matches(con, p, work_tag, rules)
         except (RuntimeError, OSError, ValueError, KeyError, TypeError) as e:
-            listings[key] = {}, str(e)
+            listings[key] = Listing(error=str(e))
+        if p is through:
+            break
     return listings
 
 
@@ -192,40 +226,51 @@ def _run_owners(con):
 
 
 def _batches(con, projects, work_tag, listings, run_owners):
-    # A page has one owner, the first matching configured project. A failed query only reserves pages
-    # previously confirmed under the same settings. A concurrent edit invalidates the in-flight listing.
-    current, confirmed_sources = [], {}
+    # A page has one owner, the first matching configured project. Keep previous ownership on a failed
+    # listing, or just for its unresolved pages, when the settings still match.
+    current, confirmed_sources, confirmed_owners = [], {}, {}
     for p in projects:
-        version = _version(p, work_tag)
-        rows, error = listings.get((p["id"], version), ({}, "조회 중 설정이 바뀌었어요. 다음 동기화에서 다시 읽어요"))
-        if rows:
-            confirmed_sources.update(dict.fromkeys(rows, p["notion"]["data_source_id"]))
-        current.append((p, version, rows, error))
+        rules = notion_membership.settings(projects, p["notion"]["data_source_id"])
+        version = _version(p, work_tag, rules)
+        listing = listings.get((p["id"], version), Listing(error="조회 중 설정이 바뀌었어요. 다음 동기화에서 다시 읽어요"))
+        confirmed_sources.update(dict.fromkeys(listing.rows, p["notion"]["data_source_id"]))
+        for gid, row in listing.rows.items():
+            if row["owners"] is not None:
+                confirmed_owners.setdefault(gid, set()).update(row["owners"])
+        current.append((p, version, listing))
     previous = meta_get(con, SYNC_STATE, {}).get("projects", {})
     claimed = set()
-    for p, version, rows, error in current:
+    for p, version, listing in current:
         pid = p["id"]
-        gids = rows.keys()
-        if error and previous.get(pid, {}).get("version") == version:
-            # A successful listing from another database confirms the page has moved there.
+        gids = set(listing.rows)
+        if (listing.error or listing.unresolved) and previous.get(pid, {}).get("version") == version:
+            held = {gid for gid, in con.execute("SELECT gid FROM tickets WHERE project_gid=? AND assigned=1",
+                                                (f"notion:{pid}",))}
+            if not listing.error:
+                held &= listing.unresolved
+            # A successful listing can confirm a move to another DB or an explicit owner in this DB.
             source = p["notion"]["data_source_id"]
-            gids = {r[0] for r in con.execute("SELECT gid FROM tickets WHERE project_gid=? AND assigned=1",
-                                              (f"notion:{pid}",)) if confirmed_sources.get(r[0], source) == source}
+            gids.update(gid for gid in held if confirmed_sources.get(gid, source) == source
+                        and (gid not in confirmed_owners or pid in confirmed_owners[gid]))
         owned = {gid for gid in gids - claimed if gid not in run_owners or run_owners[gid] == f"notion:{pid}"}
         claimed.update(owned)
-        yield p, version, rows, owned, error
+        yield p, version, listing, owned
 
 
 def _dispatch_source(con, project_gid, gid):
     doc = effective_config(read_config(con))
     pid = project_gid.removeprefix("notion:")
-    project = next((p for p in doc["project_map"]["projects"] if p["id"] == pid and p["source"] == "notion"), None)
+    projects = [p for p in doc["project_map"]["projects"] if p["source"] == "notion"]
+    project = next((p for p in projects if p["id"] == pid), None)
     snapshot = meta_get(con, SYNC_STATE, {})
     if gid in snapshot.get("edited", {}):
         raise notion.NotionError("수정한 페이지의 가져오기 조건을 다음 동기화에서 확인한 뒤 작업을 시작해요")
     state = snapshot.get("projects", {}).get(pid, {})
-    if not project or not state.get("ready") or state["version"] != _version(project, doc["settings"]["asana_tag"]):
+    rules = notion_membership.settings(projects, project["notion"]["data_source_id"]) if project else {}
+    if not project or not state.get("ready") or state["version"] != _version(project, doc["settings"]["asana_tag"], rules):
         raise notion.NotionError("현재 프로젝트 조건으로 동기화한 뒤 작업을 시작해요")
+    if gid in state.get("unresolved", []):
+        raise notion.NotionError("공유 작업 DB의 프로젝트 소속을 확인한 뒤 작업을 시작해요")
     return project["notion"]["connection_id"], state["version"]
 
 
@@ -260,21 +305,33 @@ def sync(con, generation, listings, ts, new_tagged):
     if snapshot.get("generation", 0) >= generation:
         return {}  # a more recent dashboard refresh or tick already applied its results
     edited = {gid: gen for gid, gen in snapshot.get("edited", {}).items() if gen >= generation}
+    ancestors = snapshot.get("ancestors", {})
     previous = con.execute("SELECT gid FROM tickets WHERE gid LIKE 'notion:%' AND assigned=1").fetchall()
     doc = effective_config(read_config(con))
     projects = [p for p in doc["project_map"]["projects"] if p["source"] == "notion"]
     seen, errors, state = set(edited), {}, {}
     run_owners = _run_owners(con)
-    for p, version, rows, owned, error in _batches(con, projects, doc["settings"]["asana_tag"], listings, run_owners):
-        state[p["id"]] = {"version": version, "ready": not error}
+    for p, version, listing, owned in _batches(con, projects, doc["settings"]["asana_tag"], listings, run_owners):
+        state[p["id"]] = {"version": version, "ready": not listing.error}
+        if held := owned & listing.unresolved:
+            state[p["id"]]["unresolved"] = sorted(held)
         seen.update(owned)
-        if error:
-            errors[p["id"]] = error
-            event(con, "error", f"Notion 동기화 ({p['name']}): {error}")
+        if listing.error:
+            errors[p["id"]] = listing.error
+            event(con, "error", f"Notion 동기화 ({p['name']}): {listing.error}")
             continue
-        for gid, row in rows.items():
-            if gid not in owned or gid in edited:
+        for gid, row in listing.rows.items():
+            if gid not in owned:
                 continue
+            # The first listing of a new dependency may already have been overtaken by a parent edit.
+            if changed := [edited[parent] for parent in row["ancestors"] if parent in edited]:
+                edited[gid] = max(max(changed), edited.get(gid, 0))
+            if gid in edited:
+                continue
+            if row["ancestors"]:
+                ancestors[gid] = row["ancestors"]
+            else:
+                ancestors.pop(gid, None)
             old = con.execute("SELECT * FROM tickets WHERE gid=?", (gid,)).fetchone()
             already_tagged = old and (old["completed"] or (old["assigned"] and old["has_tag"]))
             if row["has_tag"] and gid not in run_owners and not already_tagged:
@@ -289,7 +346,8 @@ def sync(con, generation, listings, ts, new_tagged):
                              last_seen=excluded.last_seen,repo_override=excluded.repo_override,due_on=excluded.due_on""",
                         {**row, "repo_override": _repo_override(old, row["project_gid"], doc["project_map"]["repos"]),
                          "project_name": p["name"], "ts": ts})
-    meta_set(con, SYNC_STATE, {"generation": generation, "projects": state, "edited": edited})
+    meta_set(con, SYNC_STATE, {"generation": generation, "projects": state, "edited": edited,
+                               "ancestors": {gid: parents for gid, parents in ancestors.items() if gid in seen}})
     con.executemany("UPDATE tickets SET assigned=0 WHERE gid=?", [(r[0],) for r in previous if r[0] not in seen])
     return errors
 
@@ -298,23 +356,24 @@ def preview(con, projects, project, work_tag):
     from .pipeline import compute_stage
     cfg = project["notion"]
     validate(cfg)
-    # Earlier projects can claim pages only from this same data source.
+    # All rules on the same source determine membership. Only earlier projects break ties.
     relevant = []
     for p in projects:
         if p["id"] == project["id"]:
-            break
-        if p["source"] == "notion" and p["notion"]["data_source_id"] == cfg["data_source_id"]:
+            relevant.append(project)
+        elif p["source"] == "notion" and p["notion"]["data_source_id"] == cfg["data_source_id"]:
             relevant.append(p)
-    relevant.append(project)
-    listings = fetch(con, relevant, work_tag)
-    for p, _, rows, owned, error in _batches(con, relevant, work_tag, listings, _run_owners(con)):
+    if project not in relevant:
+        relevant.append(project)
+    listings = fetch(con, relevant, work_tag, through=project)
+    for p, _, listing, owned in _batches(con, relevant, work_tag, listings, _run_owners(con)):
         if p is not project:
             continue
-        if error:
-            raise notion.NotionError(error)
+        if listing.error:
+            raise notion.NotionError(listing.error)
         items = []
         registered = {r[0] for r in con.execute("SELECT name FROM repos")}
-        for gid, row in rows.items():
+        for gid, row in listing.rows.items():
             old = con.execute("SELECT * FROM tickets WHERE gid=?", (gid,)).fetchone()
             ticket = {"completed": 0, "skip": 0, "open_deps": 0, **(dict(old) if old else {}), **row,
                       "repo_override": _repo_override(old, row["project_gid"], registered), "assigned": 1}

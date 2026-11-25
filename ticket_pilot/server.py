@@ -1057,12 +1057,14 @@ class H(BaseHTTPRequestHandler):
                     raise notion.NotionError("프로젝트 레포 목록을 확인하세요")
                 draft = {"id": body.get("project_id"), "name": "", "notion": body.get("notion"), "repos": repos}
                 result = notion_tickets.preview(con, project_map()["projects"], draft, settings()["asana_tag"])
-            elif action in ("sources", "people", "properties"):
+            elif action in ("sources", "people", "properties", "rows"):
                 client = notion.Client(con, body.get("connection_id"))
                 if action == "sources":
                     result = client.sources()
                 elif action == "people":
                     result = client.people()
+                elif action == "rows":
+                    result = client.rows(body.get("data_source_id"))
                 else:
                     result = client.properties(body.get("data_source_id"))
             else:
