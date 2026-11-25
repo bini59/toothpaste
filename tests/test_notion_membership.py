@@ -144,12 +144,16 @@ class NotionMembershipTest(NotionDashboard):
         cfg = {**self.cfg, **self.external}
         self.save(other, "other")
         self.save(cfg, "toothpaste")
+        pipeline.sync(log=lambda *_: None)
+        self.assertEqual(pipeline.find_ticket(self.con, notion_tickets.ticket_key(uid(101)))["project_gid"], "notion:other")
         self.parent["properties"]["프로젝트"] = relation(uid(301))
         del self.fixture.props["업무 코드"]
-        self.assertEqual([r["title"] for r in self.preview(cfg, pid="toothpaste")], ["TP-17 로그인 오류"])
+        tickets = self.preview(cfg, pid="toothpaste")
+        self.assertEqual([(r["title"], r["stage"]) for r in tickets], [("TP-17 로그인 오류", "queued")])
         errors = pipeline.sync(log=lambda *_: None)["notion_errors"]
         self.assertEqual(set(errors), {"other"})
         self.assertEqual(set(self.stages()), {"TP-17 로그인 오류"})
+        self.assertEqual(pipeline.find_ticket(self.con, notion_tickets.ticket_key(uid(101)))["project_gid"], "notion:toothpaste")
 
     def test_same_source_project_row_and_parent_cycles(self):
         cfg = {**self.cfg, "project_data_source_id": TEAM_DB, "project_page_id": uid(103), "parent_property": "parent"}

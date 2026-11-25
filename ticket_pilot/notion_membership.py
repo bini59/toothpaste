@@ -82,12 +82,10 @@ class Rule:
 class Membership:
     def __init__(self, client, source, schema, settings, project_id):
         self.client, self.source = client, source
-        self.project_id = project_id
         self.rules = {pid: Rule(schema, {**cfg, "data_source_id": source}) for pid, cfg in settings.items()}
-        self.own = self.rules.get(project_id)
-        if self.own:
+        if own := self.rules.get(project_id):
             # Report this project's stale settings even if its import filters return no rows.
-            self.own.validate_columns()
+            own.validate_columns()
         self.scoped = any(rule.row or rule.needle for rule in self.rules.values())
         self.parent_pages = {}
         self.relations = {}
@@ -101,9 +99,9 @@ class Membership:
         return self.relations[key]
 
     def resolve(self, page):
-        """Return membership and the ancestor IDs that must stay fresh for this decision."""
+        """Return eligible projects (None for unscoped defaults) and ancestors used in the decision."""
         if not self.scoped:
-            return True, []
+            return None, []
         root = page["id"]
         level, seen, levels = {root: page}, {root}, []
         while level:
@@ -119,7 +117,7 @@ class Membership:
                         if rule.row in rows:
                             linked.add(pid)
             if has_link:
-                return self.project_id in linked, sorted(seen - {root})
+                return linked, sorted(seen - {root})
             # The parent may belong to a peer that only defines a project row or a text rule.
             parents = {parent for current in level.values() for rule in self.rules.values()
                        for parent in self.links(current, rule.parent)}
@@ -131,12 +129,10 @@ class Membership:
             seen.update(level)
 
         ancestors = sorted(seen - {root})
-        if self.own and self.own.row and not self.own.needle:
-            return False, ancestors
         # Resolve the topmost parent's text before falling back to its descendants' text.
         for level in reversed(levels):
             matches = {pid for pid, rule in self.rules.items() if rule.text and any(
                 rule.needle in readable_text(current["properties"].get(rule.text, {})) for current in level.values())}
             if matches:
-                return self.project_id in matches, ancestors
-        return not (self.own and (self.own.row or self.own.needle)), ancestors
+                return matches, ancestors
+        return None, ancestors

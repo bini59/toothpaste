@@ -137,13 +137,16 @@ def matches(con, project, work_tag, rules):
         page_id = page["id"]
         if not notion.valid_id(page_id):
             raise notion.NotionError("Notion 페이지 ID를 확인할 수 없어요")
-        belongs, ancestors = membership.resolve(page)
-        if not belongs:
+        owners, ancestors = membership.resolve(page)
+        if owners is None:
+            if cfg.get("project_page_id") or cfg.get("contains_property"):
+                continue
+        elif project["id"] not in owners:
             continue
         gid = f"notion:{page_id}"
         found[gid] = {**_page_fields(page, cfg, schema, work_tag), "gid": gid, "key": ticket_key(page_id),
                       "project_gid": f"notion:{project['id']}", "project_name": project["name"],
-                      "ancestors": [f"notion:{i}" for i in ancestors]}
+                      "ancestors": [f"notion:{i}" for i in ancestors], "owners": owners}
     return found
 
 
@@ -214,13 +217,16 @@ def _run_owners(con):
 def _batches(con, projects, work_tag, listings, run_owners):
     # A page has one owner, the first matching configured project. A failed query only reserves pages
     # previously confirmed under the same settings. A concurrent edit invalidates the in-flight listing.
-    current, confirmed_sources = [], {}
+    current, confirmed_sources, confirmed_owners = [], {}, {}
     for p in projects:
         rules = notion_membership.settings(projects, p["notion"]["data_source_id"])
         version = _version(p, work_tag, rules)
         rows, error = listings.get((p["id"], version), ({}, "조회 중 설정이 바뀌었어요. 다음 동기화에서 다시 읽어요"))
         if rows:
             confirmed_sources.update(dict.fromkeys(rows, p["notion"]["data_source_id"]))
+            for gid, row in rows.items():
+                if row["owners"] is not None:
+                    confirmed_owners.setdefault(gid, set()).update(row["owners"])
         current.append((p, version, rows, error))
     previous = meta_get(con, SYNC_STATE, {}).get("projects", {})
     claimed = set()
@@ -228,10 +234,11 @@ def _batches(con, projects, work_tag, listings, run_owners):
         pid = p["id"]
         gids = rows.keys()
         if error and previous.get(pid, {}).get("version") == version:
-            # A successful listing from another database confirms the page has moved there.
+            # A successful listing can confirm a move to another DB or an explicit owner in this DB.
             source = p["notion"]["data_source_id"]
             gids = {r[0] for r in con.execute("SELECT gid FROM tickets WHERE project_gid=? AND assigned=1",
-                                              (f"notion:{pid}",)) if confirmed_sources.get(r[0], source) == source}
+                                              (f"notion:{pid}",)) if confirmed_sources.get(r[0], source) == source
+                    and (r[0] not in confirmed_owners or pid in confirmed_owners[r[0]])}
         owned = {gid for gid in gids - claimed if gid not in run_owners or run_owners[gid] == f"notion:{pid}"}
         claimed.update(owned)
         yield p, version, rows, owned, error
