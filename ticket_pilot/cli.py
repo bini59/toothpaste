@@ -13,6 +13,7 @@ import threading
 import time
 import traceback
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from . import asana_write as AW
 from . import cleanup as C
@@ -397,6 +398,10 @@ def main(argv=None):
     at = sp.add_parser("attach", help="print how to resume a ticket's agent session by hand")
     at.add_argument("ticket")
     at.set_defaults(fn=cmd_attach)
+    chat = sp.add_parser("chat", help="프로젝트 채팅")
+    attach = chat.add_subparsers(dest="op", required=True).add_parser("attach", help="현재 답변에 파일 첨부")
+    attach.add_argument("paths", nargs="+", type=Path, metavar="PATH")
+    attach.set_defaults(fn=lambda a: print(f"답변에 파일 {CH.attach(a.paths)}개를 첨부했어요"))
     cl = sp.add_parser("cleanup", help="remove ticket worktrees whose change is live in production")
     cl.add_argument("--dry-run", action="store_true", help="check only, remove nothing")
     cl.set_defaults(fn=_log_errors(lambda a: C.cleanup_scan(dry_run=a.dry_run)))

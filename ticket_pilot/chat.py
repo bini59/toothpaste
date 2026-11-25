@@ -7,9 +7,9 @@ The reply is the agent's final message (runner.last_message), read when the proc
 polls messages(), which finalizes finished turns. One running turn per conversation. The tick also finalizes
 turns and summarizes idle Claude sessions so the next turn can start fresh with the summary.
 
-Attachments (TP-72): files sent with a message are stored in data/chat-uploads/<conversation>/ (outside every repo
-checkout) and listed in chat_messages.attachments; the agent gets their absolute paths at the end of the message
-(claude reads them with Read; codex also gets the images with --image). Deleting the conversation deletes them.
+User and assistant attachments live in data/chat-uploads/<conversation>/ and are listed in chat_messages.attachments.
+The agent gets the user's files as paths (codex also gets images with --image) and adds its own via tp chat attach.
+Deleting the conversation deletes both.
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import uuid
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
@@ -205,46 +206,99 @@ def _dir(ident: str):
     return UPLOADS / ident
 
 
-def _save(ident: str, files: list) -> list[dict]:
-    """Validates every file first (name, size, base64), then writes them; returns the attachment list.
-    Stored as <8 hex>-<name> so two pastes named image.png do not collide."""
-    if not isinstance(files, list) or len(files) > MAX_FILES:
-        raise SystemExit(f"첨부는 한 번에 {MAX_FILES}개까지 보낼 수 있어요")
+def _check_file_count(files: list, existing: int = 0) -> None:
+    if not isinstance(files, list) or existing + len(files) > MAX_FILES:
+        raise SystemExit(f"첨부는 메시지 하나에 {MAX_FILES}개까지 보낼 수 있어요")
+
+
+def _prepare_files(files: list) -> list[tuple[str, bytes]]:
+    """Validate browser uploads (base64 objects) or CLI paths before taking the database write lock."""
+    _check_file_count(files)
     todo = []
     for f in files:
-        name = f.get("name") if isinstance(f, dict) else None
+        if isinstance(f, Path):
+            name = f.name
+        else:
+            name = f.get("name") if isinstance(f, dict) else None
         name = name.strip() if isinstance(name, str) else ""
         if not name or name.startswith(".") or len(name) > 120 or _BAD_NAME.search(name):
             raise SystemExit(f"잘못된 파일 이름이에요: {str(name)[:120]!r} (/ \\ : * ? \" < > | 와 제어 문자, "
                              "점으로 시작하는 이름은 쓸 수 없어요)")
         try:
-            data = base64.b64decode(f.get("data") or "", validate=True)
-        except (binascii.Error, ValueError, TypeError):
+            if isinstance(f, Path):
+                if not f.is_file():
+                    raise SystemExit(f"{f}: 첨부할 일반 파일을 찾을 수 없어요")
+                with f.open("rb") as src:
+                    data = src.read(MAX_FILE + 1)
+            else:
+                data = base64.b64decode(f.get("data") or "", validate=True)
+        except (binascii.Error, OSError, ValueError, TypeError):
             raise SystemExit(f"{name}: 파일 내용을 읽지 못했어요") from None
         if len(data) > MAX_FILE:
-            raise SystemExit(f"{name}: 파일이 너무 커요 ({len(data) / 1048576:.1f}MB, 파일당 {MAX_FILE // 1048576}MB까지)")
+            raise SystemExit(f"{name}: 파일이 너무 커요 (파일당 {MAX_FILE // 1048576}MB까지)")
         todo.append((name, data))
+    return todo
+
+
+@contextmanager
+def _attachment_transaction(con):
+    """Serialize message changes with delete/finalize and keep newly written files only if the commit succeeds."""
+    with ExitStack() as rollback:
+        with con:
+            con.execute("BEGIN IMMEDIATE")
+            yield rollback
+        rollback.pop_all()
+
+
+def _save(ident: str, files: list[tuple[str, bytes]], rollback: ExitStack) -> list[dict]:
+    if not files:
+        return []
     d = _dir(ident)
+    if d.is_symlink():
+        raise SystemExit("잘못된 대화 첨부 폴더예요")
     d.mkdir(parents=True, exist_ok=True)
     out = []
-    for name, data in todo:
+    for name, data in files:
         stored = f"{uuid.uuid4().hex[:8]}-{name.replace(',', '_')}"  # codex splits --image values on commas
-        (d / stored).write_bytes(data)
+        path = d / stored
+        with path.open("xb") as dest:
+            rollback.callback(path.unlink, missing_ok=True)
+            dest.write(data)
         out.append({"name": name, "file": stored, "size": len(data),
                     "type": mimetypes.guess_type(name)[0] or "application/octet-stream"})
     return out
 
 
+def attach(paths: list[Path]) -> int:
+    """Append local files to the running assistant message that launched this command."""
+    ident = os.environ.get("TP_CHAT_ID")
+    turn = os.environ.get("TP_CHAT_TURN_ID")
+    if not ident or not turn:
+        raise SystemExit("프로젝트 채팅에서 답변을 작성하는 중에만 첨부할 수 있어요")
+    files = _prepare_files(paths)
+    con = db()
+    with _attachment_transaction(con) as rollback:
+        row = con.execute("""SELECT attachments, handle FROM chat_messages WHERE conversation_id=? AND id=?
+                             AND role='assistant' AND text IS NULL""", (ident, turn)).fetchone()
+        if not row or (row["handle"] and not R.running(row["handle"])):
+            raise SystemExit("첨부할 답변이 진행 중이 아니에요")
+        attachments = json.loads(row["attachments"] or "[]")
+        _check_file_count(files, len(attachments))
+        attachments.extend(_save(ident, files, rollback))
+        con.execute("UPDATE chat_messages SET attachments=? WHERE id=?", (json.dumps(attachments, ensure_ascii=False), turn))
+    return len(files)
+
+
 def file_path(ident: str, name: str):
     """An uploaded file of the conversation (GET /api/chat/file), or None; never anything outside its directory."""
     try:
-        d = _dir(ident).resolve()
+        d = _dir(ident)
     except SystemExit:
         return None
-    if not name or "/" in name or "\\" in name:
+    if d.is_symlink() or not name or "/" in name or "\\" in name:
         return None
     f = (d / name).resolve()
-    return f if f.parent == d and f.is_file() else None
+    return f if f.parent == d.resolve() and f.is_file() else None
 
 
 def with_files(text: str, ident: str, atts: list[dict]) -> str:
@@ -366,11 +420,11 @@ def send(ident: str, text: str, files: list | None = None) -> int:
     _check_idle(con, ident)  # checked again under the lock; this one skips the upload
     agent = p["repos"][0]["agent_conf"]
     tool = R.resolve(agent)["tool"]
-    atts = _save(ident, files) if files else []
-    con.execute("BEGIN IMMEDIATE")
-    try:
+    prepared = _prepare_files(files or [])
+    with _attachment_transaction(con) as rollback:
         c = _conv(con, ident)
         _check_idle(con, ident)
+        atts = _save(ident, prepared, rollback)
         # A session lives in the checkout it started in. A different repo or tool starts a new session.
         resume = c["session"] if c["session"] and c["tool"] == tool and c["repo"] == p["repo"] else None
         prior = _previous_result(con, ident)
@@ -388,12 +442,6 @@ def send(ident: str, text: str, files: list | None = None) -> int:
                     (ident, "assistant", now(), compaction_id))
         turn = con.execute("SELECT last_insert_rowid()").fetchone()[0]
         con.execute("UPDATE chat_conversations SET updated_at=? WHERE id=?", (now(), ident))
-        con.commit()  # the running row is the lock: a second tab gets "이전 답을 기다리는 중"
-    except BaseException:
-        con.rollback()
-        for a in atts:
-            (_dir(ident) / a["file"]).unlink(missing_ok=True)
-        raise
     msg = with_files(text, ident, atts)
     if resume and p.get("source") == "notion":
         # Existing conversations can predate Notion writes or a change of project source.
@@ -406,7 +454,7 @@ def send(ident: str, text: str, files: list | None = None) -> int:
     dirs = [r["path"] for r in p["repos"][1:] if r["path_ok"]]
     try:
         handle = R.launch(p["path"], msg if resume else prompt(p, msg), f"chat-{p['id']}-{ident}", agent=agent,
-                          resume=resume, split_stderr=True, images=images, add_dirs=dirs)
+                          resume=resume, split_stderr=True, images=images, add_dirs=dirs, chat_turn=(ident, turn))
     except Exception as e:  # noqa: BLE001
         con.execute("UPDATE chat_messages SET text=?, failed=1, finished_at=? WHERE id=?",
                     (f"(에이전트를 시작하지 못했어요: {e})", now(), turn))
@@ -431,8 +479,12 @@ def _finalize(con, row) -> None:
     if alive:
         return
     reply = R.last_message(row["handle"], REPLY_LIMIT)
-    failed = code != 0 or not reply
-    if not reply:
+    failed = code != 0
+    if not reply and not failed:
+        # The agent may have attached its entire reply after the poll fetched this row.
+        files = con.execute("SELECT attachments FROM chat_messages WHERE id=?", (row["id"],)).fetchone()
+        failed = not (files and json.loads(files["attachments"] or "[]"))
+    if not reply and failed:
         reply = f"(답을 받지 못했어요: exit {code})"
         err = _tail(row["handle"], 1500).strip()
         if err:
