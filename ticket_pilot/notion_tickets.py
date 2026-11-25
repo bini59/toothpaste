@@ -127,11 +127,9 @@ def matches(con, project, work_tag, rules):
     validate(cfg)
     client = notion.Client(con, cfg["connection_id"])
     pages, schema = _query(client, cfg)
-    membership = notion_membership.Membership(client, cfg["data_source_id"], schema, rules)
+    membership = notion_membership.Membership(client, cfg["data_source_id"], schema, rules, project["id"])
     if cfg.get("project_page_id"):
         client.page(cfg["project_page_id"], cfg["project_data_source_id"])
-    elif cfg.get("parent_property") and project["id"] not in rules:
-        notion_membership.relation_column(schema, cfg, "parent")
     found = {}
     for page in pages:
         if not notion.active_page(page):
@@ -139,11 +137,13 @@ def matches(con, project, work_tag, rules):
         page_id = page["id"]
         if not notion.valid_id(page_id):
             raise notion.NotionError("Notion 페이지 ID를 확인할 수 없어요")
-        if not membership.includes(page, project["id"]):
+        belongs, ancestors = membership.resolve(page)
+        if not belongs:
             continue
         gid = f"notion:{page_id}"
         found[gid] = {**_page_fields(page, cfg, schema, work_tag), "gid": gid, "key": ticket_key(page_id),
-                      "project_gid": f"notion:{project['id']}", "project_name": project["name"]}
+                      "project_gid": f"notion:{project['id']}", "project_name": project["name"],
+                      "ancestors": [f"notion:{i}" for i in ancestors]}
     return found
 
 
@@ -170,7 +170,12 @@ def page_edited(con, gid, page, source, schema):
     if not con.in_transaction:
         con.execute("BEGIN IMMEDIATE")
     snapshot = meta_get(con, SYNC_STATE, {})
-    snapshot.setdefault("edited", {})[gid] = meta_get(con, "notion_sync_generation", 0)
+    generation = meta_get(con, "notion_sync_generation", 0)
+    edited = snapshot.setdefault("edited", {})
+    edited[gid] = generation
+    for child, ancestors in snapshot.get("ancestors", {}).items():
+        if gid in ancestors:
+            edited[child] = generation
     meta_set(con, SYNC_STATE, snapshot)
     if (not page or page.get("id") != gid.removeprefix("notion:") or not page.get("properties")
             or not page.get("url") or not page.get("last_edited_time")):
@@ -278,6 +283,7 @@ def sync(con, generation, listings, ts, new_tagged):
     if snapshot.get("generation", 0) >= generation:
         return {}  # a more recent dashboard refresh or tick already applied its results
     edited = {gid: gen for gid, gen in snapshot.get("edited", {}).items() if gen >= generation}
+    ancestors = snapshot.get("ancestors", {})
     previous = con.execute("SELECT gid FROM tickets WHERE gid LIKE 'notion:%' AND assigned=1").fetchall()
     doc = effective_config(read_config(con))
     projects = [p for p in doc["project_map"]["projects"] if p["source"] == "notion"]
@@ -291,8 +297,17 @@ def sync(con, generation, listings, ts, new_tagged):
             event(con, "error", f"Notion 동기화 ({p['name']}): {error}")
             continue
         for gid, row in rows.items():
-            if gid not in owned or gid in edited:
+            if gid not in owned:
                 continue
+            # The first listing of a new dependency may already have been overtaken by a parent edit.
+            if changed := [edited[parent] for parent in row["ancestors"] if parent in edited]:
+                edited[gid] = max(max(changed), edited.get(gid, 0))
+            if gid in edited:
+                continue
+            if row["ancestors"]:
+                ancestors[gid] = row["ancestors"]
+            else:
+                ancestors.pop(gid, None)
             old = con.execute("SELECT * FROM tickets WHERE gid=?", (gid,)).fetchone()
             already_tagged = old and (old["completed"] or (old["assigned"] and old["has_tag"]))
             if row["has_tag"] and gid not in run_owners and not already_tagged:
@@ -307,7 +322,8 @@ def sync(con, generation, listings, ts, new_tagged):
                              last_seen=excluded.last_seen,repo_override=excluded.repo_override,due_on=excluded.due_on""",
                         {**row, "repo_override": _repo_override(old, row["project_gid"], doc["project_map"]["repos"]),
                          "project_name": p["name"], "ts": ts})
-    meta_set(con, SYNC_STATE, {"generation": generation, "projects": state, "edited": edited})
+    meta_set(con, SYNC_STATE, {"generation": generation, "projects": state, "edited": edited,
+                               "ancestors": {gid: parents for gid, parents in ancestors.items() if gid in seen}})
     con.executemany("UPDATE tickets SET assigned=0 WHERE gid=?", [(r[0],) for r in previous if r[0] not in seen])
     return errors
 

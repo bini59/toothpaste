@@ -100,7 +100,7 @@ class NotionMembershipTest(NotionDashboard):
     def test_direct_then_ancestor_then_text_across_filtered_projects(self):
         cfg = {**self.cfg, **self.text_rule, "parent_property": "parent"}
         self.save(cfg, "toothpaste")  # the earlier project matches the child's string
-        other = {**self.cfg, **self.external, "parent_property": "parent"}
+        other = {**self.cfg, **self.external}  # only the first project defines the task DB's parent column
         self.save(other, "other")
         child = self.fixture.pages[TEAM_DB][3]
         child["properties"]["업무 코드"] = self.parent["properties"]["업무 코드"]
@@ -118,6 +118,39 @@ class NotionMembershipTest(NotionDashboard):
         child["properties"]["프로젝트"] = relation(uid(302))
         self.assert_imports(cfg, ["팀 보드"])
 
+    def test_parent_edits_hold_existing_and_newly_discovered_descendants(self):
+        cfg = {**self.cfg, "contains_property": "title", "contains_text": "TP-", "parent_property": "parent"}
+        child = self.fixture.pages[TEAM_DB][3]
+        self.save(cfg, "toothpaste")
+        pipeline.sync(log=lambda *_: None)
+        child["properties"]["상위 항목"] = relation(uid(101))
+        key = notion_tickets.ticket_key(uid(101))
+
+        def rename(title):
+            with mock.patch("sys.stdout", new_callable=io.StringIO):
+                cli.main(["notion", "update", key, "--title", title])
+
+        self.fixture.after_listing = lambda: rename("로그인 오류")
+        pipeline.sync(log=lambda *_: None)
+        self.assertFalse(any("would create" in s for s in self.dispatch_log()))
+        rename("TP-17 로그인 오류")
+        self.assert_imports(cfg, ["TP-17 로그인 오류", "팀 보드"])
+        rename("로그인 오류")
+        self.assertFalse(any("would create" in s for s in self.dispatch_log()))
+        self.assert_imports(cfg, [])
+
+    def test_stale_peer_text_does_not_block_direct_owner(self):
+        other = {**self.cfg, **self.text_rule}
+        cfg = {**self.cfg, **self.external}
+        self.save(other, "other")
+        self.save(cfg, "toothpaste")
+        self.parent["properties"]["프로젝트"] = relation(uid(301))
+        del self.fixture.props["업무 코드"]
+        self.assertEqual([r["title"] for r in self.preview(cfg, pid="toothpaste")], ["TP-17 로그인 오류"])
+        errors = pipeline.sync(log=lambda *_: None)["notion_errors"]
+        self.assertEqual(set(errors), {"other"})
+        self.assertEqual(set(self.stages()), {"TP-17 로그인 오류"})
+
     def test_same_source_project_row_and_parent_cycles(self):
         cfg = {**self.cfg, "project_data_source_id": TEAM_DB, "project_page_id": uid(103), "parent_property": "parent"}
         self.parent["properties"]["상위 항목"] = relation(uid(103))  # the project row is outside the filter
@@ -134,7 +167,6 @@ class NotionMembershipTest(NotionDashboard):
         self.fixture.relation_items[f"/pages/{uid(101)}/properties/proj%3Ax"] = [uid(302), uid(301)]
         self.assert_imports(cfg, ["TP-17 로그인 오류"])
         for invalid in ({"contains_property": "code"}, {"contains_text": "abc"}, {"project_page_id": uid(301)},
-                        {"project_data_source_id": DOCS_DB, "project_page_id": uid(301)},
                         {**self.external, "parent_property": "proj%3Ax"}):
             project = {"name": "x", "source": "notion", "repos": [], "notion": {**self.cfg, **invalid}}
             self.assertEqual(self.call("/api/config", {"scope": "project.invalid", "value": project})[0], 400)
@@ -147,7 +179,7 @@ class NotionMembershipTest(NotionDashboard):
         with self.assertRaisesRegex(SystemExit, "상위 항목"):
             self.create("--title", "하위", "--parent", notion_tickets.ticket_key(uid(101)))
         self.save({**self.cfg, **self.external, "parent_property": "parent"}, "toothpaste")
-        for key, error in (("TP-17", "티켓 키"), (notion_tickets.ticket_key(uid(301)), "데이터베이스에 없어요"),
+        for key, error in (("NT-invalid", "찾을 수 없어요"), (notion_tickets.ticket_key(uid(301)), "데이터베이스에 없어요"),
                            (notion_tickets.ticket_key(uid(999)), "404")):
             with self.assertRaisesRegex(SystemExit, error):
                 self.create("--title", "하위", "--parent", key)
@@ -155,3 +187,15 @@ class NotionMembershipTest(NotionDashboard):
         with self.assertRaisesRegex(SystemExit, "데이터베이스에 없어요"):
             self.create("--title", "일반")
         self.assertEqual(self.fixture.writes, [])
+
+    def test_chat_title_lookup_includes_unimported_parents_and_disambiguates(self):
+        cfg = {**self.cfg, **self.text_rule, "parent_property": "parent",
+               "project_data_source_id": DOCS_DB, "project_page_id": uid(301)}
+        self.parent["properties"]["개발 담당"]["people"] = [{"id": MEMBER}]
+        self.assert_imports(cfg, [])
+        self.create("--parent", "로그인 오류", "--title", "재현 테스트", "--assignee", "me", "--tag", "tp")
+        self.assert_imports(cfg, ["재현 테스트"])
+        self.fixture.pages[TEAM_DB].append(page(700, "TP-18 로그인 오류", [], [], "할 일"))
+        with self.assertRaisesRegex(SystemExit, "부모 작업 후보가 여러 개.*TP-17.*NT-.*TP-18.*NT-"):
+            self.create("--parent", "로그인 오류", "--title", "중복")
+        self.assertEqual(len(self.fixture.writes), 1)

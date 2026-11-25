@@ -79,20 +79,35 @@ class ProjectPages:
             props[self.column("date")["id"]] = {"date": value}
         return props
 
+    def find_parent(self, ref):
+        page_id = None
+        if ref[:3].upper() == "NT-":
+            try:
+                page_id = str(uuid.UUID(ref[3:]))
+            except ValueError:
+                pass  # a task title can also start with NT-
+        if not page_id:
+            if not ref.strip():
+                raise notion.NotionError("부모 작업의 제목이나 티켓 키를 입력하세요")
+            rows = self.client.rows(self.source, query_filter={"property": self.column("title")["name"],
+                                                                "title": {"contains": ref}})
+            candidates = [r for r in rows if r["name"] == ref] or rows
+            if not candidates:
+                raise notion.NotionError(f"작업 DB에서 부모 작업을 찾을 수 없어요: {ref}")
+            if len(candidates) > 1:
+                choices = ", ".join(f"{r['name']} ({notion_tickets.ticket_key(r['id'])})" for r in candidates[:10])
+                raise notion.NotionError(f"부모 작업 후보가 여러 개예요. 티켓 키를 지정하세요: {choices}")
+            page_id = candidates[0]["id"]
+        self.client.page(page_id, self.source)
+        return page_id
+
     def create(self, args):
         props = self.fields(args.title, args.assignee, args.due)
         if args.parent is not None:
             col = notion_membership.relation_column(self.schema, self.cfg, "parent")
             if not col:
                 raise notion.NotionError("프로젝트 설정에서 상위 항목 관계 열을 먼저 골라 주세요")
-            try:
-                parent = str(uuid.UUID(args.parent[3:])) if args.parent[:3].upper() == "NT-" else None
-            except ValueError:
-                parent = None
-            if not parent:
-                raise notion.NotionError("부모 작업의 Notion 티켓 키(NT-…)를 입력하세요")
-            self.client.page(parent, self.source)
-            props[col["id"]] = {"relation": [{"id": parent}]}
+            props[col["id"]] = {"relation": [{"id": self.find_parent(args.parent)}]}
         if col := notion_membership.relation_column(self.schema, self.cfg, "project"):
             row = self.cfg["project_page_id"]
             self.client.page(row, self.cfg["project_data_source_id"])
@@ -264,7 +279,7 @@ def register(parsers):
             p.add_argument("--assignee", help="me, 사용자 ID·이름 또는 none")
             p.add_argument("--due", help="YYYY-MM-DD 또는 none")
         if op == "create":
-            p.add_argument("--parent", help="같은 작업 DB에 있는 부모 티켓 키 (NT-…)")
+            p.add_argument("--parent", help="같은 작업 DB에 있는 부모 티켓 키 (NT-…) 또는 제목")
             p.add_argument("--tag", action="append", help="태그 이름 (반복 가능)")
             p.add_argument("--status", help="상태 선택지 이름 또는 ID")
         elif op == "status":

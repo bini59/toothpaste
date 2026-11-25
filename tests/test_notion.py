@@ -177,6 +177,8 @@ class NotionFixture:
                 column = f["property"]
                 if "people" in f:
                     rows = [r for r in rows if f["people"]["contains"] in [a["id"] for a in r["properties"][column]["people"]]]
+                elif "title" in f:
+                    rows = [r for r in rows if f["title"]["contains"] in notion.plain(r["properties"][column]["title"])]
                 elif "multi_select" in f:
                     rows = [r for r in rows if f["multi_select"]["contains"] in [v["name"] for v in r["properties"][column]["multi_select"]]]
                 else:

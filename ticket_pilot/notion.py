@@ -264,10 +264,13 @@ class Client:
         rows = self.items("/search", {"filter": {"property": "object", "value": "data_source"}})
         return [{"id": r["id"], "name": plain(r.get("title")) or r["id"]} for r in rows if r["object"] == "data_source"]
 
-    def rows(self, source):
+    def rows(self, source, *, query_filter=None):
         if not valid_id(source):
             raise NotionError("공유한 데이터베이스를 골라 주세요")
-        pages = self.items(f"/data_sources/{source}/query", {"result_type": "page"})
+        body = {"result_type": "page"}
+        if query_filter:
+            body["filter"] = query_filter
+        pages = self.items(f"/data_sources/{source}/query", body)
         return [{"id": p["id"], "name": page_title(p) or p["id"]} for p in pages if active_page(p)]
 
     def relation_ids(self, page, column):
@@ -287,7 +290,7 @@ class Client:
         schema = self.read(f"/data_sources/{source}")["properties"]
         supported = ("title", "date", "people", "select", "multi_select", "status", "relation", "rich_text", "formula", "unique_id")
         return [{"id": p["id"], "name": name, "type": p["type"],
-                 **({"data_source_id": p["relation"]["data_source_id"]} if p["type"] == "relation" else {}),
+                 **({"data_source_id": p["relation"].get("data_source_id")} if p["type"] == "relation" else {}),
                  "options": [{"id": o["id"], "name": o["name"]} for o in p[p["type"]].get("options", [])]}
                 for name, p in schema.items() if p["type"] in supported]
 

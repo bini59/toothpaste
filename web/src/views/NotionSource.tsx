@@ -26,8 +26,6 @@ export function notionError(value: NotionFilters) {
   if (value.assignee !== "all" && !value.people_property) return "담당자 열을 고르거나 담당자를 전체로 바꿔 주세요";
   if (!!value.contains_property !== !!value.contains_text?.trim()) return "문자열을 검사할 열과 포함할 문자열을 함께 입력하세요";
   if (value.project_data_source_id && !value.project_page_id) return "선택한 DB에서 프로젝트 행을 골라 주세요";
-  if (value.project_data_source_id && value.project_data_source_id !== value.data_source_id && !value.project_property)
-    return "프로젝트 행이 있는 DB를 가리키는 관계형 열을 골라 주세요";
   return "";
 }
 
@@ -57,6 +55,15 @@ function Picker({ label, value, choices, placeholder, disabled, onChange }: {
       {choices.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
     </Select>
   </label>;
+}
+
+function rowChoices(rows: Choice[]) {
+  const seen = new Set<string>(), repeated = new Set<string>();
+  for (const { name } of rows) {
+    if (seen.has(name)) repeated.add(name);
+    seen.add(name);
+  }
+  return rows.map((r) => repeated.has(r.name) ? { ...r, name: `${r.name} · ${r.id}` } : r);
 }
 
 function useNotionRefresh() {
@@ -252,12 +259,12 @@ export function NotionSource({ projectId, value, repos, workTag, onChange }: {
           <Picker label="프로젝트 행이 있는 DB" value={value.project_data_source_id ?? ""} placeholder="사용 안 함"
             choices={sources?.data ?? []} disabled={!schema?.data} onChange={chooseProjectSource} />
           {value.project_data_source_id && <Picker label="프로젝트 행" value={value.project_page_id ?? ""}
-            placeholder={rows?.data ? "행 고르기…" : "불러오는 중…"} choices={rows?.data ?? []} disabled={!rows?.data}
+            placeholder={rows?.data ? "행 고르기…" : "불러오는 중…"} choices={rowChoices(rows?.data ?? [])} disabled={!rows?.data}
             onChange={(id) => onChange({ ...value, project_page_id: id || undefined })} />}
         </div>
         {value.project_data_source_id && <Picker label="작업 DB의 프로젝트 관계 열" value={value.project_property ?? ""}
           choices={relationsTo(value.project_data_source_id).filter((p) => p.id !== value.parent_property)}
-          placeholder={value.project_data_source_id === value.data_source_id ? "사용 안 함" : "관계 열 고르기…"}
+          placeholder="사용 안 함"
           disabled={!schema?.data} onChange={(id) => onChange({ ...value, project_property: id || undefined })} />}
         <div className="grid gap-3 sm:grid-cols-2">
           <Picker label="문자열을 검사할 열" value={value.contains_property ?? ""} placeholder="사용 안 함"
