@@ -23,12 +23,12 @@ def validate(cfg):
 
 def relation_column(schema, cfg, role, *, strict=True):
     if prop := cfg.get(f"{role}_property"):
-        target = cfg["data_source_id"] if role == "parent" else cfg.get("project_data_source_id")
+        target = cfg["data_source_id"] if role == "parent" else cfg.get(f"{role}_data_source_id")
         col = schema.get(prop)
         if col and col["type"] == "relation" and col["data_source_id"] == target:
             return col
         if strict:
-            label = "상위 항목" if role == "parent" else "프로젝트"
+            label = {"parent": "상위 항목", "project": "프로젝트", "milestone": "마일스톤"}[role]
             raise notion.NotionError(f"{label} 관계 열과 연결 대상 DB를 다시 확인하세요")
 
 

@@ -1,5 +1,5 @@
-"""Milestones (2026-10-30): an Asana parent task tagged with settings milestone_tag (default `tp-milestone`) collects its
-subtasks on a milestone branch per repo and ships to staging once, as one ticket.
+"""An Asana parent tagged with milestone_tag or a related Notion milestone page collects its
+subtasks on a branch per repo and ships to staging once, as one ticket.
 
   subtask (tagged asana_tag, parent tagged milestone_tag)
       worktree from origin/milestone/<parent gid>, PR base milestone/<parent gid> (open PRs on staging are retargeted)
@@ -12,7 +12,7 @@ subtasks on a milestone branch per repo and ships to staging once, as one ticket
       branch out in a worktree and opens milestone/<parent gid> -> staging. From here it is an ordinary ticket:
       AI review, rework / conflict agents in that worktree, the owner's staging approval, the weekday train
       live in production: complete() completes the milestone ticket, the subtasks merged into it and, once every
-      repo of the milestone is live, the Asana parent task
+      repo of the milestone is live, the parent
 
 Milestones apply in every repo that merges approved PRs into a staging branch: feature-base repos (train repos,
 pr_into_staging repos) and staging-mode repos with a via branch (staging -> main -> production via the 배포 page).
@@ -26,10 +26,22 @@ import re
 from .core import db, event, feature_base, meta_get, meta_set, now, repo_rules, run, settings
 from . import notifications as N
 from . import runner as R
+from . import notion_stages, notion_tickets
 
 PREFIX = "milestone/"
 # subtask stages that no longer hold the milestone back
 FINISHED = {"milestone", "done", "closed", "skipped", "staged", "merged", "deploying"}
+# A merged Notion PR travels with its actual branch even if its task's relation changes later.
+_MERGED_SUBTASKS = """ FROM prs p JOIN tickets s ON s.gid=p.ticket_gid
+    WHERE p.repo=:repo AND p.base=:base AND p.state='MERGED'
+      AND (s.parent_gid=:parent OR (:parent LIKE 'notion:%' AND s.gid LIKE 'notion:%')) """
+# The current run's landed PR fixes its release destination even if the editable relation moves.
+LANDED_NOTION = """SELECT p.ticket_gid, ms.parent_gid, ms.parent_name, ms.url FROM prs p
+    JOIN tickets ms ON ms.gid='ms:notion:' || substr(p.base, length('milestone/')+1) || ':' || p.repo
+    JOIN runs r ON r.id=p.run_id
+    WHERE p.ticket_gid LIKE 'notion:%' AND p.state='MERGED' AND p.base LIKE 'milestone/%'
+      AND r.state!='abandoned' AND r.id=(SELECT max(id) FROM runs WHERE ticket_gid=p.ticket_gid)
+      AND p.number=(SELECT max(number) FROM prs WHERE run_id=r.id)"""
 
 
 def tag() -> str:
@@ -49,17 +61,24 @@ def ms_gid(parent_gid: str, repo: str) -> str:
 
 
 def parse(gid: str) -> tuple[str, str]:
-    _, parent, repo = gid.split(":", 2)
+    parent, repo = gid.removeprefix("ms:").rsplit(":", 1)
     return parent, repo
 
 
 def branch(parent_gid: str) -> str:
-    return f"{PREFIX}{parent_gid}"
+    return PREFIX + parent_gid.removeprefix("notion:")
 
 
 def short(repo: str) -> str:
     """30_Shop_Api -> Api"""
     return repo.rsplit("_", 1)[-1]
+
+
+def refresh_parent(con, parent: str, name: str, url: str):
+    for gid, repo in con.execute("""SELECT gid, repo_override FROM tickets WHERE parent_gid=? AND gid LIKE 'ms:notion:%'
+                                    AND (parent_name IS NOT ? OR url IS NOT ?)""", (parent, name, url)).fetchall():
+        con.execute("UPDATE tickets SET parent_name=?,name=?,url=? WHERE gid=?",
+                    (name, f"{name} · {short(repo)} 마일스톤", url, gid))
 
 
 def in_milestone(t) -> bool:
@@ -94,6 +113,13 @@ def _ahead(gh: str, base: str, head: str) -> int:
     return int(_gh(["api", f"repos/{gh}/compare/{base}...{head}", "--jq", ".ahead_by"]).stdout.strip() or 0)
 
 
+def check_retarget(gh, old_base, new_base, head):
+    """Changing milestones must not take the old milestone's other work along on the feature PR."""
+    fork = _gh(["api", f"repos/{gh}/compare/{old_base}...{head}", "--jq", ".merge_base_commit.sha"]).stdout.strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", fork) or _ahead(gh, new_base, fork):
+        raise RuntimeError(f"{old_base}에서 가져온 커밋이 있어요. 이 작업의 커밋만 {new_base} 위로 옮겨 주세요")
+
+
 def _github(con, repo: str) -> str | None:
     r = con.execute("SELECT github FROM repos WHERE name=?", (repo,)).fetchone()
     return r["github"] if r else None
@@ -112,25 +138,44 @@ def ensure(con, t, repo: str) -> str:
         sha = _gh(["api", f"repos/{gh}/commits/{fb}", "--jq", ".sha"]).stdout.strip()
         _gh(["api", "-X", "POST", f"repos/{gh}/git/refs", "-f", f"ref=refs/heads/{b}", "-f", f"sha={sha}"])
         event(con, "milestone", f"{t['parent_name'] or t['parent_gid']}: {repo} {b} created from {fb} ({sha[:7]})", gid)
-    p = con.execute("SELECT * FROM tickets WHERE gid=?", (t["parent_gid"],)).fetchone()
-    pkey = p["key"] if p else f"AS-{t['parent_gid']}"
+    parent = t["parent_gid"]
+    p = con.execute("SELECT * FROM tickets WHERE gid=?", (parent,)).fetchone()
+    if p:
+        pkey = p["key"]
+    elif parent.startswith("notion:"):
+        pkey = notion_tickets.ticket_key(parent.removeprefix("notion:"))
+    else:
+        pkey = f"AS-{parent}"
+    suffix = repo if parent.startswith("notion:") else short(repo)
     ts = now()
     con.execute("""INSERT INTO tickets(gid,key,name,url,project_gid,project_name,parent_gid,parent_name,notes,tags,
                    has_tag,deps_json,open_deps,completed,assigned,first_seen,last_seen,repo_override)
                    VALUES(?,?,?,?,?,?,?,?,?,'[]',1,'[]',0,0,1,?,?,?)""",
-                (gid, f"{pkey}-{short(repo)}", f"{t['parent_name'] or pkey} · {short(repo)} 마일스톤",
-                 p["url"] if p else None, t["project_gid"], t["project_name"], t["parent_gid"], t["parent_name"],
+                (gid, f"{pkey}-{suffix}", f"{t['parent_name'] or pkey} · {short(repo)} 마일스톤",
+                 p["url"] if p else t["parent_url"], t["project_gid"], t["project_name"], parent, t["parent_name"],
                  f"{repo}의 {b} 브랜치를 {fb}로 보내는 마일스톤 PR", ts, ts, repo))
     return b
 
 
 def subtasks(con, parent_gid: str) -> list:
     """The parent's subtasks ticket-pilot works on (tagged), milestone tickets excluded."""
+    if not parent_gid:
+        return []
+    if parent_gid.startswith("notion:"):
+        # A Notion stage write can move a running subtask out of its import filter before its PR lands.
+        return con.execute(f"""SELECT t.* FROM tickets t LEFT JOIN ({LANDED_NOTION}) landed ON landed.ticket_gid=t.gid
+                               WHERE t.gid LIKE 'notion:%' AND COALESCE(landed.parent_gid,t.parent_gid)=?
+                                 AND ((has_tag=1 AND assigned=1) OR
+                                      (SELECT state FROM runs WHERE ticket_gid=t.gid ORDER BY id DESC LIMIT 1) != 'abandoned')""",
+                           (parent_gid,)).fetchall()
     return con.execute("SELECT * FROM tickets WHERE parent_gid=? AND has_tag=1 AND assigned=1 AND gid NOT LIKE 'ms:%'",
                        (parent_gid,)).fetchall()
 
 
 def ready(con, parent_gid: str) -> bool:
+    if parent_gid.startswith("notion:"):
+        # Relations remain editable after a PR lands. Its actual branch determines what still needs shipping.
+        return unshipped(con, parent_gid) and not unfinished(con, parent_gid)
     subs = subtasks(con, parent_gid)
     return bool(subs) and all(s["stage"] in FINISHED for s in subs) and any(s["stage"] == "milestone" for s in subs)
 
@@ -144,12 +189,16 @@ def last_pr(con, gid: str):
     return con.execute("SELECT * FROM prs WHERE ticket_gid=? ORDER BY number DESC LIMIT 1", (gid,)).fetchone()
 
 
+def unshipped(con, parent_gid: str) -> bool:
+    return bool(con.execute("""SELECT 1 FROM prs WHERE ticket_gid LIKE 'notion:%' AND base=?
+                               AND state='MERGED' AND prod_at IS NULL LIMIT 1""", (branch(parent_gid),)).fetchone())
+
+
 def merged_since(con, gid: str, since: str | None) -> list:
     """Subtask PRs merged into this milestone ticket's branch after `since` (the merge of its last milestone PR)."""
     parent, repo = parse(gid)
-    return con.execute("""SELECT p.* FROM prs p JOIN tickets s ON s.gid=p.ticket_gid
-                          WHERE s.parent_gid=? AND p.repo=? AND p.base=? AND p.state='MERGED' AND p.merged_at > ?""",
-                       (parent, repo, branch(parent), since or "")).fetchall()
+    return con.execute("SELECT p.*" + _MERGED_SUBTASKS + "AND p.merged_at > :since",
+                       {"parent": parent, "repo": repo, "base": branch(parent), "since": since or ""}).fetchall()
 
 
 def stage(con, t, pr) -> str | None:
@@ -245,17 +294,47 @@ def notify_ready(con) -> int:
     return n
 
 
+def _notion_repo_has_work(con, parent, repo, gid):
+    from .pipeline import chosen_repo, latest_run
+    # An existing PR follows its actual branch until it is retargeted, closed or verified live.
+    if con.execute("""SELECT 1 FROM prs WHERE repo=? AND (ticket_gid=? OR (ticket_gid LIKE 'notion:%' AND base=?))
+                      AND (state='OPEN' OR (state='MERGED' AND prod_at IS NULL AND release_id IS NULL)) LIMIT 1""",
+                   (repo, gid, branch(parent))).fetchone():
+        return True
+    for t in unfinished(con, parent):
+        run = latest_run(con, t["gid"])
+        owner = run if run and run["state"] != "abandoned" else chosen_repo(con, t)
+        if owner and owner["repo"] == repo:
+            return True
+    return False
+
+
 def reopen(con, log=print) -> int:
-    """A live milestone ticket whose parent got new subtasks starts the next round (completed=0, stage collecting)."""
+    """Reopen milestones with new work. A Notion relation can also move all work out of a repo."""
     n = 0
-    for t in con.execute("SELECT * FROM tickets WHERE gid LIKE 'ms:%' AND completed=1").fetchall():
-        pr = last_pr(con, t["gid"])
-        if pr and pr["state"] == "MERGED":
-            more = unfinished(con, t["parent_gid"]) or merged_since(con, t["gid"], pr["merged_at"])
-        else:  # completed without a PR (nothing to ship): only a subtask in progress brings it back
-            more = not pr and unfinished(con, t["parent_gid"])
-        if not more:
-            continue
+    for t in con.execute("SELECT * FROM tickets WHERE gid LIKE 'ms:%' AND (completed=1 OR gid LIKE 'ms:notion:%')").fetchall():
+        if t["gid"].startswith("ms:notion:"):
+            parent, repo = parse(t["gid"])
+            needed = _notion_repo_has_work(con, parent, repo, t["gid"])
+            if needed == (not t["completed"]):
+                continue
+            if not needed:
+                con.execute("UPDATE tickets SET completed=1,ms_done_at=NULL WHERE gid=?", (t["gid"],))
+                event(con, "milestone", f"{t['key']}: {repo}에 남은 하위 작업이나 배포할 PR이 없어요", t["gid"])
+                # Another repo may have gone live before this last, empty repo dropped out.
+                if all_repos_live(con, parent) and con.execute("""SELECT 1 FROM prs WHERE ticket_gid LIKE ?
+                        AND state='MERGED' AND (prod_at IS NOT NULL OR release_id IS NOT NULL) LIMIT 1""",
+                        (f"ms:{parent}:%",)).fetchone():
+                    notion_stages.enqueue(con, t, notion_stages.MILESTONE_DONE)
+                continue
+        else:
+            pr = last_pr(con, t["gid"])
+            if pr and pr["state"] == "MERGED":
+                more = unfinished(con, t["parent_gid"]) or merged_since(con, t["gid"], pr["merged_at"])
+            else:  # completed without a PR (nothing to ship): only a subtask in progress brings it back
+                more = not pr and unfinished(con, t["parent_gid"])
+            if not more:
+                continue
         con.execute("UPDATE tickets SET completed=0, ms_done_at=NULL WHERE gid=?", (t["gid"],))
         event(con, "milestone", f"{t['key']}: new subtasks after the last milestone PR; collecting the next round",
               t["gid"])
@@ -334,14 +413,13 @@ def sync_base(con, t, log=print) -> int:
 
 def merged_subtasks(con, t) -> list:
     parent, repo = parse(t["gid"])
-    return con.execute("""SELECT s.key, s.name, p.number, p.url FROM tickets s
-                          JOIN prs p ON p.ticket_gid=s.gid AND p.state='MERGED' AND p.base=? AND p.repo=?
-                          WHERE s.parent_gid=? ORDER BY p.merged_at""", (branch(parent), repo, parent)).fetchall()
+    return con.execute("SELECT s.key, s.name, p.number, p.url" + _MERGED_SUBTASKS + "ORDER BY p.merged_at",
+                       {"parent": parent, "repo": repo, "base": branch(parent)}).fetchall()
 
 
 def _brief(t, b: str, fb: str, subs: str) -> str:
     return (f"# {t['key']}: {t['parent_name']} (milestone)\n\n"
-            f"Milestone ticket of the Asana task {t['parent_name']} ({t['url'] or t['parent_gid']}) in "
+            f"Milestone {t['parent_name']} ({t['url'] or t['parent_gid']}) in "
             f"{t['repo_override']}. Each subtask below was reviewed on its own PR and merged into `{b}`; this PR ships "
             f"them to `{fb}` together. Review it as an integration: do the subtasks work together, and did merging "
             f"them (or `{fb}`) break anything.\n"
@@ -397,9 +475,14 @@ def open_pr(con, t, log=print) -> int:
 
 # ---------------------------------------------------------------- production
 
+def all_repos_live(con, parent):
+    return (not con.execute("SELECT 1 FROM tickets WHERE gid LIKE ? AND completed=0", (f"ms:{parent}:%",)).fetchone()
+            and not unfinished(con, parent) and not (parent.startswith("notion:") and unshipped(con, parent)))
+
+
 def complete(con, gid: str, *, pr_url: str | None = None) -> str | None:
     """The milestone PR is live in production: complete the milestone ticket, the subtasks merged into it, and the
-    Asana parent task once every milestone ticket of it is complete. Returns errors or None."""
+    parent once every milestone ticket of it is complete. Returns errors or None."""
     from .release import complete_asana
     parent, repo = parse(gid)
     b = branch(parent)
@@ -414,19 +497,22 @@ def complete(con, gid: str, *, pr_url: str | None = None) -> str | None:
     if not pr or (pr["url"] == latest["url"] and not merged_since(con, gid, pr["merged_at"])):
         con.execute("UPDATE tickets SET completed=1 WHERE gid=?", (gid,))
     errs = []
-    for s in con.execute("""SELECT DISTINCT s.gid, s.key FROM tickets s JOIN prs p ON p.ticket_gid=s.gid
-                            WHERE s.parent_gid=? AND s.completed=0 AND p.state='MERGED' AND p.base=? AND p.repo=?
-                              AND (p.merged_at IS NULL OR p.merged_at <= ?)""", (parent, b, repo, cut)).fetchall():
+    shipped = con.execute("SELECT DISTINCT s.gid, s.key, s.completed" + _MERGED_SUBTASKS +
+                          """AND (s.completed=0 OR (s.gid LIKE 'notion:%' AND p.prod_at IS NULL))
+                             AND (p.merged_at IS NULL OR p.merged_at <= :cut)""",
+                          {"parent": parent, "repo": repo, "base": b, "cut": cut}).fetchall()
+    for s in shipped:
         con.execute("UPDATE prs SET prod_at=COALESCE(prod_at, ?), prod_note=COALESCE(prod_note, ?) "
-                    "WHERE ticket_gid=? AND state='MERGED' AND base=? AND (merged_at IS NULL OR merged_at <= ?)",
-                    (now(), f"마일스톤 {gid}로 배포", s["gid"], b, cut))
-        err = complete_asana(con, s["gid"])
+                    "WHERE ticket_gid=? AND state='MERGED' AND repo=? AND base=? AND (merged_at IS NULL OR merged_at <= ?)",
+                    (now(), f"마일스톤 {gid}로 배포", s["gid"], repo, b, cut))
+        err = None if s["completed"] else complete_asana(con, s["gid"])
         if err:
             errs.append(f"{s['key']}: {err}")
-    if (not con.execute("SELECT 1 FROM tickets WHERE gid LIKE ? AND completed=0", (f"ms:{parent}:%",)).fetchone()
-            and not unfinished(con, parent)):
-        p = con.execute("SELECT completed FROM tickets WHERE gid=?", (parent,)).fetchone()
-        if not (p and p["completed"]):
+    if all_repos_live(con, parent):
+        if parent.startswith("notion:"):
+            ticket = con.execute("SELECT * FROM tickets WHERE gid=?", (gid,)).fetchone()
+            notion_stages.enqueue(con, ticket, notion_stages.MILESTONE_DONE)
+        elif not con.execute("SELECT 1 FROM tickets WHERE gid=? AND completed=1", (parent,)).fetchone():
             err = complete_asana(con, parent)
             if err:
                 errs.append(f"parent: {err}")

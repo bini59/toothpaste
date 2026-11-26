@@ -126,6 +126,8 @@ def deploy_target(con, mode: str, ticket: str | None = None, repo: str | None = 
     if dup:
         return None, f"이 티켓은 이미 배포 중이에요 (#{dup['id']})"
     if mode in ("direct", "preview"):
+        if t["milestone_error"]:
+            return None, t["milestone_error"]
         if pr["state"] != "OPEN":
             return None, "열린 PR이 없어요"
         if not _approved(con, pr):
@@ -253,6 +255,8 @@ def _step(con, rel, log) -> str:
     if not rr:
         raise RuntimeError(f"{rel['repo']} 배포 규칙이 없어졌어요")
     if rel["status"] == "requested":
+        if rel["mode"] in ("direct", "preview") and (t := _ticket(con, rel["ticket_gid"])) and t["milestone_error"]:
+            raise RuntimeError(t["milestone_error"])
         return _prepare(con, rel, rr, log)
     if rel["status"] == "running":
         st = _state(rel)
@@ -378,6 +382,8 @@ def _merge(con, rel, rr, st, log) -> str:
             break
         if info["state"] == "CLOSED":
             raise RuntimeError(f"PR #{info['number']}이 닫혔어요")
+        if rel["mode"] == "direct" and (t := _ticket(con, rel["ticket_gid"])) and t["milestone_error"]:
+            raise RuntimeError(t["milestone_error"])
         if info["baseRefName"] != into:
             raise RuntimeError(f"PR #{info['number']} base가 {info['baseRefName']}로 바뀌었어요 ({into}여야 해요)")
         if info["isDraft"]:

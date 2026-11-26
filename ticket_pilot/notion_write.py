@@ -42,11 +42,11 @@ def _option(column, value, *, new_tag=False, by_id=False):
 
 
 class ProjectPages:
-    def __init__(self, con, cfg):
+    def __init__(self, con, cfg, *, source=None):
         self.con = con
         self.cfg = cfg
         self.client = notion.Client(con, cfg["connection_id"])
-        self.source = cfg["data_source_id"]
+        self.source = source or cfg["data_source_id"]
 
     @cached_property
     def schema(self):
@@ -167,8 +167,26 @@ class ProjectPages:
             raise notion.NotionError(f"{col['name']} 열이 바뀌었어요. 다시 시도하세요")
         return prop[col["type"]]
 
+    def _milestone_status(self, option_id):
+        # Notion property and option IDs belong to one data source. Resolve the configured task
+        # option to its name before looking up the corresponding option on the milestone page.
+        task_schema = {c["id"]: c for c in self.client.properties(self.cfg["data_source_id"])}
+        task_col = notion_tickets.column(task_schema, self.cfg, "status")
+        option = next((o for o in task_col["options"] if o["id"] == option_id), None) if task_col else None
+        if not option:
+            raise notion.NotionError("작업 DB의 운영 배포 확인 상태를 다시 골라 주세요")
+        columns = [c for c in self.schema.values() if c["type"] in notion_tickets.FILTER_TYPES["status"]]
+        matches = [c for c in columns if c["name"] == task_col["name"]] or [c for c in columns if c["type"] == "status"]
+        if len(matches) != 1:
+            raise notion.NotionError(f"마일스톤 DB에 '{task_col['name']}' 열이나 하나의 상태 열이 필요해요")
+        return matches[0], option["name"]
+
     def status_change(self, page, value, *, by_id=False):
-        col = self.column("status")
+        if self.source == self.cfg["data_source_id"]:
+            col = self.column("status")
+        else:
+            col, value = self._milestone_status(value)
+            by_id = False
         choice = _option(col, value, by_id=by_id)
         current = self.current(page, col)
         if current and current["id"] == choice["id"]:

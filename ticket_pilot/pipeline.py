@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -28,7 +29,7 @@ TP_BIN = str(ROOT / "bin" / "tp")
 VIOLATION = "BLOCKED: 규칙 위반"
 ACTIVE_STAGES = ("dispatched", "in_progress")
 STAGE_ORDER = [
-    "conflict", "rework", "queued", "needs_repo", "unmapped", "waiting_dep", "ms_hold", "collecting", "dispatched",
+    "conflict", "rework", "queued", "needs_repo", "unmapped", "waiting_dep", "milestone_error", "ms_hold", "collecting", "dispatched",
     "in_progress",
     "blocked", "agent_done", "pr_open", "reviewed", "approving", "milestone", "deploying", "staged", "merged", "done",
     "closed", "skipped", "open",
@@ -163,6 +164,8 @@ def compute_stage(con, t, *, repo_count=None) -> str:
         return "open"  # a milestone parent ships through its milestone tickets (ms:<gid>:<repo>), not an agent
     if t["skip"]:
         return "skipped"
+    if t["gid"].startswith("notion:") and t["milestone_error"]:
+        return "milestone_error"
     if t["open_deps"] and unmet_deps(con, t):
         return "waiting_dep"
     if t["repo_override"] and (not t["gid"].startswith("notion:") or chosen_repo(con, t)):
@@ -402,6 +405,9 @@ def sync(log=print) -> dict:
 # ---------------------------------------------------------------- dispatch
 
 def slug(s: str) -> str:
+    if match := re.fullmatch(r"NT-[0-9a-f]{32}-([a-zA-Z0-9_.-]+)", s):
+        # Notion milestone keys share a 35-character parent prefix. Keep repo briefs distinct at the 40-char limit.
+        return f"ms-{match[1][:14].lower()}-{hashlib.sha256(s.encode()).hexdigest()[:16]}"
     return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")[:40]
 
 
@@ -456,9 +462,9 @@ def build_brief(con, t, repo: dict) -> str:
         vals["BASE_NOTE"] = (f"The PR base must be `{fb}` (never `{prod}`); "
                              f"branch from `origin/{fb}` if you have not committed yet.")
         if fb.startswith(M.PREFIX):
-            vals["BASE_NOTE"] = (f"This ticket is a subtask of the milestone {t['parent_name']}: the PR base must be "
-                                 f"`{fb}` (never `{M.staging_of(repo['repo'])}` or `{prod}`); branch from "
-                                 f"`origin/{fb}` if you have not committed yet. ticket-pilot merges it into `{fb}` "
+            vals["BASE_NOTE"] = (f"This ticket belongs to the milestone {t['parent_name']}. The PR base must be `{fb}` "
+                                 f"(never `{M.staging_of(repo['repo'])}` or `{prod}`). Branch from `origin/{fb}` "
+                                 f"if you have not committed yet. ticket-pilot merges it into `{fb}` "
                                  f"after the review, and the milestone goes to staging as a whole.")
     else:
         vals["BASE_FLAG"], vals["BASE_NOTE"] = "", ""
@@ -486,7 +492,7 @@ def dispatch(dry_run=False, log=print, only: str | None = None) -> list[str]:
     con = db()
     active = con.execute("SELECT count(*) c FROM tickets WHERE stage IN ('dispatched','in_progress','blocked')").fetchone()["c"]
     slots = max(0, st["max_active_runs"] - active)
-    q = "SELECT * FROM tickets WHERE stage IN ('conflict','rework','queued')" + (" AND (gid=? OR lower(key)=lower(?))" if only else "") + \
+    q = "SELECT * FROM tickets WHERE stage IN ('conflict','rework','queued') AND milestone_error IS NULL" + (" AND (gid=? OR lower(key)=lower(?))" if only else "") + \
         " ORDER BY stage='queued', due_on IS NULL, due_on"
     cands = con.execute(q, (only, only) if only else ()).fetchall()
     log(f"dispatch: active={active} slots={slots} conflict={sum(t['stage'] == 'conflict' for t in cands)} "
@@ -494,7 +500,7 @@ def dispatch(dry_run=False, log=print, only: str | None = None) -> list[str]:
         f"queued={sum(t['stage'] == 'queued' for t in cands)}")
     done = []
     existing = None
-    answered = con.execute("SELECT * FROM tickets WHERE stage='blocked' AND reply IS NOT NULL" +
+    answered = con.execute("SELECT * FROM tickets WHERE stage='blocked' AND reply IS NOT NULL AND milestone_error IS NULL" +
                            (" AND (gid=? OR lower(key)=lower(?))" if only else ""), (only, only) if only else ()).fetchall()
     # no agent starts without tp's own GitHub token (TP-112); escalation to the owner and triage still run.
     # The error event is written once per disconnect, not every precheck.
@@ -936,17 +942,21 @@ def refresh_prs(con, r, branch) -> int:
         # These repos take feature PRs into their staging branch only, so retarget (the worktree branches from it).
         # Milestone subtasks: also PRs on staging (opened before the parent got the milestone tag, or by mistake).
         was = p.get("baseRefName")
-        if (fb and p["state"] == "OPEN" and was != fb
-                and ((was == rr["target"] and p["createdAt"] >= since)  # "" = all open PRs
+        moved = bool(t and t["gid"].startswith("notion:") and (was or "").startswith(M.PREFIX))
+        target = (fb or M.staging_of(r["repo"])) if moved else fb
+        if (target and p["state"] == "OPEN" and was != target and not (t and t["milestone_error"])
+                and (moved or (was == rr["target"] and p["createdAt"] >= since)  # "" = all open PRs
                      or (ms and was == M.staging_of(r["repo"])))):
             try:
                 if ms:
                     M.ensure(con, t, r["repo"])
+                if moved:
+                    M.check_retarget(r["github"], was, target, p["headRefOid"])
                 # REST, not `gh pr edit`: the latter fails on the Projects (classic) GraphQL deprecation
                 run(["gh", "api", "-X", "PATCH", f"repos/{r['github']}/pulls/{p['number']}", "-f",
-                     f"base={fb}"], timeout=120)
-                p["baseRefName"] = fb
-                event(con, "retarget", f"PR #{p['number']} base {was} -> {fb}", r["ticket_gid"])
+                     f"base={target}"], timeout=120)
+                p["baseRefName"] = target
+                event(con, "retarget", f"PR #{p['number']} base {was} -> {target}", r["ticket_gid"])
             except Exception as e:  # noqa: BLE001
                 event(con, "error", f"retarget PR #{p['number']}: {e}", r["ticket_gid"])
         con.execute("""INSERT INTO prs(url,run_id,ticket_gid,repo,github,number,title,state,is_draft,head_sha,created_at,updated_at,

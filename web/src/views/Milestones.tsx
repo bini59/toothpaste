@@ -3,7 +3,7 @@ import { ConfirmButton } from "../components/ConfirmButton";
 import { DevServerPanel } from "../components/DevServer";
 import { StageBadge } from "../components/StageBadge";
 import { TicketCard } from "../components/TicketCard";
-import { MILESTONE_COLS, ago, busySubtasks, byDue, inProject, milestones, type Index, type Milestone } from "../lib";
+import { MILESTONE_COLS, ago, busySubtasks, byDue, inProject, milestoneRepo, milestones, type Index, type Milestone } from "../lib";
 import type { Project, State } from "../types";
 
 interface Props {
@@ -23,7 +23,6 @@ interface Props {
 const colOf = (stage: string) => MILESTONE_COLS.findIndex((c) => c.stages.includes(stage));
 const counts = (m: Milestone) => MILESTONE_COLS.map((_, i) => m.subtasks.filter((t) => colOf(t.stage) === i).length);
 const finished = (m: Milestone) => m.ms.length > 0 && m.ms.every((t) => t.stage === "done");
-const repoOf = (gid: string) => gid.split(":").slice(2).join(":").split("_").at(-1);
 
 function Progress({ m }: { m: Milestone }) {
   const n = counts(m);
@@ -51,7 +50,7 @@ function RepoBadges({ m }: { m: Milestone }) {
     <div className="flex flex-wrap items-center gap-1.5 text-xs font-medium text-text-muted">
       {m.ms.map((t) => (
         <span key={t.gid} className="flex items-center gap-1">
-          {repoOf(t.gid)} <StageBadge stage={t.stage} />
+          {milestoneRepo(t.gid).split("_").at(-1)} <StageBadge stage={t.stage} />
         </span>
       ))}
     </div>
@@ -67,8 +66,9 @@ export function List({ s, I, project }: { s: State; I?: Index; project?: Project
   if (!list.length)
     return (
       <p className="p-5 text-center text-sm text-text-muted">
-        {project ? "이 프로젝트의 마일스톤이 없어요." : "아직 마일스톤이 없어요."} Asana 부모 태스크에 <b>{String(s.meta.settings.milestone_tag || "tp-milestone")}</b> 태그를 달면
-        하위작업이 마일스톤 브랜치에 모였다가 한 번에 staging으로 가요.
+        {project ? "이 프로젝트의 마일스톤이 없어요." : "아직 마일스톤이 없어요."}{" "}
+        {project?.source !== "notion" && <>Asana에서는 부모 태스크에 <b>{String(s.meta.settings.milestone_tag || "tp-milestone")}</b> 태그를 붙이세요. </>}
+        {(!project || project.source === "notion") && "Notion에서는 프로젝트 설정에서 마일스톤 DB를 고르고 작업에 마일스톤 행을 연결하세요."}
       </p>
     );
   return (
@@ -90,11 +90,11 @@ export function List({ s, I, project }: { s: State; I?: Index; project?: Project
 }
 
 /** 마일스톤 작업 완료: until the owner presses it the milestone waits in 대기 (no PR, review or staging approval) */
-function DoneButton({ m, onMilestoneDone }: { m: Milestone; onMilestoneDone: Props["onMilestoneDone"] }) {
+function DoneButton({ m, I, onMilestoneDone }: { m: Milestone; I: Index; onMilestoneDone: Props["onMilestoneDone"] }) {
   const open = m.ms.filter((t) => !t.completed);
   if (!open.length) return null;
   const doneAt = open.find((t) => t.ms_done_at)?.ms_done_at;
-  const busy = busySubtasks(m);
+  const busy = busySubtasks(m, I);
   if (doneAt)
     return (
       <div className="flex flex-wrap items-center gap-2 text-xs text-text-muted">
@@ -134,6 +134,7 @@ function DoneButton({ m, onMilestoneDone }: { m: Milestone; onMilestoneDone: Pro
 
 function Detail({ m, ...p }: Props & { m: Milestone }) {
   const { s, I } = p;
+  const branch = `milestone/${m.gid.replace(/^notion:/, "")}`;
   const card = (t: Milestone["subtasks"][number]) => (
     <TicketCard key={t.gid} t={t} s={s} I={I} onAssign={p.onAssign} onSkip={p.onSkip} onApprove={p.onApprove}
       onOverride={p.onOverride} onReply={p.onReply} onDrop={p.onDrop} inMilestoneView />
@@ -143,7 +144,7 @@ function Detail({ m, ...p }: Props & { m: Milestone }) {
       <a href="#milestones" className="text-sm font-medium text-primary hover:text-primary-700 hover:underline">← 마일스톤 목록</a>
       <Card className="my-4 p-5">
         <div className="text-xs font-medium text-text-muted">
-          {m.project || "-"} · <code>milestone/{m.gid}</code>
+          {m.project || "-"} · <code>{branch}</code>
         </div>
         <h2 className="my-1.5 text-lg font-bold text-text-main sm:text-xl">
           {m.url ? (
@@ -157,7 +158,7 @@ function Detail({ m, ...p }: Props & { m: Milestone }) {
         </div>
         <Progress m={m} />
         <div className="mt-4">
-          <DoneButton m={m} onMilestoneDone={p.onMilestoneDone} />
+          <DoneButton m={m} I={I} onMilestoneDone={p.onMilestoneDone} />
         </div>
       </Card>
       {m.ms.length > 0 && (
@@ -173,7 +174,7 @@ function Detail({ m, ...p }: Props & { m: Milestone }) {
         <section className="mb-6">
           <h3 className="mx-1 mb-2 text-sm font-semibold text-text-main">dev 서버</h3>
           <p className="mx-1 mb-3 text-xs text-text-muted">
-            레포마다 <code>milestone/{m.gid}</code> 브랜치로 dev 서버를 띄워 하위작업을 합쳐서 확인해요. 띄우기 전에 .env와 포트를 점검해요.
+            레포마다 <code>{branch}</code> 브랜치로 dev 서버를 띄워 하위작업을 합쳐서 확인해요. 띄우기 전에 .env와 포트를 점검해요.
           </p>
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
             {m.ms.filter((t) => !t.completed).map((t) => <DevServerPanel key={t.gid} t={t} s={s} onReload={p.onReload} />)}

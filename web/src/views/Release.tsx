@@ -124,7 +124,7 @@ export function Release({ s, onHold, onDeploy, onCancelDeploy }: Props) {
   };
 
   const reviewed = s.tickets.flatMap((t) => {
-    if (t.completed || t.stage !== "reviewed") return [];
+    if (t.completed || t.milestone_error || t.stage !== "reviewed") return [];
     const pr = latestPr(s, t.gid);
     const approved = pr?.state === "OPEN" && rules[pr.repo]
       && s.reviews.find((v) => v.pr_url === pr.url && v.head_sha === pr.head_sha)?.verdict === "approve";

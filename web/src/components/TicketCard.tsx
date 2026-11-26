@@ -47,7 +47,7 @@ export function TicketCard({ t, s, I, onAssign, onSkip, onApprove, onOverride, o
   // staging approval: any repo whose deploy rule has a staging branch and the `staging` mode
   const stg = rule?.staging && rule.modes.includes("staging") ? (msBase ?? rule.staging.branch) : null;
   const milestoneOf = t.parent_gid && (t.in_milestone || isMs(t.gid)) ? t.parent_gid : null;
-  const okReview = t.stage === "reviewed" && pr?.state === "OPEN" && rv?.verdict === "approve" && rv.head_sha === pr.head_sha;
+  const okReview = !t.milestone_error && t.stage === "reviewed" && pr?.state === "OPEN" && rv?.verdict === "approve" && rv.head_sha === pr.head_sha;
   const approvable = !!stg && okReview;
   const baseOk = pr?.base === stg;
   const conflict = pr?.state === "OPEN" && pr.mergeable === "CONFLICTING";
@@ -58,7 +58,7 @@ export function TicketCard({ t, s, I, onAssign, onSkip, onApprove, onOverride, o
   // AI said blocked/changes on the head: the owner can approve that head with a reason (TP-99, release.request_approval)
   const reviewOverridden = !!t.review_override && !!pr && t.review_override_sha === pr.head_sha;
   const canOverrideReview =
-    !!stg && pr?.state === "OPEN" && baseOk && !conflict && !gate &&
+    !t.milestone_error && !!stg && pr?.state === "OPEN" && baseOk && !conflict && !gate &&
     // blocked: escalate_rework handed the fix loop to the owner; a rule violation (pipeline.VIOLATION) is not approvable
     (t.stage === "reviewed" || t.stage === "rework" || (t.stage === "blocked" && !run?.ws_comment?.startsWith("BLOCKED: 규칙 위반"))) &&
     (rv?.verdict === "blocked" || rv?.verdict === "changes");
@@ -102,6 +102,7 @@ export function TicketCard({ t, s, I, onAssign, onSkip, onApprove, onOverride, o
         {repoBadge && ticketRepos(s, I, t).map((r) => <Badge key={r} status="draft">{r}</Badge>)}
       </div>
       <div className="my-1.5 text-sm font-semibold leading-snug text-text-main">{t.name}</div>
+      {t.milestone_error && <p className="mb-2 text-xs text-danger-700">{t.milestone_error}</p>}
       <div className="text-xs leading-relaxed text-text-muted">
         {t.project_name || "-"}
         {run ? (

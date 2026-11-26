@@ -2,10 +2,9 @@ import { useEffect, useState } from "react";
 import { Button, Card, Input } from "../ui";
 import { ConfirmButton } from "./ConfirmButton";
 import { PortConflict, devCheck, devStart, post } from "../api";
-import { ago } from "../lib";
+import { ago, milestoneRepo } from "../lib";
 import type { DevCheck, DevConflict, State, Ticket } from "../types";
 
-const repoOf = (gid: string) => gid.split(":").slice(2).join(":").split("_").at(-1);
 const url = (port: number) => `http://${location.hostname}:${port}`;
 
 function Procs({ c }: { c: DevConflict }) {
@@ -129,7 +128,7 @@ export function DevServerPanel({ t, s, onReload }: { t: Ticket; s: State; onRelo
   return (
     <Card className="p-4">
       <div className="mb-2 flex items-center justify-between gap-2">
-        <span className="text-sm font-semibold text-text-main">{repoOf(t.gid)}</span>
+        <span className="text-sm font-semibold text-text-main">{milestoneRepo(t.gid).split("_").at(-1)}</span>
         {d && (
           <span className={d.listening ? "text-xs font-medium text-success-700" : d.alive ? "text-xs text-text-muted" : "text-xs font-medium text-danger-700"}>
             {d.listening ? "실행 중" : d.alive ? "시작하는 중…" : "멈췄어요"}

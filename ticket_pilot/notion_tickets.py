@@ -11,7 +11,8 @@ from .core import ROOT, effective_config, event, meta_get, meta_set, read_config
 
 FILTER_TYPES = {"people": ("people",), "tag": ("select", "multi_select"), "status": ("status", "select")}
 FIELDS = {"connection_id", "data_source_id", "assignee", "people_property", "tag_property", "tag_option",
-          "status_property", "status_option", "date_property"} | notion_membership.FIELDS
+          "status_property", "status_option", "date_property", "milestone_data_source_id",
+          "milestone_property"} | notion_membership.FIELDS
 # Stages of an actual Notion run. Filter membership and the pre-dispatch queue are read-only.
 WRITE_STAGES = {"dispatched", "in_progress", "blocked", "agent_done", "pr_open", "rework", "conflict",
                 "reviewed", "approving", "staged", "merged", "deploying", "closed", "done"}
@@ -24,7 +25,7 @@ def agent_rules(project_id):
     return (ROOT / "prompts" / "notion.md").read_text().strip().replace("{{PROJECT_ID}}", shlex.quote(project_id))
 
 
-def validate(cfg):
+def validate(cfg, *, con=None, previous=None):
     if (not isinstance(cfg, dict) or cfg.keys() - FIELDS - {"stage_statuses"}
             or any(not isinstance(cfg[k], str) for k in FIELDS & cfg.keys())):
         raise notion.NotionError("Notion 연결과 가져오기 조건을 확인하세요")
@@ -42,6 +43,17 @@ def validate(cfg):
         if cfg.get(f"{role}_option") and not cfg.get(f"{role}_property"):
             raise notion.NotionError("선택한 값에 해당하는 열을 골라 주세요")
     notion_membership.validate(cfg)
+    source = cfg.get("milestone_data_source_id")
+    if source or cfg.get("milestone_property"):
+        if not notion.valid_id(source) or not cfg.get("milestone_property", "").strip():
+            raise notion.NotionError("마일스톤 DB와 작업 DB의 마일스톤 관계 열을 함께 골라 주세요")
+        if source == cfg["data_source_id"]:
+            raise notion.NotionError("마일스톤 DB는 작업 DB와 다른 데이터베이스를 골라 주세요")
+        binding = ("connection_id", "data_source_id", "milestone_data_source_id", "milestone_property")
+        if con is not None and any(cfg.get(k) != (previous or {}).get(k) for k in binding):
+            client = notion.Client(con, cfg["connection_id"])
+            schema = {col["id"]: col for col in client.properties(cfg["data_source_id"])}
+            notion_membership.relation_column(schema, cfg, "milestone")
     stages = cfg.get("stage_statuses", {})
     if (not isinstance(stages, dict) or stages.keys() - WRITE_STAGES
             or any(not isinstance(v, str) or not v for v in stages.values())
@@ -128,17 +140,51 @@ class Listing:
     rows: dict[str, dict] = field(default_factory=dict)
     unresolved: set[str] = field(default_factory=set)
     error: str | None = None
+    parents: dict[str, dict] = field(default_factory=dict)
 
 
-def matches(con, project, work_tag, rules):
+def _milestone_parent(client, page, column, source, cache):
+    prop = page["properties"].get(column["name"], {})
+    if prop.get("type") != "relation" or not isinstance(prop.get("relation"), list):
+        raise notion.NotionError("작업의 마일스톤 관계 열을 읽을 수 없어요")
+    ids = set(client.relation_ids(page, column))
+    if len(ids) > 1:
+        raise notion.NotionError(f"마일스톤이 {len(ids)}개 연결되어 있어요. 한 개만 연결한 뒤 다시 동기화하세요")
+    if ids:
+        page_id = ids.pop()
+        if not notion.valid_id(page_id):
+            raise notion.NotionError("연결된 마일스톤 페이지 ID를 확인할 수 없어요")
+        if page_id not in cache:
+            cache[page_id] = client.page(page_id, source)
+        return cache[page_id]
+
+
+def matches(con, project, work_tag, rules, *, track_runs=False):
     cfg = project["notion"]
     validate(cfg)
     client = notion.Client(con, cfg["connection_id"])
     pages, schema = _query(client, cfg)
+    milestone_col = notion_membership.relation_column(schema, cfg, "milestone")
+    milestones = {}
     membership = notion_membership.Membership(client, cfg["data_source_id"], schema, rules, project["id"])
     if cfg.get("project_page_id"):
         client.page(cfg["project_page_id"], cfg["project_data_source_id"])
     listing = Listing()
+
+    def read_parent(gid, page=None):
+        parent, error = None, None
+        try:
+            if milestone_col:
+                if page is None:
+                    page = client.page(gid.removeprefix("notion:"), cfg["data_source_id"])
+                parent = _milestone_parent(client, page, milestone_col, cfg["milestone_data_source_id"], milestones)
+        except notion.NotionError as e:
+            error = str(e)
+        listing.parents[gid] = {"parent_gid": f"notion:{parent['id']}" if parent else None,
+                                "parent_name": (notion.page_title(parent) or "제목 없음") if parent else None,
+                                "parent_url": parent["url"] if parent else None, "in_milestone": int(bool(parent)),
+                                "milestone_error": error}
+
     for page in pages:
         if not notion.active_page(page):
             continue
@@ -155,9 +201,19 @@ def matches(con, project, work_tag, rules):
                 continue
         elif project["id"] not in owners:
             continue
+        read_parent(gid, page)
         listing.rows[gid] = {**_page_fields(page, cfg, schema, work_tag), "gid": gid, "key": ticket_key(page_id),
                              "project_gid": f"notion:{project['id']}", "project_name": project["name"],
                              "ancestors": [f"notion:{i}" for i in ancestors], "owners": owners}
+    if track_runs:
+        # A stage write may exclude a running page from the import query. Its owner still needs current routing.
+        running = con.execute("""SELECT t.gid FROM tickets t WHERE project_gid=? AND completed=0
+                                 AND gid LIKE 'notion:%' AND (? OR in_milestone=1 OR milestone_error IS NOT NULL)
+                                 AND (SELECT state FROM runs WHERE ticket_gid=t.gid ORDER BY id DESC LIMIT 1) != 'abandoned'""",
+                              ("notion:" + project["id"], bool(milestone_col)))
+        for gid, in running.fetchall():
+            if gid not in listing.parents:
+                read_parent(gid)
     return listing
 
 
@@ -210,7 +266,7 @@ def fetch(con, projects, work_tag, *, through=None):
         rules = notion_membership.settings(projects, p["notion"]["data_source_id"])
         key = (p["id"], _version(p, work_tag, rules))
         try:
-            listings[key] = matches(con, p, work_tag, rules)
+            listings[key] = matches(con, p, work_tag, rules, track_runs=through is None)
         except (RuntimeError, OSError, ValueError, KeyError, TypeError) as e:
             listings[key] = Listing(error=str(e))
         if p is through:
@@ -282,7 +338,8 @@ def queued_page(con, ticket, repo):
     markdown = client.markdown(ticket["gid"].removeprefix("notion:"))
     # A sync, skip or project edit can finish while the body is in flight. Build the brief from the current row.
     current = con.execute("SELECT * FROM tickets WHERE gid=?", (ticket["gid"],)).fetchone()
-    if (not current or current["project_gid"] != project_gid or compute_stage(con, current) != "queued"
+    if (not current or current["project_gid"] != project_gid or current["parent_gid"] != ticket["parent_gid"]
+            or compute_stage(con, current) != "queued"
             or chosen_repo(con, current) != repo or _dispatch_source(con, project_gid, current["gid"]) != source):
         raise notion.NotionError("페이지를 읽는 동안 대기열이나 프로젝트 설정이 바뀌었어요")
     return current, markdown
@@ -296,6 +353,7 @@ def _repo_override(old, project_gid, repos):
 
 
 def sync(con, generation, listings, ts, new_tagged):
+    from . import milestone
     if generation is None:
         return {}
     # Settings may have changed during the network reads. Apply results against the same snapshot as the write.
@@ -346,6 +404,24 @@ def sync(con, generation, listings, ts, new_tagged):
                              last_seen=excluded.last_seen,repo_override=excluded.repo_override,due_on=excluded.due_on""",
                         {**row, "repo_override": _repo_override(old, row["project_gid"], doc["project_map"]["repos"]),
                          "project_name": p["name"], "ts": ts})
+        for gid, parent in listing.parents.items():
+            active = run_owners.get(gid) == "notion:" + p["id"]
+            if gid in edited or (gid not in owned and not active):
+                continue
+            old = con.execute("SELECT * FROM tickets WHERE gid=?", (gid,)).fetchone()
+            if error := parent["milestone_error"]:
+                if error != old["milestone_error"]:
+                    event(con, "error", f"{old['key']}: {error}", gid)
+                if active:
+                    # Keep the last known branch until the owner resolves an ambiguous relation.
+                    parent = {k: old[k] if k != "milestone_error" else error for k in parent}
+            if any(old[k] != v for k, v in parent.items()):
+                if old["parent_gid"] != parent["parent_gid"] or old["milestone_error"] != parent["milestone_error"]:
+                    con.execute("UPDATE tickets SET approve_requested_at=NULL,auto_approved_sha=NULL WHERE gid=?", (gid,))
+                con.execute("""UPDATE tickets SET parent_gid=:parent_gid,parent_name=:parent_name,parent_url=:parent_url,
+                               in_milestone=:in_milestone,milestone_error=:milestone_error WHERE gid=:gid""", {**parent, "gid": gid})
+                if parent["parent_gid"] and not parent["milestone_error"]:
+                    milestone.refresh_parent(con, parent["parent_gid"], parent["parent_name"], parent["parent_url"])
     meta_set(con, SYNC_STATE, {"generation": generation, "projects": state, "edited": edited,
                                "ancestors": {gid: parents for gid, parents in ancestors.items() if gid in seen}})
     con.executemany("UPDATE tickets SET assigned=0 WHERE gid=?", [(r[0],) for r in previous if r[0] not in seen])
@@ -375,7 +451,7 @@ def preview(con, projects, project, work_tag):
         registered = {r[0] for r in con.execute("SELECT name FROM repos")}
         for gid, row in listing.rows.items():
             old = con.execute("SELECT * FROM tickets WHERE gid=?", (gid,)).fetchone()
-            ticket = {"completed": 0, "skip": 0, "open_deps": 0, **(dict(old) if old else {}), **row,
+            ticket = {"completed": 0, "skip": 0, "open_deps": 0, **(dict(old) if old else {}), **row, **listing.parents[gid],
                       "repo_override": _repo_override(old, row["project_gid"], registered), "assigned": 1}
             stage = "other_project" if gid not in owned else compute_stage(con, ticket, repo_count=len(project["repos"]))
             items.append({"gid": gid, "title": row["name"], "stage": stage, "auto_start": stage == "queued"})

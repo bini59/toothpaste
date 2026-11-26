@@ -26,6 +26,7 @@ export function notionError(value: NotionFilters) {
   if (value.assignee !== "all" && !value.people_property) return "담당자 열을 고르거나 담당자를 전체로 바꿔 주세요";
   if (!!value.contains_property !== !!value.contains_text?.trim()) return "문자열을 검사할 열과 포함할 문자열을 함께 입력하세요";
   if (value.project_data_source_id && !value.project_page_id) return "선택한 DB에서 프로젝트 행을 골라 주세요";
+  if (!!value.milestone_data_source_id !== !!value.milestone_property) return "마일스톤 DB와 작업 DB의 마일스톤 관계 열을 함께 골라 주세요";
   return "";
 }
 
@@ -278,6 +279,23 @@ export function NotionSource({ projectId, value, repos, workTag, onChange }: {
           </label>
         </div>
         <p className="text-xs text-text-muted">직접 연결된 프로젝트 행, 상위 작업의 프로젝트, 문자열 일치 순으로 소속을 정해요.</p>
+      </fieldset>
+      <fieldset className="space-y-3 border-t border-border pt-3">
+        <legend className="text-sm font-semibold text-text-main">마일스톤</legend>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Picker label="마일스톤 DB" value={value.milestone_data_source_id ?? ""} placeholder="사용 안 함"
+            choices={(sources?.data ?? []).filter((s) => s.id !== value.data_source_id)} disabled={!sources?.data || !schema?.data}
+            onChange={(id) => {
+              const columns = id ? relationsTo(id) : [];
+              onChange({ ...value, milestone_data_source_id: id || undefined,
+                milestone_property: columns.length === 1 ? columns[0].id : undefined });
+            }} />
+          {value.milestone_data_source_id && <Picker label="작업 DB의 마일스톤 관계 열" value={value.milestone_property ?? ""}
+            choices={relationsTo(value.milestone_data_source_id)} placeholder="관계 열 고르기…" disabled={!schema?.data}
+            onChange={(id) => onChange({ ...value, milestone_property: id || undefined })} />}
+        </div>
+        {value.milestone_data_source_id && schema?.data && !relationsTo(value.milestone_data_source_id).length &&
+          <p className="text-xs text-text-muted">작업 DB에 선택한 마일스톤 DB를 가리키는 관계 열을 추가하세요.</p>}
       </fieldset>
       <p className="text-xs text-text-muted">해당 프로젝트에서 담당자·태그·상태 조건을 모두 만족하는 페이지를 가져와요. 태그 열에 <strong>{workTag}</strong>가 있고 작업 레포가 정해진 티켓이 자동 시작 대상이에요.</p>
       <NotionPreview key={JSON.stringify([projectId, value, repos, workTag])} projectId={projectId} value={value} repos={repos} />

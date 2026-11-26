@@ -590,8 +590,10 @@ _COLUMNS = {
                 "check_override": "TEXT", "check_override_sha": "TEXT",
                 # review_override(_sha): the owner's reason for approving a head the AI review did not approve (TP-99)
                 "review_override": "TEXT", "review_override_sha": "TEXT",
-                # milestone.py: the Asana parent has the milestone tag; head the AI approval auto-merged once
+                # milestone.py: participation and the head the AI approval auto-merged once
                 "in_milestone": "INTEGER", "auto_approved_sha": "TEXT",
+                # A Notion milestone page lives outside the task DB. Keep its link or a per-task relation error.
+                "parent_url": "TEXT", "milestone_error": "TEXT",
                 # milestone tickets: when the owner pressed 마일스톤 작업 완료 (cleared again when a subtask comes in)
                 "ms_done_at": "TEXT",
                 # pipeline.restage: when the stage became done/closed (NULL again once reopened); the board hides old ones
