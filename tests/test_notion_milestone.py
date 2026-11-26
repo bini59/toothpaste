@@ -32,7 +32,7 @@ class NotionMilestones(NotionDashboard):
     def add_repo(self, name):
         self.post("/api/config", {"scope": f"repo.{name}", "value": {
             "path": str(self.root), "github": f"example/{name}", "deploy": {
-                "modes": ["staging"], "staging": {"branch": "staging"}, "prod": {"branch": "main"}}}})
+                "modes": ["staging", "direct", "promote"], "staging": {"branch": "staging"}, "prod": {"branch": "main"}}}})
 
     def ticket(self, gid):
         return self.con.execute("SELECT * FROM tickets WHERE gid=?", (gid,)).fetchone()
@@ -181,23 +181,125 @@ class NotionMilestones(NotionDashboard):
         self.assertEqual(milestone.reopen(self.con), 1)
         self.assertFalse(self.ticket(gid)["completed"])
 
-    def test_ambiguous_reviewed_ticket_cannot_deploy_directly(self):
-        cli.main(["sync"])
-        url = self.merged_pr(self.gid, "app", milestone.branch(self.parent_gid))
+    def reviewed_pr(self, gid, base):
+        url = self.merged_pr(gid, "app", base)
         self.con.execute("UPDATE prs SET state='OPEN',merged_at=NULL,head_sha='head' WHERE url=?", (url,))
         self.con.execute("INSERT INTO reviews(pr_url,head_sha,verdict) VALUES (?,'head','approve')", (url,))
+        pipeline.restage(self.con)
         self.con.commit()
-        with mock.patch.object(deploy, "repo_rules", return_value={**core.repo_rules("app"), "modes": ["staging", "direct"]}):
-            self.assertIsNone(deploy.deploy_target(self.con, "direct", self.gid)[1])
-            self.child["properties"]["출시"] = relation(self.parent["id"], uid(301))
+        return url
+
+    def assert_direct_blocked(self, gid, url, reason):
+        status, result, _ = self.call("/api/deploy", {"mode": "direct", "ticket": gid})
+        self.assertEqual(status, 400)
+        self.assertIn(reason, result["error"])
+        pr = next(p for p in server._state(self.con)["prs"] if p["url"] == url)
+        self.assertEqual(pr["direct_deploy_error"], result["error"])
+        self.assertEqual(self.con.execute("SELECT count(*) FROM releases").fetchone()[0], 0)
+
+    def assert_last_deploy_failed(self, reason):
+        row = self.con.execute("SELECT status,reason FROM releases ORDER BY id DESC LIMIT 1").fetchone()
+        self.assertEqual(row["status"], "failed")
+        self.assertIn(reason, row["reason"])
+
+    def test_direct_request_checks_both_relation_and_original_pr_base(self):
+        cli.main(["sync"])
+        base = milestone.branch(self.parent_gid)
+        url = self.reviewed_pr(self.gid, base)
+        self.assertEqual(release.approval_target(self.con, self.ticket(self.gid))[0]["base"], base)
+        self.assert_direct_blocked(self.gid, url, "staging")
+        self.child["properties"]["출시"] = relation(self.parent["id"], uid(301))
+        cli.main(["sync"])
+        self.assertEqual(self.ticket(self.gid)["stage"], "reviewed")
+        self.assert_direct_blocked(self.gid, url, "마일스톤이 2개")
+        self.child["properties"]["출시"] = relation()
+        cli.main(["sync"])
+        self.assert_direct_blocked(self.gid, url, "staging")
+        self.con.execute("UPDATE prs SET base='staging' WHERE url=?", (url,))
+        self.con.commit()
+        self.post("/api/deploy", {"mode": "direct", "ticket": self.gid})
+
+    def test_queued_direct_deploy_rechecks_new_milestone_links_before_preparing(self):
+        cli.main(["sync"])
+        gid = "notion:" + self.other["id"]
+        self.reviewed_pr(gid, "staging")
+        for ids, reason in [([self.parent["id"]], "staging"), ([self.parent["id"], uid(301)], "마일스톤이 2개")]:
+            with self.subTest(ids=ids):
+                self.post("/api/deploy", {"mode": "direct", "ticket": gid})
+                self.other["properties"]["출시"] = relation(*ids)
+                cli.main(["sync"])
+                with mock.patch.object(deploy, "_prepare") as prepare:
+                    deploy.deploy_tick()
+                prepare.assert_not_called()
+                self.assert_last_deploy_failed(reason)
+                self.other["properties"]["출시"] = relation()
+                cli.main(["sync"])
+
+    def test_direct_deploy_checks_live_pr_base_before_cherry_pick(self):
+        cli.main(["sync"])
+        gid = "notion:" + self.other["id"]
+        self.reviewed_pr(gid, "staging")
+        self.post("/api/deploy", {"mode": "direct", "ticket": gid})
+        live = {"state": "OPEN", "baseRefName": milestone.branch(self.parent_gid), "headRefOid": "head"}
+        with mock.patch.object(deploy, "gh_json", return_value=live), mock.patch.object(deploy, "_release_branch") as branch:
+            deploy.deploy_tick()
+        branch.assert_not_called()
+        self.assert_last_deploy_failed("마일스톤 PR")
+
+    def test_milestone_link_added_while_marking_draft_ready_stops_the_merge(self):
+        cli.main(["sync"])
+        gid = "notion:" + self.other["id"]
+        url = self.reviewed_pr(gid, "main")
+        self.post("/api/deploy", {"mode": "direct", "ticket": gid})
+        live = {"state": "OPEN", "baseRefName": "main", "headRefOid": "head", "number": 1,
+                "isDraft": True, "mergeable": "MERGEABLE", "statusCheckRollup": []}
+
+        def link_while_ready(args):
+            self.assertEqual(args, ["pr", "ready", url])
+            self.other["properties"]["출시"] = relation(self.parent["id"])
             cli.main(["sync"])
-            t = self.ticket(self.gid)
-            self.assertEqual(t["stage"], "reviewed")
-            self.assertEqual(deploy.deploy_target(self.con, "direct", self.gid)[1], t["milestone_error"])
-            request = {"status": "requested", "repo": "app", "mode": "direct", "ticket_gid": self.gid}
-            with self.assertRaisesRegex(RuntimeError, "마일스톤이 2개"), mock.patch.object(deploy, "_prepare") as prepare:
-                deploy._step(self.con, request, print)
-            prepare.assert_not_called()
+
+        with mock.patch.object(deploy, "gh_json", return_value=live), \
+                mock.patch.object(deploy, "_gh", side_effect=link_while_ready) as gh:
+            deploy.deploy_tick()
+        gh.assert_called_once_with(["pr", "ready", url])
+        self.assert_last_deploy_failed("마일스톤 PR")
+
+    def test_direct_deploy_rechecks_the_ticket_while_its_release_pr_waits_for_checks(self):
+        cli.main(["sync"])
+        gid = "notion:" + self.other["id"]
+        self.reviewed_pr(gid, "staging")
+        self.post("/api/deploy", {"mode": "direct", "ticket": gid})
+        source = {"state": "OPEN", "baseRefName": "staging", "headRefOid": "head"}
+        prod = {"state": "OPEN", "baseRefName": "main", "number": 42, "isDraft": False, "statusCheckRollup": []}
+        views = [source, {**prod, "mergeable": "UNKNOWN"}, {**prod, "mergeable": "MERGEABLE"}]
+        with mock.patch.object(deploy, "gh_json", side_effect=views), mock.patch.object(deploy, "POLL_S", -1), \
+                mock.patch.object(deploy, "_release_branch", return_value=("release/test", None, None)), \
+                mock.patch.object(deploy, "_open_pr", return_value="https://github.com/example/app/pull/42"), \
+                mock.patch.object(deploy, "_gh") as merge:
+            deploy.deploy_tick()
+            self.assertEqual(self.con.execute("SELECT status FROM releases").fetchone()[0], "running")
+            self.other["properties"]["출시"] = relation(self.parent["id"])
+            cli.main(["sync"])
+            deploy.deploy_tick()
+        merge.assert_not_called()
+        self.assert_last_deploy_failed("마일스톤 PR")
+
+    def test_milestone_pr_goes_through_staging_before_promotion(self):
+        cli.main(["sync"])
+        gid = milestone.ms_gid(self.parent_gid, "app")
+        with mock.patch.object(milestone, "_gh", return_value=mock.Mock(returncode=0)):
+            base = milestone.ensure(self.con, self.ticket(self.gid), "app")
+        self.merged_pr(self.gid, "app", base)
+        pipeline.restage(self.con)
+        self.con.commit()
+        self.post("/api/milestone-done", {"parent": self.parent_gid})
+        url = self.reviewed_pr(gid, "staging")
+        self.assert_direct_blocked(gid, url, "staging")
+        self.assertIsNone(release.approval_target(self.con, self.ticket(gid))[1])
+        self.con.execute("UPDATE prs SET state='MERGED',merged_at=? WHERE url=?", (core.now(), url))
+        self.con.commit()
+        self.post("/api/deploy", {"mode": "promote", "ticket": gid, "pr_url": url})
 
     def test_merged_child_ships_with_its_branch_after_relation_is_cleared(self):
         cli.main(["sync"])

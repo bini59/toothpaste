@@ -206,7 +206,7 @@ export function TicketCard({ t, s, I, onAssign, onSkip, onApprove, onOverride, o
       {approvable && !baseOk && (
         <p className="mt-2 text-xs text-text-muted">PR base가 {pr?.base ?? "?"}라 승인할 수 없어요 ({stg}만 가능)</p>
       )}
-      {okReview && !stg && prodModes.length > 0 && (
+      {okReview && !stg && prodModes.length > 0 && !pr?.direct_deploy_error && (
         <a href="#release" className="mt-2 block text-xs font-medium text-primary hover:text-primary-700 hover:underline">
           배포 페이지에서 prod 배포 →
         </a>

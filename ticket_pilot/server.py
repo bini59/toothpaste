@@ -101,11 +101,14 @@ def _state(con) -> dict:
             deps = P.deps_status(con, t)
             t["deps_json"] = json.dumps(deps, ensure_ascii=False)
             t["open_deps"] = sum(1 for d in deps if not d["completed"] and not d["landed"])
+    tickets_by_gid = {t["gid"]: t for t in tickets}
     for p in prs:
         # tp checks of the open head (checks.py): state none|pending|pass|fail|error, rows, and the approval gate text
         if p["state"] == "OPEN":
             cs = K.check_state(con, p)
             p["checks"] = {"state": cs["state"], "rows": cs["rows"], "gate": K.gate_error(con, p)}
+            if t := tickets_by_gid.get(p["ticket_gid"]):
+                p["direct_deploy_error"] = D.milestone_deploy_error("direct", t, p["base"])
         elif p["url"] in staged_urls and MS.awaiting_next_round(con, p["ticket_gid"]):
             p["awaiting_milestone_round"] = True
     return {

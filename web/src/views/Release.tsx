@@ -159,7 +159,7 @@ export function Release({ s, onHold, onDeploy, onCancelDeploy }: Props) {
             프리뷰
           </ConfirmButton>,
         );
-      if (r.modes.includes("direct"))
+      if (r.modes.includes("direct") && !pr.direct_deploy_error)
         out.push(
           <ConfirmButton key="dir" size="sm" disabled={busy}
             message={<><b>프로덕션({r.prod.branch})</b>에 바로 내보낼까요? {directPlan(r, pr, "direct")}</>}
@@ -179,7 +179,8 @@ export function Release({ s, onHold, onDeploy, onCancelDeploy }: Props) {
         </ConfirmButton>,
       );
     }
-    return out.length ? <div className="flex flex-wrap gap-1.5">{out}</div> : <span className="text-xs text-text-muted">이 레포 규칙에 없는 방식</span>;
+    if (out.length) return <div className="flex flex-wrap gap-1.5">{out}</div>;
+    return <span className="text-xs text-text-muted">{pr.direct_deploy_error ?? "이 레포 규칙에 없는 방식"}</span>;
   };
 
   return (

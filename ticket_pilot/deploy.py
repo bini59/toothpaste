@@ -59,6 +59,17 @@ def _approved(con, pr) -> bool:
     return bool(rv) and rv["verdict"] == "approve"
 
 
+def milestone_deploy_error(mode: str, t, base: str | None) -> str | None:
+    """Check the route of an open ticket PR for a direct deploy or preview."""
+    if t["milestone_error"] or mode != "direct":
+        return t["milestone_error"]
+    # The relation and the PR base can change on different ticks. Both must be clear before a direct deploy.
+    subtask = t["gid"].startswith("notion:") and (M.in_milestone(t) or (base or "").startswith(M.PREFIX))
+    if subtask or t["gid"].startswith("ms:notion:"):
+        return "마일스톤 PR을 staging에 머지한 뒤 함께 배포해요"
+    return None
+
+
 def staged_prs(con, repo: str) -> list[dict]:
     rows = staged_by_repo(con, [repo]).get(repo, [])
     return [_pr_item(p, p["key"], p["tname"]) for p in rows]
@@ -126,8 +137,8 @@ def deploy_target(con, mode: str, ticket: str | None = None, repo: str | None = 
     if dup:
         return None, f"이 티켓은 이미 배포 중이에요 (#{dup['id']})"
     if mode in ("direct", "preview"):
-        if t["milestone_error"]:
-            return None, t["milestone_error"]
+        if err := milestone_deploy_error(mode, t, pr["base"]):
+            return None, err
         if pr["state"] != "OPEN":
             return None, "열린 PR이 없어요"
         if not _approved(con, pr):
@@ -250,13 +261,26 @@ def _save(con, rel_id, status=None, step=None, **cols):
     return _row(con, rel_id)
 
 
+def _check_milestone_deploy(con, rel, *, source_base=None):
+    if rel["mode"] not in ("direct", "preview") or not (rel["ticket_gid"] or "").startswith(("notion:", "ms:notion:")):
+        return
+    # A running direct deploy may be merging a cherry-picked release PR. Check the original ticket PR.
+    source, = json.loads(rel["prs_json"])
+    t = con.execute("""SELECT t.gid,t.parent_gid,t.in_milestone,t.milestone_error,p.base
+                       FROM tickets t JOIN prs p ON p.ticket_gid=t.gid WHERE t.gid=? AND p.url=?""",
+                    (rel["ticket_gid"], source["url"])).fetchone()
+    if not t:
+        raise RuntimeError("배포를 요청한 티켓 PR을 찾을 수 없어요")
+    if err := milestone_deploy_error(rel["mode"], t, source_base or t["base"]):
+        raise RuntimeError(err)
+
+
 def _step(con, rel, log) -> str:
     rr = repo_rules(rel["repo"])
     if not rr:
         raise RuntimeError(f"{rel['repo']} 배포 규칙이 없어졌어요")
     if rel["status"] == "requested":
-        if rel["mode"] in ("direct", "preview") and (t := _ticket(con, rel["ticket_gid"])) and t["milestone_error"]:
-            raise RuntimeError(t["milestone_error"])
+        _check_milestone_deploy(con, rel)
         return _prepare(con, rel, rr, log)
     if rel["status"] == "running":
         st = _state(rel)
@@ -291,6 +315,7 @@ def _prepare(con, rel, rr, log) -> str:
             raise RuntimeError(f"PR #{p['number']}이 열려 있지 않아요 ({live['state']})")
         if live["headRefOid"] != p["head_sha"]:
             raise RuntimeError("요청 후 새 커밋이 올라왔어요. 재리뷰 후 다시 요청해 주세요")
+        _check_milestone_deploy(con, rel, source_base=live["baseRefName"])
         if live["baseRefName"] == target and not rr.get("version"):
             return _to_merge(con, rel, rr, log, pr=p["url"], into=target, method=rr["merge"],
                              step=f"PR #{p['number']} → {target} 머지")
@@ -371,6 +396,14 @@ def _checks(info) -> tuple[list[str], list[str]]:
     return failed, pending
 
 
+def _ready_for_merge(con, rel, url, info, *, source_base=None):
+    if info["isDraft"]:
+        _check_milestone_deploy(con, rel, source_base=source_base)
+        _gh(["pr", "ready", url])
+    # A sync can change the relation while GitHub marks the draft ready.
+    _check_milestone_deploy(con, rel, source_base=source_base)
+
+
 def _merge(con, rel, rr, st, log) -> str:
     url, into = st["pr"], st["into"]
     fields = "state,isDraft,mergeable,statusCheckRollup,mergeCommit,baseRefName,number"
@@ -382,12 +415,9 @@ def _merge(con, rel, rr, st, log) -> str:
             break
         if info["state"] == "CLOSED":
             raise RuntimeError(f"PR #{info['number']}이 닫혔어요")
-        if rel["mode"] == "direct" and (t := _ticket(con, rel["ticket_gid"])) and t["milestone_error"]:
-            raise RuntimeError(t["milestone_error"])
         if info["baseRefName"] != into:
             raise RuntimeError(f"PR #{info['number']} base가 {info['baseRefName']}로 바뀌었어요 ({into}여야 해요)")
-        if info["isDraft"]:
-            _gh(["pr", "ready", url])
+        _ready_for_merge(con, rel, url, info)
         if info["mergeable"] == "CONFLICTING":
             raise RuntimeError(f"PR #{info['number']}이 {into}와 충돌해요")
         failed, pending = _checks(info)
@@ -409,8 +439,7 @@ def _merge(con, rel, rr, st, log) -> str:
         try:
             b = gh_json(["pr", "view", st["backsync"], "--json", "state,isDraft,number,baseRefName"])
             if b["state"] == "OPEN":
-                if b["isDraft"]:
-                    _gh(["pr", "ready", st["backsync"]])
+                _ready_for_merge(con, rel, st["backsync"], b, source_base=b["baseRefName"])
                 _gh(["pr", "merge", st["backsync"], "--merge"])
                 notes.append(f"원래 PR #{b['number']}도 {b['baseRefName']}에 머지")
         except Exception as e:  # noqa: BLE001
@@ -437,6 +466,7 @@ def _merge(con, rel, rr, st, log) -> str:
 
 def _promote(con, rel, rr, st, log) -> str:
     """A repo with a via branch (staging -> main -> production): via (main) -> prod (production) after the release branch landed in via; tag + GitHub release on merge."""
+    _check_milestone_deploy(con, rel)
     gh, via, prod = rel["github"], rr["via"], rr["prod"]["branch"]
     ahead = run(["gh", "api", f"repos/{gh}/compare/{prod}...{via}", "--jq", ".commits[].sha"], timeout=120).stdout.split()
     n = st["via_pr"].rstrip("/").rsplit("/", 1)[-1]

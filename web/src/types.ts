@@ -71,6 +71,8 @@ export interface PR {
   mergeable: "MERGEABLE" | "CONFLICTING" | null;
   /** open PRs only: tp's own checks of the head commit (checks.py) */
   checks?: PrChecks;
+  /** Milestone routing reason shown in place of a direct deploy action on an open PR. */
+  direct_deploy_error?: string | null;
   awaiting_milestone_round?: boolean;
 }
 export interface CheckRow {
