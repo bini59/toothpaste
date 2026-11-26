@@ -491,9 +491,8 @@ def chosen_repo(con, t, repos=None):
 
 def resume_staging_error(con, t):
     """A retry uses the existing worktree's repo even if the project mapping has changed."""
-    if t["gid"].startswith(("notion:", "ms:notion:")) and (r := latest_run(con, t["gid"])):
-        pr = run_pr(con, r["id"])
-        return M.staging_config_error(t, r["repo"], pr and pr["base"])
+    if M.notion_milestone(t) and (r := latest_run(con, t["gid"])):
+        return M.staging_config_error(t, r["repo"])
     return None
 
 
@@ -927,9 +926,40 @@ def scan(log=print) -> dict:
     return res
 
 
+def _retarget_pr(con, r, t, pr) -> None:
+    repo, old_base = r["repo"], pr.get("baseRefName")
+    if pr["state"] != "OPEN" or (t and (t["milestone_error"] or M.staging_config_error(t, repo))):
+        return
+    target = M.base_for(t, repo)
+    into_milestone = (target or "").startswith(M.PREFIX)
+    from_milestone = t and M.on_notion_milestone_branch(t, old_base)
+    if from_milestone and not target:
+        # Unlinked tasks on repos without a feature base can still use staging. When that route is
+        # disabled, ordinary PRs use the GitHub default branch (which can differ from prod).
+        target = M.staging_of(repo, notion=True) or gh_json(
+            ["repo", "view", r["github"], "--json", "defaultBranchRef"])["defaultBranchRef"]["name"]
+    if not target or target == old_base:
+        return
+    if not from_milestone:
+        # Correct PRs opened on the default branch, or on staging before a task joined a milestone.
+        rr = repo_rules(repo)
+        since = (rr and rr.get("retarget_since")) or settings().get("release", {}).get("retarget_since", "")
+        from_default = rr and old_base == rr["target"] and pr["createdAt"] >= since
+        if not from_default and not (into_milestone and old_base == M.staging_of(repo)):
+            return
+    if into_milestone:
+        M.ensure(con, t, repo)
+    if from_milestone:
+        M.check_retarget(r["github"], old_base, target, pr["headRefOid"])
+    # Use REST because gh pr edit can fail on the Projects (classic) GraphQL deprecation.
+    run(["gh", "api", "-X", "PATCH", f"repos/{r['github']}/pulls/{pr['number']}", "-f", f"base={target}"], timeout=120)
+    pr["baseRefName"] = target
+    pr["mergeable"] = None  # GitHub computed it against the old base.
+    event(con, "retarget", f"PR #{pr['number']} base {old_base} -> {target}", r["ticket_gid"])
+
+
 def refresh_prs(con, r, branch) -> int:
-    """Re-read the run's PRs from GitHub (head, mergeable, state) into prs, retargeting feature PRs opened against
-    the default branch. Returns how many it found."""
+    """Refresh the run's PRs from GitHub, retargeting open PRs as their ticket's base changes."""
     if not r["github"] or not branch:
         return 0
     found_prs = 0
@@ -939,13 +969,7 @@ def refresh_prs(con, r, branch) -> int:
     except Exception as e:  # noqa: BLE001
         event(con, "error", f"gh pr list {r['github']} {branch}: {e}", r["ticket_gid"])
         return 0
-    rel = settings().get("release", {})
     t = con.execute("SELECT * FROM tickets WHERE gid=?", (r["ticket_gid"],)).fetchone()
-    fb = M.base_for(t, r["repo"])  # a milestone subtask's PR goes into the milestone branch instead
-    ms = (fb or "").startswith(M.PREFIX)
-    rr = repo_rules(r["repo"]) if fb else None
-    # per-repo retarget_since (a pr_into_staging repo: PRs opened before dev existed stay on main), else the global one
-    since = (rr.get("retarget_since") if rr else None) or rel.get("retarget_since", "")
     for p in prs or []:
         found_prs += 1
         if p["state"] == "MERGED" and p.get("mergedAt"):
@@ -953,35 +977,17 @@ def refresh_prs(con, r, branch) -> int:
             if (not old or old["state"] != "MERGED") and _during_agent(r["terminal"], p["mergedAt"]):
                 flag_violation(con, r, f"PR #{p['number']}이 에이전트 실행 중에 머지됐어요 (tp 승인 머지가 아님)",
                                f"PR #{p['number']} merged")
-        # safety net: agents sometimes open the PR against the GitHub default branch (main).
-        # These repos take feature PRs into their staging branch only, so retarget (the worktree branches from it).
-        # Milestone subtasks: also PRs on staging (opened before the parent got the milestone tag, or by mistake).
-        was = p.get("baseRefName")
-        moved = bool(t and t["gid"].startswith("notion:") and (was or "").startswith(M.PREFIX))
-        target = (fb or M.staging_of(r["repo"], notion=True)) if moved else fb
-        if (target and p["state"] == "OPEN" and was != target
-                and not (t and (t["milestone_error"] or M.staging_config_error(t, r["repo"], was)))
-                and (moved or (rr and was == rr["target"] and p["createdAt"] >= since)  # "" = all open PRs
-                     or (ms and was == M.staging_of(r["repo"])))):
-            try:
-                if ms:
-                    M.ensure(con, t, r["repo"])
-                if moved:
-                    M.check_retarget(r["github"], was, target, p["headRefOid"])
-                # REST, not `gh pr edit`: the latter fails on the Projects (classic) GraphQL deprecation
-                run(["gh", "api", "-X", "PATCH", f"repos/{r['github']}/pulls/{p['number']}", "-f",
-                     f"base={target}"], timeout=120)
-                p["baseRefName"] = target
-                event(con, "retarget", f"PR #{p['number']} base {was} -> {target}", r["ticket_gid"])
-            except Exception as e:  # noqa: BLE001
-                event(con, "error", f"retarget PR #{p['number']}: {e}", r["ticket_gid"])
+        try:
+            _retarget_pr(con, r, t, p)
+        except Exception as e:  # noqa: BLE001
+            event(con, "error", f"retarget PR #{p['number']}: {e}", r["ticket_gid"])
         con.execute("""INSERT INTO prs(url,run_id,ticket_gid,repo,github,number,title,state,is_draft,head_sha,created_at,updated_at,
                        base,merged_at,merge_sha,mergeable)
                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(url) DO UPDATE SET title=excluded.title,
                        state=excluded.state,is_draft=excluded.is_draft,updated_at=excluded.updated_at,
                        base=excluded.base,merged_at=excluded.merged_at,merge_sha=excluded.merge_sha,
                        -- GitHub computes mergeability lazily: UNKNOWN now (the query itself starts the computation),
-                       -- a real answer next scan. Keep the last known value while the head is unchanged.
+                       -- a real answer next scan. Keep the last known value for the same head and base.
                        mergeable=CASE WHEN excluded.mergeable IS NULL AND prs.head_sha=excluded.head_sha AND prs.base IS excluded.base
                                       THEN prs.mergeable ELSE excluded.mergeable END,
                        head_sha=excluded.head_sha""",
@@ -990,7 +996,6 @@ def refresh_prs(con, r, branch) -> int:
                      p.get("mergedAt"), (p.get("mergeCommit") or {}).get("oid"),
                      p.get("mergeable") if p["state"] == "OPEN" and p.get("mergeable") in ("MERGEABLE", "CONFLICTING") else None))
         if p["state"] == "OPEN" and p.get("mergeable") == "CONFLICTING":
-            t = con.execute("SELECT key, stage FROM tickets WHERE gid=?", (r["ticket_gid"],)).fetchone()
             was = con.execute("SELECT 1 FROM events WHERE kind='conflict' AND ticket_gid=? AND message LIKE ?",
                               (r["ticket_gid"], f"%{p['headRefOid'][:7]}%")).fetchone()
             if t and not was:  # one event per head commit, not one per scan

@@ -61,10 +61,12 @@ def _approved(con, pr) -> bool:
 
 def milestone_deploy_errors(t, repo: str, base: str | None) -> dict[str, str]:
     """Actions unavailable for this open PR because of its milestone route."""
-    if err := t["milestone_error"] or M.staging_config_error(t, repo, base):
+    if err := t["milestone_error"] or M.staging_config_error(t, repo):
         return dict.fromkeys(("staging", "preview", "direct"), err)
-    if M.notion_milestone(t, base):
+    if M.notion_milestone(t):
         return {"direct": "마일스톤 PR을 staging에 머지한 뒤 함께 배포해요"}
+    if M.on_notion_milestone_branch(t, base):
+        return {"direct": f"PR이 아직 {base}를 향해요. 일반 작업 브랜치로 바뀐 뒤 prod 직행을 요청하세요."}
     return {}
 
 

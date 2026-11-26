@@ -97,14 +97,17 @@ def staging_of(repo: str | None, *, notion: bool = False) -> str | None:
     return None
 
 
-def notion_milestone(t, base: str | None = None) -> bool:
-    # A relation and its open PR base can change on different ticks.
-    return t["gid"].startswith("ms:notion:") or (
-        t["gid"].startswith("notion:") and (in_milestone(t) or (base or "").startswith(PREFIX)))
+def notion_milestone(t) -> bool:
+    return t["gid"].startswith("ms:notion:") or (t["gid"].startswith("notion:") and in_milestone(t))
 
 
-def staging_config_error(t, repo: str, base: str | None = None) -> str | None:
-    if notion_milestone(t, base) and not staging_of(repo, notion=True):
+def on_notion_milestone_branch(t, base: str | None) -> bool:
+    # An open subtask PR can still point here after sync clears its relation.
+    return t["gid"].startswith("notion:") and (base or "").startswith(PREFIX)
+
+
+def staging_config_error(t, repo: str) -> str | None:
+    if notion_milestone(t) and not staging_of(repo, notion=True):
         return (f"Notion 마일스톤에는 staging 머지가 필요해요. 프로젝트 → 설정 → 레포별 설정 → {repo} → 배포에서 "
                 "‘staging 브랜치 사용’을 켜고 중간·prod 브랜치와 다른 staging 브랜치를 지정한 뒤, ‘배포 방식’에서 staging을 선택하세요.")
     return None

@@ -255,6 +255,49 @@ class NotionMilestones(NotionDashboard):
         self.assertEqual(row["status"], "failed")
         self.assertIn(reason, row["reason"])
 
+    def check_unlink_without_staging_mode(self, target, **rule):
+        cli.main(["sync"])
+        old = milestone.branch(self.parent_gid)
+        url = self.reviewed_pr(self.gid, old)
+        self.add_repo("app", modes=["direct"], **rule)
+        self.child["properties"]["출시"] = relation()
+        cli.main(["sync"])
+        run = dict(pipeline.latest_run(self.con, self.gid), github="example/app")
+        pr = {"number": 1, "url": url, "state": "OPEN", "isDraft": True, "headRefOid": "head", "title": "task",
+              "createdAt": core.now(), "updatedAt": core.now(), "baseRefName": old, "mergeable": "CONFLICTING"}
+        fork = "a" * 40
+        for ahead in (1, 0):
+            reads = [[pr.copy()]]
+            if not rule.get("pr_into_staging"):
+                reads.append({"defaultBranchRef": {"name": target}})
+            with (
+                mock.patch.object(pipeline, "gh_json", side_effect=reads),
+                mock.patch.object(pipeline, "run") as retarget,
+                mock.patch.object(milestone, "_gh", side_effect=[mock.Mock(stdout=fork), mock.Mock(stdout=str(ahead))]) as compare,
+            ):
+                pipeline.refresh_prs(self.con, run, "tp/example")
+            self.assertEqual(compare.call_args_list, [
+                mock.call(["api", f"repos/example/app/compare/{old}...head", "--jq", ".merge_base_commit.sha"]),
+                mock.call(["api", f"repos/example/app/compare/{target}...{fork}", "--jq", ".ahead_by"]),
+            ])
+            self.con.commit()
+            stored = pipeline.run_pr(self.con, run["id"])
+            if ahead:
+                retarget.assert_not_called()
+                self.assertEqual(stored["base"], old)
+                self.assert_direct_blocked(self.gid, url, old)
+                self.assertIsNone(pipeline.resume_staging_error(self.con, self.ticket(self.gid)))
+            else:
+                self.assertIn(f"base={target}", retarget.call_args.args[0])
+                self.assertEqual((stored["base"], stored["mergeable"]), (target, None))
+        self.post("/api/deploy", {"mode": "direct", "ticket": self.gid})
+
+    def test_unlink_returns_to_dev_with_staging_mode_disabled(self):
+        self.check_unlink_without_staging_mode("dev", pr_into_staging=True, staging={"branch": "dev"})
+
+    def test_unlink_returns_to_github_default_without_a_configured_base(self):
+        self.check_unlink_without_staging_mode("trunk", staging=None)
+
     def test_reviewed_main_pr_explains_missing_staging_until_settings_are_fixed(self):
         cli.main(["sync"])
         url = self.reviewed_pr(self.gid, "main")
@@ -315,7 +358,7 @@ class NotionMilestones(NotionDashboard):
         self.assert_direct_blocked(self.gid, url, "마일스톤이 2개")
         self.child["properties"]["출시"] = relation()
         cli.main(["sync"])
-        self.assert_direct_blocked(self.gid, url, "staging")
+        self.assert_direct_blocked(self.gid, url, base)
         self.con.execute("UPDATE prs SET base='staging' WHERE url=?", (url,))
         self.con.commit()
         self.post("/api/deploy", {"mode": "direct", "ticket": self.gid})
@@ -345,7 +388,7 @@ class NotionMilestones(NotionDashboard):
         with mock.patch.object(deploy, "gh_json", return_value=live), mock.patch.object(deploy, "_release_branch") as branch:
             deploy.deploy_tick()
         branch.assert_not_called()
-        self.assert_last_deploy_failed("마일스톤 PR")
+        self.assert_last_deploy_failed(live["baseRefName"])
 
     def test_milestone_link_added_while_marking_draft_ready_stops_the_merge(self):
         cli.main(["sync"])
