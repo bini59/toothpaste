@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -28,8 +29,8 @@ TP_BIN = str(ROOT / "bin" / "tp")
 VIOLATION = "BLOCKED: 규칙 위반"
 ACTIVE_STAGES = ("dispatched", "in_progress")
 STAGE_ORDER = [
-    "conflict", "rework", "queued", "needs_repo", "unmapped", "waiting_dep", "ms_hold", "collecting", "dispatched",
-    "in_progress",
+    "conflict", "rework", "queued", "needs_repo", "unmapped", "waiting_dep", "milestone_error", "needs_staging",
+    "ms_hold", "collecting", "dispatched", "in_progress",
     "blocked", "agent_done", "pr_open", "reviewed", "approving", "milestone", "deploying", "staged", "merged", "done",
     "closed", "skipped", "open",
 ]
@@ -81,7 +82,7 @@ def review_overridden(t, pr) -> bool:
     return bool("review_override" in t.keys() and t["review_override"] and t["review_override_sha"] == pr["head_sha"])
 
 
-def compute_stage(con, t, *, repo_count=None) -> str:
+def compute_stage(con, t, *, repos=None) -> str:
     if t["completed"]:
         return "done"
     r = latest_run(con, t["gid"])
@@ -163,17 +164,18 @@ def compute_stage(con, t, *, repo_count=None) -> str:
         return "open"  # a milestone parent ships through its milestone tickets (ms:<gid>:<repo>), not an agent
     if t["skip"]:
         return "skipped"
+    if t["gid"].startswith("notion:") and t["milestone_error"]:
+        return "milestone_error"
     if t["open_deps"] and unmet_deps(con, t):
         return "waiting_dep"
-    if t["repo_override"] and (not t["gid"].startswith("notion:") or chosen_repo(con, t)):
+    if t["repo_override"] and not t["gid"].startswith("notion:"):
         return "queued"
-    if repo_count is None:  # preview can supply the project's unsaved repo selection
-        repo_count = len(repos_for_project(con, t["project_gid"]))
-    if not repo_count:
-        return "unmapped"
-    if repo_count > 1:
-        return "needs_repo"
-    return "queued"
+    if repos is None:  # preview can supply the project's unsaved repo selection
+        repos = repos_for_project(con, t["project_gid"])
+    repo = chosen_repo(con, t, repos)
+    if repo:
+        return "needs_staging" if M.staging_config_error(t, repo["repo"]) else "queued"
+    return "needs_repo" if repos else "unmapped"
 
 
 def deps_status(con, t) -> list[dict]:
@@ -402,6 +404,9 @@ def sync(log=print) -> dict:
 # ---------------------------------------------------------------- dispatch
 
 def slug(s: str) -> str:
+    if match := re.fullmatch(r"NT-[0-9a-f]{32}-([a-zA-Z0-9_.-]+)", s):
+        # Notion milestone keys share a 35-character parent prefix. Keep repo briefs distinct at the 40-char limit.
+        return f"ms-{match[1][:14].lower()}-{hashlib.sha256(s.encode()).hexdigest()[:16]}"
     return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")[:40]
 
 
@@ -417,6 +422,8 @@ def build_brief(con, t, repo: dict) -> str:
     ref = issue_ref(t["gid"])
     is_notion = t["gid"].startswith("notion:")
     if is_notion:
+        if err := M.staging_config_error(t, repo["repo"]):
+            raise notion.NotionError(err)  # deploy settings may have changed since the ticket was queued
         t, markdown = notion_tickets.queued_page(con, t, repo)
         notes = "\n\n".join(filter(None, (t["notes"], markdown)))
     else:
@@ -456,9 +463,9 @@ def build_brief(con, t, repo: dict) -> str:
         vals["BASE_NOTE"] = (f"The PR base must be `{fb}` (never `{prod}`); "
                              f"branch from `origin/{fb}` if you have not committed yet.")
         if fb.startswith(M.PREFIX):
-            vals["BASE_NOTE"] = (f"This ticket is a subtask of the milestone {t['parent_name']}: the PR base must be "
-                                 f"`{fb}` (never `{M.staging_of(repo['repo'])}` or `{prod}`); branch from "
-                                 f"`origin/{fb}` if you have not committed yet. ticket-pilot merges it into `{fb}` "
+            vals["BASE_NOTE"] = (f"This ticket belongs to the milestone {t['parent_name']}. The PR base must be `{fb}` "
+                                 f"(never `{M.staging_of(repo['repo'])}` or `{prod}`). Branch from `origin/{fb}` "
+                                 f"if you have not committed yet. ticket-pilot merges it into `{fb}` "
                                  f"after the review, and the milestone goes to staging as a whole.")
     else:
         vals["BASE_FLAG"], vals["BASE_NOTE"] = "", ""
@@ -467,8 +474,9 @@ def build_brief(con, t, repo: dict) -> str:
     return _agent_brief(tpl, t)
 
 
-def chosen_repo(con, t):
-    repos = repos_for_project(con, t["project_gid"])
+def chosen_repo(con, t, repos=None):
+    if repos is None:
+        repos = repos_for_project(con, t["project_gid"])
     if t["repo_override"]:
         r = con.execute("SELECT * FROM repos WHERE name=?", (t["repo_override"],)).fetchone()
         if r:
@@ -481,12 +489,19 @@ def chosen_repo(con, t):
     return repos[0] if len(repos) == 1 else None
 
 
+def resume_staging_error(con, t):
+    """A retry uses the existing worktree's repo even if the project mapping has changed."""
+    if M.notion_milestone(t) and (r := latest_run(con, t["gid"])):
+        return M.staging_config_error(t, r["repo"])
+    return None
+
+
 def dispatch(dry_run=False, log=print, only: str | None = None) -> list[str]:
     st = settings()
     con = db()
     active = con.execute("SELECT count(*) c FROM tickets WHERE stage IN ('dispatched','in_progress','blocked')").fetchone()["c"]
     slots = max(0, st["max_active_runs"] - active)
-    q = "SELECT * FROM tickets WHERE stage IN ('conflict','rework','queued')" + (" AND (gid=? OR lower(key)=lower(?))" if only else "") + \
+    q = "SELECT * FROM tickets WHERE stage IN ('conflict','rework','queued') AND milestone_error IS NULL" + (" AND (gid=? OR lower(key)=lower(?))" if only else "") + \
         " ORDER BY stage='queued', due_on IS NULL, due_on"
     cands = con.execute(q, (only, only) if only else ()).fetchall()
     log(f"dispatch: active={active} slots={slots} conflict={sum(t['stage'] == 'conflict' for t in cands)} "
@@ -494,7 +509,7 @@ def dispatch(dry_run=False, log=print, only: str | None = None) -> list[str]:
         f"queued={sum(t['stage'] == 'queued' for t in cands)}")
     done = []
     existing = None
-    answered = con.execute("SELECT * FROM tickets WHERE stage='blocked' AND reply IS NOT NULL" +
+    answered = con.execute("SELECT * FROM tickets WHERE stage='blocked' AND reply IS NOT NULL AND milestone_error IS NULL" +
                            (" AND (gid=? OR lower(key)=lower(?))" if only else ""), (only, only) if only else ()).fetchall()
     # no agent starts without tp's own GitHub token (TP-112); escalation to the owner and triage still run.
     # The error event is written once per disconnect, not every precheck.
@@ -508,7 +523,9 @@ def dispatch(dry_run=False, log=print, only: str | None = None) -> list[str]:
         meta_set(con, "github_missing_logged", False)
     # answered BLOCKED tickets already hold a slot, so they go before the slot limit
     for t in answered if gh_ok else ():
-        if unblock(con, t, dry_run=dry_run, log=log):
+        if err := resume_staging_error(con, t):
+            log(f"{t['key']}: {err}")
+        elif unblock(con, t, dry_run=dry_run, log=log):
             done.append(t["key"])
     # rework past the round cap goes to the owner instead of the agent; that needs no slot
     def cap_of(t):
@@ -521,6 +538,9 @@ def dispatch(dry_run=False, log=print, only: str | None = None) -> list[str]:
     for t in cands if gh_ok else ():
         if not slots:
             break
+        if t["stage"] != "queued" and (err := resume_staging_error(con, t)):
+            log(f"{t['key']}: {err}")
+            continue
         slots -= 1
         if t["stage"] == "conflict":
             if resolve_conflict(con, t, dry_run=dry_run, log=log):
@@ -906,9 +926,40 @@ def scan(log=print) -> dict:
     return res
 
 
+def _retarget_pr(con, r, t, pr) -> None:
+    repo, old_base = r["repo"], pr.get("baseRefName")
+    if pr["state"] != "OPEN" or (t and (t["milestone_error"] or M.staging_config_error(t, repo))):
+        return
+    target = M.base_for(t, repo)
+    into_milestone = (target or "").startswith(M.PREFIX)
+    from_milestone = t and M.on_notion_milestone_branch(t, old_base)
+    if from_milestone and not target:
+        # Unlinked tasks on repos without a feature base can still use staging. When that route is
+        # disabled, ordinary PRs use the GitHub default branch (which can differ from prod).
+        target = M.staging_of(repo, notion=True) or gh_json(
+            ["repo", "view", r["github"], "--json", "defaultBranchRef"])["defaultBranchRef"]["name"]
+    if not target or target == old_base:
+        return
+    if not from_milestone:
+        # Correct PRs opened on the default branch, or on staging before a task joined a milestone.
+        rr = repo_rules(repo)
+        since = (rr and rr.get("retarget_since")) or settings().get("release", {}).get("retarget_since", "")
+        from_default = rr and old_base == rr["target"] and pr["createdAt"] >= since
+        if not from_default and not (into_milestone and old_base == M.staging_of(repo)):
+            return
+    if into_milestone:
+        M.ensure(con, t, repo)
+    if from_milestone:
+        M.check_retarget(r["github"], old_base, target, pr["headRefOid"])
+    # Use REST because gh pr edit can fail on the Projects (classic) GraphQL deprecation.
+    run(["gh", "api", "-X", "PATCH", f"repos/{r['github']}/pulls/{pr['number']}", "-f", f"base={target}"], timeout=120)
+    pr["baseRefName"] = target
+    pr["mergeable"] = None  # GitHub computed it against the old base.
+    event(con, "retarget", f"PR #{pr['number']} base {old_base} -> {target}", r["ticket_gid"])
+
+
 def refresh_prs(con, r, branch) -> int:
-    """Re-read the run's PRs from GitHub (head, mergeable, state) into prs, retargeting feature PRs opened against
-    the default branch. Returns how many it found."""
+    """Refresh the run's PRs from GitHub, retargeting open PRs as their ticket's base changes."""
     if not r["github"] or not branch:
         return 0
     found_prs = 0
@@ -918,13 +969,7 @@ def refresh_prs(con, r, branch) -> int:
     except Exception as e:  # noqa: BLE001
         event(con, "error", f"gh pr list {r['github']} {branch}: {e}", r["ticket_gid"])
         return 0
-    rel = settings().get("release", {})
     t = con.execute("SELECT * FROM tickets WHERE gid=?", (r["ticket_gid"],)).fetchone()
-    fb = M.base_for(t, r["repo"])  # a milestone subtask's PR goes into the milestone branch instead
-    ms = (fb or "").startswith(M.PREFIX)
-    rr = repo_rules(r["repo"]) if fb else None
-    # per-repo retarget_since (a pr_into_staging repo: PRs opened before dev existed stay on main), else the global one
-    since = (rr.get("retarget_since") if rr else None) or rel.get("retarget_since", "")
     for p in prs or []:
         found_prs += 1
         if p["state"] == "MERGED" and p.get("mergedAt"):
@@ -932,30 +977,17 @@ def refresh_prs(con, r, branch) -> int:
             if (not old or old["state"] != "MERGED") and _during_agent(r["terminal"], p["mergedAt"]):
                 flag_violation(con, r, f"PR #{p['number']}이 에이전트 실행 중에 머지됐어요 (tp 승인 머지가 아님)",
                                f"PR #{p['number']} merged")
-        # safety net: agents sometimes open the PR against the GitHub default branch (main).
-        # These repos take feature PRs into their staging branch only, so retarget (the worktree branches from it).
-        # Milestone subtasks: also PRs on staging (opened before the parent got the milestone tag, or by mistake).
-        was = p.get("baseRefName")
-        if (fb and p["state"] == "OPEN" and was != fb
-                and ((was == rr["target"] and p["createdAt"] >= since)  # "" = all open PRs
-                     or (ms and was == M.staging_of(r["repo"])))):
-            try:
-                if ms:
-                    M.ensure(con, t, r["repo"])
-                # REST, not `gh pr edit`: the latter fails on the Projects (classic) GraphQL deprecation
-                run(["gh", "api", "-X", "PATCH", f"repos/{r['github']}/pulls/{p['number']}", "-f",
-                     f"base={fb}"], timeout=120)
-                p["baseRefName"] = fb
-                event(con, "retarget", f"PR #{p['number']} base {was} -> {fb}", r["ticket_gid"])
-            except Exception as e:  # noqa: BLE001
-                event(con, "error", f"retarget PR #{p['number']}: {e}", r["ticket_gid"])
+        try:
+            _retarget_pr(con, r, t, p)
+        except Exception as e:  # noqa: BLE001
+            event(con, "error", f"retarget PR #{p['number']}: {e}", r["ticket_gid"])
         con.execute("""INSERT INTO prs(url,run_id,ticket_gid,repo,github,number,title,state,is_draft,head_sha,created_at,updated_at,
                        base,merged_at,merge_sha,mergeable)
                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(url) DO UPDATE SET title=excluded.title,
                        state=excluded.state,is_draft=excluded.is_draft,updated_at=excluded.updated_at,
                        base=excluded.base,merged_at=excluded.merged_at,merge_sha=excluded.merge_sha,
                        -- GitHub computes mergeability lazily: UNKNOWN now (the query itself starts the computation),
-                       -- a real answer next scan. Keep the last known value while the head is unchanged.
+                       -- a real answer next scan. Keep the last known value for the same head and base.
                        mergeable=CASE WHEN excluded.mergeable IS NULL AND prs.head_sha=excluded.head_sha AND prs.base IS excluded.base
                                       THEN prs.mergeable ELSE excluded.mergeable END,
                        head_sha=excluded.head_sha""",
@@ -964,7 +996,6 @@ def refresh_prs(con, r, branch) -> int:
                      p.get("mergedAt"), (p.get("mergeCommit") or {}).get("oid"),
                      p.get("mergeable") if p["state"] == "OPEN" and p.get("mergeable") in ("MERGEABLE", "CONFLICTING") else None))
         if p["state"] == "OPEN" and p.get("mergeable") == "CONFLICTING":
-            t = con.execute("SELECT key, stage FROM tickets WHERE gid=?", (r["ticket_gid"],)).fetchone()
             was = con.execute("SELECT 1 FROM events WHERE kind='conflict' AND ticket_gid=? AND message LIKE ?",
                               (r["ticket_gid"], f"%{p['headRefOid'][:7]}%")).fetchone()
             if t and not was:  # one event per head commit, not one per scan

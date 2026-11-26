@@ -10,21 +10,24 @@ from . import core, notion, notion_tickets, notion_write
 
 BATCH_SIZE = 8
 RETRY_SECONDS = 300
+MILESTONE_DONE = "milestone_done"
 
 
 def enqueue(con, ticket, stage):
     """In restage's transaction. Keep the latest mapped transition until its page write succeeds."""
-    gid = ticket["gid"]
-    if stage not in notion_tickets.WRITE_STAGES or (stage == "closed" and not con.execute(
+    parent = stage == MILESTONE_DONE
+    gid = ticket["parent_gid"] if parent else ticket["gid"]
+    if (not parent and stage not in notion_tickets.WRITE_STAGES) or (stage == "closed" and not con.execute(
             "SELECT 1 FROM runs WHERE id=(SELECT max(id) FROM runs WHERE ticket_gid=?) AND state!='abandoned'",
             (gid,)).fetchone()):
         con.execute("DELETE FROM notion_status_queue WHERE ticket_gid=?", (gid,))
         return
     pid = ticket["project_gid"].removeprefix("notion:")
     cfg = notion_tickets.project_config(con, pid)
-    if cfg and cfg.get("stage_statuses", {}).get(stage):
+    source = (cfg or {}).get("milestone_data_source_id" if parent else "data_source_id")
+    if source and cfg.get("stage_statuses", {}).get("done" if parent else stage):
         con.execute("""INSERT OR REPLACE INTO notion_status_queue(ticket_gid,project_id,data_source_id,stage,next_attempt_at)
-                       VALUES(?,?,?,?,?)""", (gid, pid, cfg["data_source_id"], stage, time()))
+                       VALUES(?,?,?,?,?)""", (gid, pid, source, stage, time()))
 
 
 @contextmanager
@@ -63,6 +66,7 @@ def start_worker(con):
 
 def flush(con):
     """Process a batch of due pages, oldest due first. Keep network I/O outside SQLite transactions."""
+    from . import milestone
     pending = con.execute("""SELECT id, ticket_gid FROM notion_status_queue WHERE next_attempt_at<=?
                              ORDER BY next_attempt_at, id LIMIT ?""", (time(), BATCH_SIZE)).fetchall()
     for job in pending:
@@ -75,17 +79,20 @@ def flush(con):
                 continue
             try:
                 cfg = notion_tickets.project_config(con, row["project_id"])
-                option = (cfg or {}).get("stage_statuses", {}).get(row["stage"])
-                if option and cfg["data_source_id"] == row["data_source_id"]:
-                    pages = notion_write.ProjectPages(con, cfg)
+                parent = row["stage"] == MILESTONE_DONE
+                option = (cfg or {}).get("stage_statuses", {}).get("done" if parent else row["stage"])
+                source = (cfg or {}).get("milestone_data_source_id" if parent else "data_source_id")
+                if option and source == row["data_source_id"]:
+                    pages = notion_write.ProjectPages(con, cfg, source=source)
                     page = pages.client.page(page_id, pages.source)
                     props = pages.status_change(page, option, by_id=True)
                     # A host transition or settings save may have finished during the page/schema reads.
                     if (not con.execute("SELECT 1 FROM notion_status_queue WHERE id=?", (row["id"],)).fetchone()
                             or notion_tickets.project_config(con, row["project_id"]) != cfg):
                         continue
-                    pages.apply_properties(page, props)
-                    core.event(con, "notion_write", f"Notion 상태 반영 · {row['stage']} · {notion_tickets.ticket_key(page_id)}", gid)
+                    if not parent or milestone.all_repos_live(con, gid):
+                        pages.apply_properties(page, props)
+                        core.event(con, "notion_write", f"Notion 상태 반영 · {row['stage']} · {notion_tickets.ticket_key(page_id)}", gid)
                 con.execute("DELETE FROM notion_status_queue WHERE id=?", (row["id"],))
             except (notion.NotionError, KeyError, TypeError, ValueError) as e:
                 updated = con.execute("UPDATE notion_status_queue SET last_error=?, next_attempt_at=? WHERE id=?",

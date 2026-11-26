@@ -509,7 +509,7 @@ def main(argv=None):
     ap_.set_defaults(fn=lambda a: R.request_approval(a.ticket, cancel=a.cancel, override=a.override,
                                                       override_review=a.override_review))
     md = sp.add_parser("milestone-done", help="마일스톤 작업 완료 (same as the 마일스톤 page button): open its milestone PRs")
-    md.add_argument("parent", help="Asana gid of the milestone parent task")
+    md.add_argument("parent", help="Milestone parent gid (Asana gid or notion:<page id>)")
     md.add_argument("--cancel", action="store_true")
     md.set_defaults(fn=lambda a: MS.mark_done(a.parent, cancel=a.cancel))
     co = sp.add_parser("check-override", help="ignore the tp checks of a ticket's open PR head (sends it to the AI review)")

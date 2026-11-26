@@ -1,7 +1,7 @@
 # Rework {{KEY}}: {{TITLE}}
 
 {{OPENING}}
-You are back in the same git worktree, on the same branch (`{{BRANCH}}`). Asana: {{URL}}
+You are back in the same git worktree, on the same branch (`{{BRANCH}}`). The source ticket is {{URL}}.
 Original ticket brief: {{BRIEF_FILE}}
 This is fix round {{ROUND}} of {{MAX_ROUNDS}}. After the last round, a further "changes" verdict goes to {{OWNER}}, so aim
 to settle the review in this round.

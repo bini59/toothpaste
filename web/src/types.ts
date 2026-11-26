@@ -8,6 +8,9 @@ export interface Ticket {
   section: string | null;
   parent_gid: string | null;
   parent_name: string | null;
+  parent_url: string | null;
+  milestone_error: string | null;
+  staging_config_error?: string | null;
   due_on: string | null;
   tags: string | null;
   has_tag: number;
@@ -27,7 +30,7 @@ export interface Ticket {
   /** The owner's reason for approving although the AI review said blocked/changes; applies to review_override_sha only */
   review_override: string | null;
   review_override_sha: string | null;
-  /** the Asana parent has the milestone tag (milestone.py) */
+  /** the task belongs to an Asana or Notion milestone (milestone.py) */
   in_milestone: number | null;
   /** milestone tickets: when the owner pressed 마일스톤 작업 완료 (cleared when a subtask is in progress again) */
   ms_done_at: string | null;
@@ -69,6 +72,9 @@ export interface PR {
   mergeable: "MERGEABLE" | "CONFLICTING" | null;
   /** open PRs only: tp's own checks of the head commit (checks.py) */
   checks?: PrChecks;
+  /** Milestone routing reason shown in place of a direct deploy action on an open PR. */
+  direct_deploy_error?: string | null;
+  staging_deploy_error?: string | null;
   awaiting_milestone_round?: boolean;
 }
 export interface CheckRow {
@@ -476,6 +482,8 @@ export interface NotionFilters {
   connection_id: string;
   data_source_id: string;
   parent_property?: string;
+  milestone_data_source_id?: string;
+  milestone_property?: string;
   contains_property?: string;
   contains_text?: string;
   project_data_source_id?: string;

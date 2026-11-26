@@ -14,6 +14,8 @@ export const STAGES: Record<string, [string, Status]> = {
   dispatched: ["투입됨", "info"],
   in_progress: ["작업 중", "info"],
   blocked: ["막힘", "danger"],
+  milestone_error: ["마일스톤 연결 확인", "danger"],
+  needs_staging: ["staging 설정 필요", "danger"],
   agent_done: ["에이전트 완료", "success"],
   pr_open: ["리뷰 대기", "info"],
   reviewed: ["리뷰 완료", "success"],
@@ -34,7 +36,7 @@ export const DROPPABLE = ["conflict", "rework", "dispatched", "in_progress", "bl
 export const BOARD: { title: string; color: string; stages: string[] }[] = [
   { title: "대기", color: "bg-grey-300", stages: ["conflict", "rework", ...PENDING, "ms_hold"] },
   { title: "작업 중", color: "bg-primary-500", stages: ["collecting", "dispatched", "in_progress"] },
-  { title: "막힘", color: "bg-danger-500", stages: ["blocked"] },
+  { title: "막힘", color: "bg-danger-500", stages: ["blocked", "milestone_error", "needs_staging"] },
   { title: "PR / 리뷰 대기", color: "bg-warning-500", stages: ["agent_done", "pr_open"] },
   { title: "리뷰 완료", color: "bg-success-500", stages: ["reviewed", "approving"] },
   { title: "배포 대기", color: "bg-info-300", stages: ["milestone", "deploying", "staged", "merged"] },
@@ -44,8 +46,8 @@ export const BOARD: { title: string; color: string; stages: string[] }[] = [
 export const DONE_KEEP_DAYS = 7;
 export const staleDone = (t: Ticket) =>
   ["done", "closed"].includes(t.stage) && !!t.done_at && Date.now() - new Date(t.done_at).getTime() > DONE_KEEP_DAYS * 864e5;
-// milestone subtasks live on the 마일스톤 page; boards show their milestone ticket (ms:<gid>:<repo>) instead
-export const onBoard = (t: Ticket) => !(t.in_milestone && t.parent_gid);
+// A subtask waiting for repo setup needs attention before its milestone ticket exists.
+export const onBoard = (t: Ticket) => t.stage === "needs_staging" || !(t.in_milestone && t.parent_gid);
 export const VERDICT: Record<string, [string, Status]> = {
   approve: ["괜찮음", "success"],
   changes: ["수정 필요", "warning"],
@@ -128,7 +130,7 @@ export function ticketRepos(s: State, I: Index, t: Ticket): string[] {
   const used = [...(I.runBy[t.gid] ?? []), ...(I.prBy[t.gid] ?? [])].map((r) => r.repo);
   if (used.length) return [...new Set(used)];
   if (mapped.length) return mapped;
-  return isMs(t.gid) ? [t.gid.split(":").slice(2).join(":")] : [];
+  return isMs(t.gid) ? [milestoneRepo(t.gid)] : [];
 }
 
 /** a project's tickets (TP-91): a ticket of an Asana project that a tp project links belongs to that project only;
@@ -144,17 +146,22 @@ export function inProject(s: State, I: Index, t: Ticket, p: Project): boolean {
 export const MILESTONE_COLS: { title: string; stages: string[] }[] = [
   { title: "대기", stages: ["conflict", "rework", ...PENDING, "collecting", "open"] },
   { title: "작업 중", stages: ["dispatched", "in_progress"] },
-  { title: "막힘", stages: ["blocked"] },
+  { title: "막힘", stages: ["blocked", "milestone_error", "needs_staging"] },
   { title: "리뷰 중", stages: ["agent_done", "pr_open", "reviewed", "approving"] },
   { title: "반영 완료", stages: ["milestone", "deploying", "staged", "merged", "done", "closed", "skipped"] },
 ];
 /** milestone tickets (milestone.py): gid ms:<parent gid>:<repo>, one per repo */
 export const isMs = (gid: string) => gid.startsWith("ms:");
+export const milestoneRepo = (gid: string) => gid.slice(gid.lastIndexOf(":") + 1);
 /** subtask stages that no longer hold a milestone back (milestone.FINISHED) */
 export const MS_FINISHED = ["milestone", "done", "closed", "skipped", "staged", "merged", "deploying"];
 /** tagged subtasks still in progress (milestone.unfinished): 마일스톤 작업 완료 waits for them */
-export const busySubtasks = (m: Milestone) =>
-  m.subtasks.filter((t) => t.has_tag && t.assigned && !t.completed && !MS_FINISHED.includes(t.stage));
+export const busySubtasks = (m: Milestone, I: Index) =>
+  m.subtasks.filter((t) => {
+    const run = I.runBy[t.gid]?.at(-1);
+    const tracked = (t.has_tag && t.assigned) || (t.gid.startsWith("notion:") && run && run.state !== "abandoned");
+    return tracked && !t.completed && !MS_FINISHED.includes(t.stage);
+  });
 export interface Milestone {
   gid: string;
   name: string;
@@ -163,21 +170,22 @@ export interface Milestone {
   subtasks: Ticket[];
   ms: Ticket[];
 }
-/** Asana parents tagged milestone_tag, found from their own row, their milestone tickets or their subtasks */
+/** Find milestones from linked tasks, repo milestone tickets or tagged Asana parents. */
 export function milestones(s: State): Milestone[] {
   const tag = String(s.meta.settings.milestone_tag || "tp-milestone").toLowerCase();
   const ids = new Set<string>();
   for (const t of s.tickets) {
     if (t.parent_gid && (isMs(t.gid) || t.in_milestone)) ids.add(t.parent_gid);
-    else if ((JSON.parse(t.tags || "[]") as string[]).some((x) => x.toLowerCase() === tag)) ids.add(t.gid);
+    else if (!t.gid.startsWith("notion:") && (JSON.parse(t.tags || "[]") as string[]).some((x) => x.toLowerCase() === tag)) ids.add(t.gid);
   }
   return [...ids].map((gid) => {
     const parent = s.tickets.find((t) => t.gid === gid);
     const kids = s.tickets.filter((t) => t.parent_gid === gid);
+    const linked = kids.find((k) => k.parent_url);
     return {
       gid,
-      name: parent?.name ?? kids[0]?.parent_name ?? gid,
-      url: parent?.url ?? kids.find((k) => isMs(k.gid))?.url ?? null,
+      name: parent?.name ?? linked?.parent_name ?? kids[0]?.parent_name ?? gid,
+      url: parent?.url ?? linked?.parent_url ?? kids.find((k) => isMs(k.gid))?.url ?? null,
       project: parent?.project_name ?? kids[0]?.project_name ?? null,
       subtasks: kids.filter((k) => !isMs(k.gid)),
       ms: kids.filter((k) => isMs(k.gid)).sort((a, b) => a.gid.localeCompare(b.gid)),

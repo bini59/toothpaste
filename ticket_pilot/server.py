@@ -87,22 +87,34 @@ def _state(con) -> dict:
     staged_urls = {url for urls in staged_pr_urls.values() for url in urls}
     prs = rows("SELECT * FROM prs")
     staged_gids = {p["ticket_gid"] for p in prs if p["url"] in staged_urls}
-    tickets = rows(f"""SELECT gid,key,name,url,project_gid,project_name,section,parent_gid,parent_name,due_on,tags,has_tag,
+    tickets = rows(f"""SELECT gid,key,name,url,project_gid,project_name,section,parent_gid,parent_name,parent_url,milestone_error,due_on,tags,has_tag,
                       deps_json,open_deps,completed,assigned,stage,repo_override,skip,first_seen,last_seen,
                       approve_requested_at,approve_error,reply,check_override,check_override_sha,in_milestone,ms_done_at,
                       review_override,review_override_sha,done_at,asana_modified_at
                       FROM tickets WHERE (completed=0 AND assigned=1) OR gid IN (SELECT ticket_gid FROM runs)
                       OR gid IN ({','.join('?' for _ in staged_gids)})""", *staged_gids)
+    landed = {r["ticket_gid"]: r for r in con.execute(MS.LANDED_NOTION)}
     for t in tickets:
+        if t["stage"] == "needs_staging" and (repo := P.chosen_repo(con, t)):
+            t["staging_config_error"] = MS.staging_config_error(t, repo["repo"])
+        elif t["stage"] == "blocked" and not t["milestone_error"]:
+            t["staging_config_error"] = P.resume_staging_error(con, t)
+        if (ms := landed.get(t["gid"])) and t["parent_gid"] != ms["parent_gid"]:
+            t.update(parent_gid=ms["parent_gid"], parent_name=ms["parent_name"], parent_url=ms["url"], in_milestone=1)
         if t["open_deps"]:  # deps merged into the feature base no longer block (TP-20)
             deps = P.deps_status(con, t)
             t["deps_json"] = json.dumps(deps, ensure_ascii=False)
             t["open_deps"] = sum(1 for d in deps if not d["completed"] and not d["landed"])
+    tickets_by_gid = {t["gid"]: t for t in tickets}
     for p in prs:
         # tp checks of the open head (checks.py): state none|pending|pass|fail|error, rows, and the approval gate text
         if p["state"] == "OPEN":
             cs = K.check_state(con, p)
             p["checks"] = {"state": cs["state"], "rows": cs["rows"], "gate": K.gate_error(con, p)}
+            if t := tickets_by_gid.get(p["ticket_gid"]):
+                errors = D.milestone_deploy_errors(t, p["repo"], p["base"])
+                p["staging_deploy_error"] = errors.get("staging")
+                p["direct_deploy_error"] = errors.get("direct")
         elif p["url"] in staged_urls and MS.awaiting_next_round(con, p["ticket_gid"]):
             p["awaiting_milestone_round"] = True
     return {

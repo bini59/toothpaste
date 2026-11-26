@@ -1,7 +1,7 @@
 # Continue {{KEY}}: {{TITLE}}
 
 You stopped on this ticket with a BLOCKED question. {{OWNER}} answered it on the ticket-pilot dashboard.
-You are back in the same git worktree, on the same branch (`{{BRANCH}}`). Asana: {{URL}}
+You are back in the same git worktree, on the same branch (`{{BRANCH}}`). The source ticket is {{URL}}.
 Original ticket brief: {{BRIEF_FILE}} (read it again; its rules still apply)
 
 **Your question:** {{QUESTION}}

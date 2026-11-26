@@ -47,7 +47,8 @@ export function TicketCard({ t, s, I, onAssign, onSkip, onApprove, onOverride, o
   // staging approval: any repo whose deploy rule has a staging branch and the `staging` mode
   const stg = rule?.staging && rule.modes.includes("staging") ? (msBase ?? rule.staging.branch) : null;
   const milestoneOf = t.parent_gid && (t.in_milestone || isMs(t.gid)) ? t.parent_gid : null;
-  const okReview = t.stage === "reviewed" && pr?.state === "OPEN" && rv?.verdict === "approve" && rv.head_sha === pr.head_sha;
+  const milestoneError = t.milestone_error || t.staging_config_error || pr?.staging_deploy_error;
+  const okReview = !milestoneError && t.stage === "reviewed" && pr?.state === "OPEN" && rv?.verdict === "approve" && rv.head_sha === pr.head_sha;
   const approvable = !!stg && okReview;
   const baseOk = pr?.base === stg;
   const conflict = pr?.state === "OPEN" && pr.mergeable === "CONFLICTING";
@@ -58,7 +59,7 @@ export function TicketCard({ t, s, I, onAssign, onSkip, onApprove, onOverride, o
   // AI said blocked/changes on the head: the owner can approve that head with a reason (TP-99, release.request_approval)
   const reviewOverridden = !!t.review_override && !!pr && t.review_override_sha === pr.head_sha;
   const canOverrideReview =
-    !!stg && pr?.state === "OPEN" && baseOk && !conflict && !gate &&
+    !milestoneError && !!stg && pr?.state === "OPEN" && baseOk && !conflict && !gate &&
     // blocked: escalate_rework handed the fix loop to the owner; a rule violation (pipeline.VIOLATION) is not approvable
     (t.stage === "reviewed" || t.stage === "rework" || (t.stage === "blocked" && !run?.ws_comment?.startsWith("BLOCKED: 규칙 위반"))) &&
     (rv?.verdict === "blocked" || rv?.verdict === "changes");
@@ -102,6 +103,7 @@ export function TicketCard({ t, s, I, onAssign, onSkip, onApprove, onOverride, o
         {repoBadge && ticketRepos(s, I, t).map((r) => <Badge key={r} status="draft">{r}</Badge>)}
       </div>
       <div className="my-1.5 text-sm font-semibold leading-snug text-text-main">{t.name}</div>
+      {milestoneError && <p className="mb-2 text-xs text-danger-700">{milestoneError}</p>}
       <div className="text-xs leading-relaxed text-text-muted">
         {t.project_name || "-"}
         {run ? (
@@ -205,7 +207,7 @@ export function TicketCard({ t, s, I, onAssign, onSkip, onApprove, onOverride, o
       {approvable && !baseOk && (
         <p className="mt-2 text-xs text-text-muted">PR base가 {pr?.base ?? "?"}라 승인할 수 없어요 ({stg}만 가능)</p>
       )}
-      {okReview && !stg && prodModes.length > 0 && (
+      {okReview && !stg && prodModes.length > 0 && !pr?.direct_deploy_error && (
         <a href="#release" className="mt-2 block text-xs font-medium text-primary hover:text-primary-700 hover:underline">
           배포 페이지에서 prod 배포 →
         </a>

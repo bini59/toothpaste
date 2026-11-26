@@ -285,7 +285,7 @@ def _text(v):
     return isinstance(v, str) and v.strip() != ""
 
 
-def validate(doc: dict, old: dict | None = None) -> list[str]:
+def validate(doc: dict, old: dict | None = None, *, con=None) -> list[str]:
     """Problems with doc (empty = valid). Paths are checked on disk only where they are new or changed."""
     err: list[str] = []
     st, pm = doc["settings"], doc["project_map"]
@@ -509,6 +509,7 @@ def validate(doc: dict, old: dict | None = None) -> list[str]:
         need("preview_label" not in d or _text(d["preview_label"]), f"{p}.preview_label", "비어 있으면 안 돼요 (없으면 빼요)")
 
     seen, gids = set(), set()
+    old_notion = {p["id"]: p.get("notion") for p in (old or {}).get("project_map", {}).get("projects", [])}
     for i, pj in enumerate(pm["projects"]):
         if not isinstance(pj, dict):
             err.append(f"project[{i}]: 객체여야 해요")
@@ -528,7 +529,7 @@ def validate(doc: dict, old: dict | None = None) -> list[str]:
             need(not gid, f"{p}.asana_gid", "Asana 연결(source asana)일 때만 써요")
         if pj.get("source") == "notion":
             try:
-                notion_tickets.validate(pj.get("notion"))
+                notion_tickets.validate(pj.get("notion"), con=con, previous=old_notion.get(pid))
             except notion.NotionError as e:
                 err.append(f"{p}.notion: {e}")
         else:
@@ -578,17 +579,23 @@ def changes(old: dict, new: dict) -> list[dict]:
     return [c for c in out if c["key"]]  # "" = an empty scope on one side
 
 
-def save(con, new: dict, actor: str, note: str | None = None) -> list[dict]:
+def save(con, new: dict, actor: str, note: str | None = None, *, old=None) -> list[dict]:
     """Validate and store new (a full doc); record each changed key and back up. Returns the changes.
     Running work is not touched: the next tick (and the dashboard within CONFIG_TTL_S) reads the new values."""
-    old = current(con)
+    old = old if old is not None else current(con)
     new = core.effective_config(new)
-    errs = validate(new, old)
+    errs = validate(new, old, con=con)
     if errs:
         raise ConfigError(errs)
     ch = changes(old, new)
     if not ch:
         return []
+    # Notion schema validation runs outside the write lock. Never replace a concurrent settings save.
+    if not con.in_transaction:
+        con.execute("BEGIN IMMEDIATE")
+        if current(con) != old:
+            con.rollback()
+            raise ConfigError(["확인하는 동안 설정이 바뀌었어요. 새로 고친 뒤 다시 저장하세요"])
     core.write_config(con, new)
     ts = now()
     for c in ch:
@@ -715,11 +722,11 @@ def update_many(items: list, actor: str, dry_run: bool = False, dashboard: bool 
             new = apply(new, scope, value)
         if dry_run:
             new = core.effective_config(new)
-            errs = validate(new, cur)
+            errs = validate(new, cur, con=con)
             if errs:
                 raise ConfigError(errs)
             return changes(cur, new)
-        return save(con, new, actor)
+        return save(con, new, actor, old=cur)
 
 
 def _read_doc(text: str) -> dict:
@@ -741,11 +748,11 @@ def import_doc(doc: dict, actor: str = "import", dry_run: bool = False) -> list[
         new = core.effective_config({"settings": doc["settings"] if "settings" in doc else cur["settings"],
                                      "project_map": doc["project_map"] if "project_map" in doc else cur["project_map"]})
         if dry_run:
-            errs = validate(new, cur)
+            errs = validate(new, cur, con=con)
             if errs:
                 raise ConfigError(errs)
             return changes(cur, new)
-        return save(con, new, actor)
+        return save(con, new, actor, old=cur)
 
 
 def import_file(path: str, actor: str = "import") -> list[dict]:

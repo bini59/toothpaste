@@ -55,6 +55,7 @@ class NotionFixture:
                           "options": [{"id": i, "name": n} for n, i in TAG_IDS.items()]}},
                       "상태": {"type": "status", "id": "status-id", "status": {
                           "options": [{"id": i, "name": n} for n, i in STATUS_IDS.items()]}}}
+        self.props_by_source = {}
         self.writes = []
         self.relation_items = {}
         self.deny_writes = set()
@@ -70,9 +71,10 @@ class NotionFixture:
         self.expired = False
         self.refreshes = 0
 
-    def apply_properties(self, row, props):
+    def apply_properties(self, row, props, source):
+        schema = self.props_by_source.get(source, self.props)
         for prop_id, field in props.items():
-            name, col = next((name, col) for name, col in self.props.items() if col["id"] == prop_id)
+            name, col = next((name, col) for name, col in schema.items() if col["id"] == prop_id)
             kind = col["type"]
             value = field[kind]
             if kind == "title":
@@ -123,7 +125,7 @@ class NotionFixture:
                 return 404, {}
             self.created += 1
             row = page(1000 + self.created, "", [], [], "할 일")
-            self.apply_properties(row, body["properties"])
+            self.apply_properties(row, body["properties"], source)
             self.pages[source].append(row)
             self.markdown[row["id"]] = (200, {"markdown": body.get("markdown", "")})
             self.writes.append((method, path, body))
@@ -138,7 +140,7 @@ class NotionFixture:
                             assert body["type"] == "replace_content"
                             self.markdown[page_id] = (200, {"markdown": body["replace_content"]["new_str"]})
                         else:
-                            self.apply_properties(row, body["properties"])
+                            self.apply_properties(row, body["properties"], source)
                         self.writes.append((method, path, body))
                     elif method != "GET":
                         return 405, {}
@@ -161,7 +163,7 @@ class NotionFixture:
             if source not in shared:
                 return 404, {}
             if not action:
-                return 200, {"properties": self.props}
+                return 200, {"properties": self.props_by_source.get(source, self.props)}
             if action != "query":
                 return 404, {}
             if self.on_query:

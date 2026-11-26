@@ -2,7 +2,7 @@
 
 Your PR {{PR_URL}} (#{{PR_NUMBER}}, head `{{HEAD_SHA}}`) can no longer be merged: GitHub reports a conflict with its
 base branch `{{BASE}}` (other PRs were merged into `{{BASE}}` after you branched).
-You are back in the same git worktree, on the same branch (`{{BRANCH}}`). Asana: {{URL}}
+You are back in the same git worktree, on the same branch (`{{BRANCH}}`). The source ticket is {{URL}}.
 
 ## How to work
 1. Read the repo's AGENTS.md / CLAUDE.md again.

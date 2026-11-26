@@ -38,13 +38,13 @@ export function Board({ s, I, project, onAssign, onSkip, onApprove, onOverride, 
   const hidden = s.tickets.filter((t) => mine(t) && !onBoard(t) && t.stage !== "open" && !t.completed).length;
   const tagged = tickets.filter((t) => t.stage !== "open");
   const inc = openTickets(s).filter((t) => mine(t) && onBoard(t));
-  const blocked = tagged.filter((t) => t.stage === "blocked").length;
   const overdue = inc.filter((t) => isOverdue(t.due_on)).length;
   // one bar segment per BOARD column; any stage without a column (today only skipped) counts as 완료 so the bar sums to tagged
   const groups = BOARD.map((col, i) => ({
     ...col,
     n: tagged.filter((t) => col.stages.includes(t.stage) || (i === BOARD.length - 1 && !BOARD.some((b) => b.stages.includes(t.stage)))).length,
   }));
+  const blocked = groups.find((g) => g.stages.includes("blocked"))?.n ?? 0;
   const pct = (n: number) => Math.round((n / tagged.length) * 100);
   const columns = (rows: Ticket[]) => (
     <div className="flex items-start gap-3 overflow-x-auto pb-2">

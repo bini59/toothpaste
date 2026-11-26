@@ -67,10 +67,14 @@ def staging_branch(repo: str | None) -> str | None:
 
 def approval_target(con, t):
     """Return (pr, error). Shared by the dashboard (validation) and the host merge."""
+    if t["gid"].startswith("notion:") and t["milestone_error"]:
+        return None, t["milestone_error"]
     r = latest_run(con, t["gid"])
     pr = r and run_pr(con, r["id"])
     if not pr or pr["state"] != "OPEN":
         return None, "열린 PR이 없어요"
+    if err := M.staging_config_error(t, pr["repo"]):
+        return None, err
     stg = staging_branch(pr["repo"])
     if not stg:
         return None, f"{pr['repo']}는 staging 머지를 쓰지 않아요 (배포 규칙)"
@@ -577,7 +581,7 @@ def complete_asana(con, ticket_gid: str, *, pr_url: str | None = None) -> str | 
     still has work in its latest run."""
     from .pipeline import issue_ref
     if M.is_ms(ticket_gid):
-        return M.complete(con, ticket_gid, pr_url=pr_url)  # milestone ticket: its subtasks and, at the end, the Asana parent
+        return M.complete(con, ticket_gid, pr_url=pr_url)
     if pr_url is not None:
         latest = latest_run(con, ticket_gid)
         if latest:
