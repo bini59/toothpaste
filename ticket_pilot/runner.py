@@ -235,7 +235,7 @@ def command(a: dict, log: Path) -> list[str]:
 def launch(cwd: str, prompt: str, tag: str, setup: str | None = None, repo_path: str | None = None,
            agent: dict | None = None, resume: str | None = None, split_stderr: bool = False,
            images: list[str] | None = None, add_dirs: list[str] | None = None, role: str = "work",
-           compact: bool = False) -> str:
+           compact: bool = False, chat_turn: tuple[str, int] | None = None) -> str:
     """Start the agent (agent = a repo's agent settings, see resolve()) in cwd with the prompt on stdin, detached;
     returns the handle "<pid> <log>". setup (a repo's worktree setup script) runs first in the same wrapper; its
     failure is logged, the agent still runs. resume = a session id of the same tool to continue. split_stderr
@@ -269,11 +269,17 @@ def launch(cwd: str, prompt: str, tag: str, setup: str | None = None, repo_path:
               '"$@" < "$TP_PROMPT"; echo $? > "$TP_EXIT"')
     # TP_AGENT marks the agent's processes for `tp asana` (asana_write.py); the PAT stays with tp (keychain).
     # gh_env: gh and https git push use tp's GitHub token (TP-112); without one they fail instead of using the owner's login
-    env = gh_env({**{k: v for k, v in os.environ.items() if k != "ASANA_PAT"}, "TP_PROMPT": str(prompt_file),
+    parent_env = {k: v for k, v in os.environ.items() if k not in ("ASANA_PAT", "TP_CHAT_ID", "TP_CHAT_TURN_ID")}
+    env = gh_env({**parent_env, "TP_PROMPT": str(prompt_file),
                   "TP_EXIT": f"{log}.exit", "TP_SETUP": setup or "", "TP_BIN": str(ROOT / "bin" / "tp"),
                   "PATH": agent_path(), "TP_AGENT": tag}, required=False)
     from .accounts import agent_env  # accounts imports this module
     env.update(agent_env(a["tool"]))  # tp's Claude token / API key, only without the CLI's own login (TP-179)
+    if chat_turn:
+        ident, turn = chat_turn
+        env.update(TP_CHAT_ID=ident, TP_CHAT_TURN_ID=str(turn))
+        if env.get("TP_DB"):  # the agent invokes tp from the project's checkout
+            env["TP_DB"] = str(Path(env["TP_DB"]).resolve())
     if repo_path:
         for k in ("TP_ROOT_PATH", "ORCA_ROOT_PATH"):
             env[k] = repo_path

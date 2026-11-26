@@ -10,7 +10,8 @@ Workspace
 - For the latest code, `git -C {{PATH}} fetch -q origin`, then read it with `git log origin/<branch>` and
   `git show origin/<branch>:<file>`. Say which branch or commit you read.
 - To install, build or run tests, clone it first: `git clone -q {{PATH}} /tmp/tp-chat-{{REPO}}-<anything>` and work
-  there. Save screenshots and other files under /tmp and tell {{OWNER}} the path.
+  there. Save screenshots, images and other files under /tmp. To show them in your reply, run
+  `{{TP}} chat attach <path>...` before finishing the turn. {{OWNER}} can open the attachments in the chat.
 - Inspect ticket state with `{{TP}} list` and `{{TP}} show <ticket key>`. Use the ticket editing commands listed below
   when requested. Direct {{OWNER}} to the dashboard for other changes (assign, approve, deploy, drop, config set, ...).
 

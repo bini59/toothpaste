@@ -65,7 +65,8 @@ else:
         sys.exit(0)
     if "--conversation" in args:
         assert args[args.index("--conversation") + 1] == "CONVERSATION_ID"
-        assert text == "second turn"
+        assert "chat attach <path>..." in text and text.splitlines()[-1] == "second turn"
+        assert pathlib.Path(os.environ["TP_DB"]) == pathlib.Path.cwd() / "chat.db"
     elif "second turn" in text:
         sys.exit(1)
     result = {"status": "SUCCESS", "conversation_id": "CONVERSATION_ID", "response": text.splitlines()[-1]}
@@ -202,7 +203,8 @@ class TestAntigravity(unittest.TestCase):
         pm = {"repos": {"r": {"path": str(self.work), "agent": agent}}, "projects": [
             {"id": "p", "name": "Project", "source": "none", "repos": [{"repo": "r", "default": True}]}]}
         with mock.patch.object(runner, "settings", return_value=config), mock.patch.object(chat, "db", return_value=con), \
-                mock.patch.object(chat, "project_map", return_value=pm):
+                mock.patch.object(chat, "project_map", return_value=pm), \
+                mock.patch.dict(os.environ, {"TP_DB": os.path.relpath(self.work / "chat.db")}):
             for role, response in (("work", "ticket output"), ("review", "review output")):
                 handle = runner.launch(str(self.work), response, "fixture", role=role)
                 self.assertEqual(self.wait_for(handle), 0)

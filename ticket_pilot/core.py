@@ -602,7 +602,7 @@ _COLUMNS = {
             "prod_at": "TEXT", "prod_note": "TEXT", "track_sha": "TEXT",
             # pipeline.conflict_rework: head commit the agent was relaunched on to resolve a base-branch conflict
             "conflict_sha": "TEXT", "conflict_at": "TEXT"},
-    # chat.py (TP-72): JSON list of {name, file, size, type} of a user message's files in data/chat-uploads/<conv>/
+    # chat.py: JSON list of {name, file, size, type} for user and assistant files in data/chat-uploads/<conv>/
     "chat_messages": {"attachments": "TEXT", "input_tokens": "INTEGER", "cache_read_input_tokens": "INTEGER",
                       "cache_creation_input_tokens": "INTEGER", "output_tokens": "INTEGER",
                       "context_tokens": "INTEGER", "before_context_tokens": "INTEGER", "compaction_id": "INTEGER",

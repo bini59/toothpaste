@@ -1,11 +1,13 @@
 """TP-72: chat attachments (validation, storage, agent delivery, file lookup, delete). Run: python3 -m unittest discover tests"""
 import base64
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from urllib.parse import parse_qs, urlsplit
 
 from ticket_pilot import chat as CH, core, runner
 
@@ -80,10 +82,12 @@ class AttachTest(unittest.TestCase):
     def test_send_keeps_a_conversation_in_its_repo(self):
         self.con.execute("UPDATE chat_conversations SET repo='r2', session='s1', tool='claude' WHERE id=?", (self.id,))
         self.con.commit()
-        CH.send(self.id, "hi")  # r2 is not p's default, but still in p: same checkout, the session resumes
+        turn = CH.send(self.id, "hi")  # r2 is not p's default, but still in p: same checkout, the session resumes
         self.assertEqual((self.launch.call_args.args[0], self.launch.call_args.kwargs["resume"]),
                          (str(Path(self.tmp.name) / "r2"), "s1"))
         self.assertEqual(self.launch.call_args.kwargs["add_dirs"], [self.tmp.name])
+        self.assertEqual(self.launch.call_args.kwargs["chat_turn"], (self.id, turn))
+        self.assertIn("{{TP}} chat attach <path>...", self.launch.call_args.args[1])
 
     def test_send_stores_files_and_passes_paths(self):
         CH.send(self.id, "이거 봐줘", [{"name": "image.png", "data": b64(b"\x89PNG")},
@@ -104,6 +108,97 @@ class AttachTest(unittest.TestCase):
         self.assertEqual(CH.file_path(self.id, name.replace("%20", " ")).read_bytes(), b"err")
         CH.delete(self.id)
         self.assertFalse(d.exists())
+
+    def test_agent_files_belong_to_the_reply_and_survive_finalization(self):
+        shot = Path(self.tmp.name) / "결과 화면.png"
+        note = shot.with_suffix(".txt")
+        shot.write_bytes(b"png")
+        note.write_text("ok")
+        turn = CH.send(self.id, "보여 줘", [{"name": "input.txt", "data": b64(b"in")}])
+        self.assertEqual(self.launch.call_args.kwargs["chat_turn"], (self.id, turn))
+        with mock.patch.dict(os.environ, {"TP_CHAT_ID": self.id, "TP_CHAT_TURN_ID": str(turn)}):
+            self.assertEqual(CH.attach([shot, note]), 2)
+            self.assertEqual(CH.attach([shot]), 1)
+        shot.unlink()
+        user, reply = CH.messages(self.id)["messages"]
+        self.assertEqual([a["name"] for a in user["attachments"]], ["input.txt"])
+        files = reply["attachments"]
+        self.assertEqual([(a["name"], a["size"], a["image"]) for a in files],
+                         [(shot.name, 3, True), (note.name, 2, False), (shot.name, 3, True)])
+        self.assertNotEqual(files[0]["url"], files[2]["url"])
+        q = parse_qs(urlsplit(files[0]["url"]).query)
+        self.assertEqual(CH.file_path(q["id"][0], q["name"][0]).read_bytes(), b"png")
+        with mock.patch.object(CH.R, "agent_state", return_value=(False, 0)), \
+             mock.patch.object(CH.R, "last_message", return_value="첨부했어요"):
+            self.assertEqual(CH.messages(self.id)["messages"][-1]["text"], "첨부했어요")
+        self.assertEqual(CH.messages(self.id)["messages"][-1]["attachments"], files)
+        CH.delete(self.id)
+        self.assertFalse((CH.UPLOADS / self.id).exists())
+        self.assertTrue(note.is_file())
+
+    def test_agent_attach_checks_the_conversation_and_running_turn(self):
+        path = Path(self.tmp.name) / "reply.txt"
+        path.touch()
+        first = CH.send(self.id, "first")
+        CH.stop(self.id)
+        second = CH.send(self.id, "second")
+        other = CH.create("p")
+        CH.send(other, "other")
+        for ident, turn in (("", ""), (self.id, first), (other, second)):
+            with self.subTest(ident=ident, turn=turn), \
+                 mock.patch.dict(os.environ, {"TP_CHAT_ID": ident, "TP_CHAT_TURN_ID": str(turn)}), \
+                 self.assertRaises(SystemExit):
+                CH.attach([path])
+        # A descendant can outlive the runner before the next dashboard poll finalizes the row.
+        with mock.patch.dict(os.environ, {"TP_CHAT_ID": self.id, "TP_CHAT_TURN_ID": str(second)}), \
+             mock.patch.object(CH.R, "agent_state", return_value=(False, 0)), self.assertRaises(SystemExit):
+            CH.attach([path])
+        self.assertFalse(CH.UPLOADS.exists())
+
+    def test_attachment_only_reply_finishes_successfully(self):
+        path = Path(self.tmp.name) / "shot.png"
+        path.touch()
+        turn = CH.send(self.id, "이미지만 보여 줘")
+        with mock.patch.dict(os.environ, {"TP_CHAT_ID": self.id, "TP_CHAT_TURN_ID": str(turn)}):
+            CH.attach([path])
+        with mock.patch.object(CH.R, "agent_state", return_value=(False, 0)), \
+             mock.patch.object(CH.R, "last_message", return_value=""):
+            reply = CH.messages(self.id)["messages"][-1]
+        self.assertEqual((reply["text"], reply["failed"], reply["attachments"][0]["name"]), ("", False, path.name))
+
+    def test_agent_attach_validates_the_whole_batch_and_cumulative_count(self):
+        path = Path(self.tmp.name) / "ok.txt"
+        path.write_bytes(b"123")
+        big = path.with_name("big.txt")
+        big.write_bytes(b"1234")
+        turn = CH.send(self.id, "go")
+        with mock.patch.dict(os.environ, {"TP_CHAT_ID": self.id, "TP_CHAT_TURN_ID": str(turn)}), \
+             mock.patch.object(CH, "MAX_FILES", 2), mock.patch.object(CH, "MAX_FILE", 3):
+            for bad, error in ((path.with_name(".env"), "파일 이름"), (big, "너무 커요"), (path.parent, "일반 파일")):
+                with self.subTest(path=bad), self.assertRaisesRegex(SystemExit, error):
+                    CH.attach([path, bad])
+            self.assertFalse((CH.UPLOADS / self.id).exists())
+            CH.attach([path])
+            with self.assertRaisesRegex(SystemExit, "2개까지"):
+                CH.attach([path, path])
+            CH.attach([path])
+        self.assertEqual(len(CH.messages(self.id)["messages"][-1]["attachments"]), 2)
+        self.assertEqual(len(list((CH.UPLOADS / self.id).iterdir())), 2)
+
+    def test_agent_attach_removes_new_files_if_registration_fails(self):
+        path = Path(self.tmp.name) / "ok.txt"
+        path.touch()
+        turn = CH.send(self.id, "go")
+        with mock.patch.dict(os.environ, {"TP_CHAT_ID": self.id, "TP_CHAT_TURN_ID": str(turn)}):
+            CH.attach([path])
+            d = CH.UPLOADS / self.id
+            before = list(d.iterdir())
+            self.con.execute("""CREATE TRIGGER reject BEFORE UPDATE OF attachments ON chat_messages
+                                BEGIN SELECT RAISE(ABORT, 'rejected'); END""")
+            with self.assertRaises(sqlite3.IntegrityError):
+                CH.attach([path, path])
+        self.assertEqual(list(d.iterdir()), before)
+        self.assertEqual(len(CH.messages(self.id)["messages"][-1]["attachments"]), 1)
 
     def test_comma_kept_out_of_stored_name(self):
         CH.send(self.id, "", [{"name": "a, b.png", "data": b64(b"x")}])
@@ -132,6 +227,13 @@ class AttachTest(unittest.TestCase):
         self.assertIsNotNone(CH.file_path(self.id, "ok.txt"))
         for ident, name in ((self.id, "../secret.txt"), (self.id, ".."), ("../uploads", "secret.txt"), (self.id, "")):
             self.assertIsNone(CH.file_path(ident, name))
+        (CH.UPLOADS / self.id / "outside.txt").symlink_to(CH.UPLOADS / "secret.txt")
+        self.assertIsNone(CH.file_path(self.id, "outside.txt"))
+        other = CH.create("p")
+        (CH.UPLOADS / other).symlink_to(CH.UPLOADS / self.id, target_is_directory=True)
+        self.assertIsNone(CH.file_path(other, "ok.txt"))
+        with self.assertRaisesRegex(SystemExit, "첨부 폴더"):
+            CH.send(other, "", [{"name": "foreign.txt", "data": b64(b"x")}])
 
     def test_busy_refused_before_upload(self):
         CH.send(self.id, "first")

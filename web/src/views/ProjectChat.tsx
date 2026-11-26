@@ -76,8 +76,10 @@ function Attachments({ items }: { items: ChatAttachment[] }) {
           <img src={a.url} alt={a.name} className="h-24 max-w-48 rounded-md border border-border object-cover" />
         </a>
       ) : (
-        <a key={a.url} href={a.url} target="_blank" rel="noreferrer" className="flex items-center gap-1 rounded-md border border-border bg-surface px-2 py-1 text-xs text-primary hover:underline">
-          <FileText className="h-4 w-4" /> {a.name} <span className="text-text-muted">({Math.ceil(a.size / 1024)}KB)</span>
+        <a key={a.url} href={a.url} target="_blank" rel="noreferrer" className="flex max-w-full items-center gap-1 rounded-md border border-border bg-surface px-2 py-1 text-xs text-primary hover:underline">
+          <FileText className="h-4 w-4 shrink-0" />
+          <span className="wrap-anywhere">{a.name}</span>
+          <span className="shrink-0 text-text-muted">({Math.ceil(a.size / 1024)}KB)</span>
         </a>
       ))}
     </div>
@@ -303,6 +305,7 @@ function Thread({ project, id, onChanged }: { project: Project; id: string; onCh
           </div>
         ) : m.text === null ? (
           <div key={m.id} className="max-w-[85%] rounded-lg border border-border bg-surface px-3 py-2 text-text-muted">
+            <Attachments items={m.attachments} />
             <p className="flex items-center gap-2"><Bot className="h-4 w-4 animate-pulse" /> 답을 쓰는 중… <Elapsed since={m.ts} /> · 다른 화면으로 가도 계속 실행돼요</p>
             {t.busy?.log && (
               <details className="mt-2">
@@ -313,6 +316,7 @@ function Thread({ project, id, onChanged }: { project: Project; id: string; onCh
           </div>
         ) : (
           <div key={m.id} className={cn("max-w-[85%] rounded-lg border bg-surface px-3 py-2 text-text-main", m.failed ? "border-danger-200" : "border-border")}>
+            <Attachments items={m.attachments} />
             <Body text={m.text} />
             <p className="mt-1 text-[11px] text-text-muted">{m.agent ?? "agent"} · {ago(m.finished_at ?? m.ts)}{m.failed && <span className="text-danger-700"> · 중단됨</span>}</p>
           </div>
