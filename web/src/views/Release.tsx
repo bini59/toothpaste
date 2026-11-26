@@ -126,7 +126,7 @@ export function Release({ s, onHold, onDeploy, onCancelDeploy }: Props) {
   const reviewed = s.tickets.flatMap((t) => {
     if (t.completed || t.milestone_error || t.stage !== "reviewed") return [];
     const pr = latestPr(s, t.gid);
-    const approved = pr?.state === "OPEN" && rules[pr.repo]
+    const approved = pr?.state === "OPEN" && (rules[pr.repo] || pr.staging_deploy_error)
       && s.reviews.find((v) => v.pr_url === pr.url && v.head_sha === pr.head_sha)?.verdict === "approve";
     return approved ? [{ t, pr, staged: false }] : [];
   });
@@ -139,6 +139,8 @@ export function Release({ s, onHold, onDeploy, onCancelDeploy }: Props) {
     Number(a.staged) - Number(b.staged) || a.pr.repo.localeCompare(b.pr.repo) || b.pr.number - a.pr.number);
 
   const ticketButtons = (t: Ticket, pr: PR, staged: boolean) => {
+    if (!staged && pr.staging_deploy_error)
+      return <span className="text-xs text-danger-700">{pr.staging_deploy_error}</span>;
     const r = rules[pr.repo];
     const busy = !!liveReleaseOf(s, t.gid);
     const out: React.ReactNode[] = [];

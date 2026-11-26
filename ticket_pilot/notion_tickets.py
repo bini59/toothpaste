@@ -449,10 +449,11 @@ def preview(con, projects, project, work_tag):
             raise notion.NotionError(listing.error)
         items = []
         registered = {r[0] for r in con.execute("SELECT name FROM repos")}
+        repos = [{"repo": name} for name in project["repos"]]
         for gid, row in listing.rows.items():
             old = con.execute("SELECT * FROM tickets WHERE gid=?", (gid,)).fetchone()
             ticket = {"completed": 0, "skip": 0, "open_deps": 0, **(dict(old) if old else {}), **row, **listing.parents[gid],
                       "repo_override": _repo_override(old, row["project_gid"], registered), "assigned": 1}
-            stage = "other_project" if gid not in owned else compute_stage(con, ticket, repo_count=len(project["repos"]))
+            stage = "other_project" if gid not in owned else compute_stage(con, ticket, repos=repos)
             items.append({"gid": gid, "title": row["name"], "stage": stage, "auto_start": stage == "queued"})
         return {"count": len(items), "tickets": items}

@@ -29,8 +29,8 @@ TP_BIN = str(ROOT / "bin" / "tp")
 VIOLATION = "BLOCKED: 규칙 위반"
 ACTIVE_STAGES = ("dispatched", "in_progress")
 STAGE_ORDER = [
-    "conflict", "rework", "queued", "needs_repo", "unmapped", "waiting_dep", "milestone_error", "ms_hold", "collecting", "dispatched",
-    "in_progress",
+    "conflict", "rework", "queued", "needs_repo", "unmapped", "waiting_dep", "milestone_error", "needs_staging",
+    "ms_hold", "collecting", "dispatched", "in_progress",
     "blocked", "agent_done", "pr_open", "reviewed", "approving", "milestone", "deploying", "staged", "merged", "done",
     "closed", "skipped", "open",
 ]
@@ -82,7 +82,7 @@ def review_overridden(t, pr) -> bool:
     return bool("review_override" in t.keys() and t["review_override"] and t["review_override_sha"] == pr["head_sha"])
 
 
-def compute_stage(con, t, *, repo_count=None) -> str:
+def compute_stage(con, t, *, repos=None) -> str:
     if t["completed"]:
         return "done"
     r = latest_run(con, t["gid"])
@@ -168,15 +168,14 @@ def compute_stage(con, t, *, repo_count=None) -> str:
         return "milestone_error"
     if t["open_deps"] and unmet_deps(con, t):
         return "waiting_dep"
-    if t["repo_override"] and (not t["gid"].startswith("notion:") or chosen_repo(con, t)):
+    if t["repo_override"] and not t["gid"].startswith("notion:"):
         return "queued"
-    if repo_count is None:  # preview can supply the project's unsaved repo selection
-        repo_count = len(repos_for_project(con, t["project_gid"]))
-    if not repo_count:
-        return "unmapped"
-    if repo_count > 1:
-        return "needs_repo"
-    return "queued"
+    if repos is None:  # preview can supply the project's unsaved repo selection
+        repos = repos_for_project(con, t["project_gid"])
+    repo = chosen_repo(con, t, repos)
+    if repo:
+        return "needs_staging" if M.staging_config_error(t, repo["repo"]) else "queued"
+    return "needs_repo" if repos else "unmapped"
 
 
 def deps_status(con, t) -> list[dict]:
@@ -423,6 +422,8 @@ def build_brief(con, t, repo: dict) -> str:
     ref = issue_ref(t["gid"])
     is_notion = t["gid"].startswith("notion:")
     if is_notion:
+        if err := M.staging_config_error(t, repo["repo"]):
+            raise notion.NotionError(err)  # deploy settings may have changed since the ticket was queued
         t, markdown = notion_tickets.queued_page(con, t, repo)
         notes = "\n\n".join(filter(None, (t["notes"], markdown)))
     else:
@@ -473,8 +474,9 @@ def build_brief(con, t, repo: dict) -> str:
     return _agent_brief(tpl, t)
 
 
-def chosen_repo(con, t):
-    repos = repos_for_project(con, t["project_gid"])
+def chosen_repo(con, t, repos=None):
+    if repos is None:
+        repos = repos_for_project(con, t["project_gid"])
     if t["repo_override"]:
         r = con.execute("SELECT * FROM repos WHERE name=?", (t["repo_override"],)).fetchone()
         if r:
@@ -485,6 +487,14 @@ def chosen_repo(con, t):
         if not t["gid"].startswith("notion:"):
             return None
     return repos[0] if len(repos) == 1 else None
+
+
+def resume_staging_error(con, t):
+    """A retry uses the existing worktree's repo even if the project mapping has changed."""
+    if t["gid"].startswith(("notion:", "ms:notion:")) and (r := latest_run(con, t["gid"])):
+        pr = run_pr(con, r["id"])
+        return M.staging_config_error(t, r["repo"], pr and pr["base"])
+    return None
 
 
 def dispatch(dry_run=False, log=print, only: str | None = None) -> list[str]:
@@ -514,7 +524,9 @@ def dispatch(dry_run=False, log=print, only: str | None = None) -> list[str]:
         meta_set(con, "github_missing_logged", False)
     # answered BLOCKED tickets already hold a slot, so they go before the slot limit
     for t in answered if gh_ok else ():
-        if unblock(con, t, dry_run=dry_run, log=log):
+        if err := resume_staging_error(con, t):
+            log(f"{t['key']}: {err}")
+        elif unblock(con, t, dry_run=dry_run, log=log):
             done.append(t["key"])
     # rework past the round cap goes to the owner instead of the agent; that needs no slot
     def cap_of(t):
@@ -527,6 +539,9 @@ def dispatch(dry_run=False, log=print, only: str | None = None) -> list[str]:
     for t in cands if gh_ok else ():
         if not slots:
             break
+        if t["stage"] != "queued" and (err := resume_staging_error(con, t)):
+            log(f"{t['key']}: {err}")
+            continue
         slots -= 1
         if t["stage"] == "conflict":
             if resolve_conflict(con, t, dry_run=dry_run, log=log):
@@ -943,9 +958,10 @@ def refresh_prs(con, r, branch) -> int:
         # Milestone subtasks: also PRs on staging (opened before the parent got the milestone tag, or by mistake).
         was = p.get("baseRefName")
         moved = bool(t and t["gid"].startswith("notion:") and (was or "").startswith(M.PREFIX))
-        target = (fb or M.staging_of(r["repo"])) if moved else fb
-        if (target and p["state"] == "OPEN" and was != target and not (t and t["milestone_error"])
-                and (moved or (was == rr["target"] and p["createdAt"] >= since)  # "" = all open PRs
+        target = (fb or M.staging_of(r["repo"], notion=True)) if moved else fb
+        if (target and p["state"] == "OPEN" and was != target
+                and not (t and (t["milestone_error"] or M.staging_config_error(t, r["repo"], was)))
+                and (moved or (rr and was == rr["target"] and p["createdAt"] >= since)  # "" = all open PRs
                      or (ms and was == M.staging_of(r["repo"])))):
             try:
                 if ms:

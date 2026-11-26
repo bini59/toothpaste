@@ -85,21 +85,35 @@ def in_milestone(t) -> bool:
     return bool(t["parent_gid"]) and "in_milestone" in t.keys() and bool(t["in_milestone"])
 
 
-def staging_of(repo: str | None) -> str | None:
-    """The branch a milestone branches from and ships into: the feature base, else the staging branch of a repo whose
-    deploy rule has the staging mode (release.staging_branch)."""
-    fb = feature_base(repo)
-    if fb:
+def staging_of(repo: str | None, *, notion: bool = False) -> str | None:
+    """Notion milestones need an approvable staging branch before production. Asana also uses the feature base."""
+    if not notion and (fb := feature_base(repo)):
         return fb
     rr = repo_rules(repo) if repo else None
-    if rr and rr["staging"] and "staging" in rr["modes"] and rr["staging"]["branch"] != rr["target"]:
-        return rr["staging"]["branch"]
+    if rr and rr["staging"] and "staging" in rr["modes"]:
+        stg = rr["staging"]["branch"]
+        if stg != rr["target"] and (not notion or stg != rr["prod"]["branch"]):
+            return stg
+    return None
+
+
+def notion_milestone(t, base: str | None = None) -> bool:
+    # A relation and its open PR base can change on different ticks.
+    return t["gid"].startswith("ms:notion:") or (
+        t["gid"].startswith("notion:") and (in_milestone(t) or (base or "").startswith(PREFIX)))
+
+
+def staging_config_error(t, repo: str, base: str | None = None) -> str | None:
+    if notion_milestone(t, base) and not staging_of(repo, notion=True):
+        return (f"Notion 마일스톤에는 staging 머지가 필요해요. 프로젝트 → 설정 → 레포별 설정 → {repo} → 배포에서 "
+                "‘staging 브랜치 사용’을 켜고 중간·prod 브랜치와 다른 staging 브랜치를 지정한 뒤, ‘배포 방식’에서 staging을 선택하세요.")
     return None
 
 
 def base_for(t, repo: str | None) -> str | None:
     """Branch t's PR targets (and its worktree starts from): its milestone branch, else the repo's feature base."""
-    if t is not None and in_milestone(t) and staging_of(repo):
+    # A Notion relation fixes the required base even if the repo loses its staging settings before launch.
+    if t is not None and in_milestone(t) and (t["parent_gid"].startswith("notion:") or staging_of(repo)):
         return branch(t["parent_gid"])
     return feature_base(repo)
 
@@ -128,17 +142,17 @@ def _github(con, repo: str) -> str | None:
 def ensure(con, t, repo: str) -> str:
     """Create the milestone branch of t's parent in repo (from the feature base) and its milestone ticket if missing.
     Returns the branch."""
-    b, fb, gh = branch(t["parent_gid"]), staging_of(repo), _github(con, repo)
+    parent = t["parent_gid"]
+    b, fb, gh = branch(parent), staging_of(repo, notion=parent.startswith("notion:")), _github(con, repo)
     if not (fb and gh):
         raise RuntimeError(f"{repo}: a milestone needs a staging branch and a GitHub repo")
-    gid = ms_gid(t["parent_gid"], repo)
+    gid = ms_gid(parent, repo)
     if con.execute("SELECT 1 FROM tickets WHERE gid=?", (gid,)).fetchone():
         return b
     if _gh(["api", f"repos/{gh}/git/ref/heads/{b}"], check=False).returncode:
         sha = _gh(["api", f"repos/{gh}/commits/{fb}", "--jq", ".sha"]).stdout.strip()
         _gh(["api", "-X", "POST", f"repos/{gh}/git/refs", "-f", f"ref=refs/heads/{b}", "-f", f"sha={sha}"])
         event(con, "milestone", f"{t['parent_name'] or t['parent_gid']}: {repo} {b} created from {fb} ({sha[:7]})", gid)
-    parent = t["parent_gid"]
     p = con.execute("SELECT * FROM tickets WHERE gid=?", (parent,)).fetchone()
     if p:
         pkey = p["key"]
@@ -393,7 +407,7 @@ def sync_base(con, t, log=print) -> int:
     """Merge the feature base into the milestone branch while subtasks still work on it (GitHub merges API).
     Returns 1 when it merged. A conflict is logged once per base head and left for the milestone PR."""
     parent, repo = parse(t["gid"])
-    gh, fb, b = _github(con, repo), staging_of(repo), branch(parent)
+    gh, fb, b = _github(con, repo), staging_of(repo, notion=parent.startswith("notion:")), branch(parent)
     if not (gh and fb) or not _ahead(gh, b, fb):
         return 0
     p = _gh(["api", "-X", "POST", f"repos/{gh}/merges", "-f", f"base={b}", "-f", f"head={fb}",
@@ -438,7 +452,7 @@ def open_pr(con, t, log=print) -> int:
     if p0 and p0["state"] == "OPEN":
         return 0  # the milestone PR is already open (its head moves with each subtask merge)
     rp = con.execute("SELECT * FROM repos WHERE name=?", (repo,)).fetchone()
-    fb, b = staging_of(repo), branch(parent)
+    fb, b = staging_of(repo, notion=parent.startswith("notion:")), branch(parent)
     if not (rp and rp["github"] and rp["path"] and fb):
         return 0
     gh = rp["github"]

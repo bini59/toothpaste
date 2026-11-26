@@ -10,6 +10,7 @@ export interface Ticket {
   parent_name: string | null;
   parent_url: string | null;
   milestone_error: string | null;
+  staging_config_error?: string | null;
   due_on: string | null;
   tags: string | null;
   has_tag: number;
@@ -73,6 +74,7 @@ export interface PR {
   checks?: PrChecks;
   /** Milestone routing reason shown in place of a direct deploy action on an open PR. */
   direct_deploy_error?: string | null;
+  staging_deploy_error?: string | null;
   awaiting_milestone_round?: boolean;
 }
 export interface CheckRow {

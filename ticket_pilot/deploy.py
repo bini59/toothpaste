@@ -59,15 +59,13 @@ def _approved(con, pr) -> bool:
     return bool(rv) and rv["verdict"] == "approve"
 
 
-def milestone_deploy_error(mode: str, t, base: str | None) -> str | None:
-    """Check the route of an open ticket PR for a direct deploy or preview."""
-    if t["milestone_error"] or mode != "direct":
-        return t["milestone_error"]
-    # The relation and the PR base can change on different ticks. Both must be clear before a direct deploy.
-    subtask = t["gid"].startswith("notion:") and (M.in_milestone(t) or (base or "").startswith(M.PREFIX))
-    if subtask or t["gid"].startswith("ms:notion:"):
-        return "마일스톤 PR을 staging에 머지한 뒤 함께 배포해요"
-    return None
+def milestone_deploy_errors(t, repo: str, base: str | None) -> dict[str, str]:
+    """Actions unavailable for this open PR because of its milestone route."""
+    if err := t["milestone_error"] or M.staging_config_error(t, repo, base):
+        return dict.fromkeys(("staging", "preview", "direct"), err)
+    if M.notion_milestone(t, base):
+        return {"direct": "마일스톤 PR을 staging에 머지한 뒤 함께 배포해요"}
+    return {}
 
 
 def staged_prs(con, repo: str) -> list[dict]:
@@ -118,6 +116,8 @@ def deploy_target(con, mode: str, ticket: str | None = None, repo: str | None = 
             if not pr:
                 return None, "PR이 없어요"
         repo = pr["repo"]
+        if mode in ("direct", "preview") and (err := milestone_deploy_errors(t, repo, pr["base"]).get(mode)):
+            return None, err
     rr = repo_rules(repo) if repo else None
     if not rr:
         return None, f"{repo or '?'}에 배포 규칙이 없어요 (설정 → 레포 → 배포)"
@@ -137,8 +137,6 @@ def deploy_target(con, mode: str, ticket: str | None = None, repo: str | None = 
     if dup:
         return None, f"이 티켓은 이미 배포 중이에요 (#{dup['id']})"
     if mode in ("direct", "preview"):
-        if err := milestone_deploy_error(mode, t, pr["base"]):
-            return None, err
         if pr["state"] != "OPEN":
             return None, "열린 PR이 없어요"
         if not _approved(con, pr):
@@ -271,7 +269,7 @@ def _check_milestone_deploy(con, rel, *, source_base=None):
                     (rel["ticket_gid"], source["url"])).fetchone()
     if not t:
         raise RuntimeError("배포를 요청한 티켓 PR을 찾을 수 없어요")
-    if err := milestone_deploy_error(rel["mode"], t, source_base or t["base"]):
+    if err := milestone_deploy_errors(t, rel["repo"], source_base or t["base"]).get(rel["mode"]):
         raise RuntimeError(err)
 
 

@@ -29,10 +29,11 @@ class NotionMilestones(NotionDashboard):
         self.save(self.cfg)
         self.add_repo("app")
 
-    def add_repo(self, name):
+    def add_repo(self, name, **deploy):
         self.post("/api/config", {"scope": f"repo.{name}", "value": {
             "path": str(self.root), "github": f"example/{name}", "deploy": {
-                "modes": ["staging", "direct", "promote"], "staging": {"branch": "staging"}, "prod": {"branch": "main"}}}})
+                "modes": ["staging", "direct", "promote"], "staging": {"branch": "staging"},
+                "prod": {"branch": "main"}, **deploy}}})
 
     def ticket(self, gid):
         return self.con.execute("SELECT * FROM tickets WHERE gid=?", (gid,)).fetchone()
@@ -119,6 +120,58 @@ class NotionMilestones(NotionDashboard):
         self.assertTrue(any("대기열" in s for s in lines))
         self.assertFalse(any("계정 연결" in s for s in lines if "would create" in s))
 
+    def test_direct_only_holds_the_subtask_before_dispatch_and_recovers(self):
+        cli.main(["sync"])
+        self.add_repo("app", modes=["direct"], staging=None)  # the saved queue still says "queued"
+        with mock.patch.object(pipeline, "github_token", return_value="fixture"), \
+                mock.patch.object(pipeline.R, "worktrees") as worktrees:
+            self.assertEqual(pipeline.dispatch(only=self.gid), [])
+        worktrees.assert_not_called()
+        self.assertIsNone(pipeline.latest_run(self.con, self.gid))
+        task = next(t for t in server._state(self.con)["tickets"] if t["gid"] == self.gid)
+        self.assertEqual((task["parent_gid"], task["in_milestone"], task["stage"]), (self.parent_gid, 1, "needs_staging"))
+        self.assertIn("app → 배포", task["staging_config_error"])
+        self.assertIn("staging 브랜치 사용", task["staging_config_error"])
+        self.assertIn("배포 방식", task["staging_config_error"])
+        self.post("/api/config", {"scope": "global", "value": {"max_active_runs": 1}})
+        cli.main(["sync"])
+        starts = [s for s in self.dispatch_log() if "would create" in s]
+        self.assertEqual(len(starts), 1)
+        self.assertIn("팀 보드", starts[0])
+
+        self.add_repo("app", staging={"branch": "dev"})
+        cli.main(["sync"])
+        self.assertEqual(self.ticket(self.gid)["stage"], "queued")
+        lines = []
+        pipeline.dispatch(only=self.gid, dry_run=True, log=lines.append)
+        self.assertIn(f"--base {milestone.branch(self.parent_gid)} ", "\n".join(lines))
+
+    def test_preview_and_assignment_check_the_selected_repo(self):
+        self.add_repo("web", modes=["direct"], staging=None)
+        for repos, stage in (([], "unmapped"), (["app", "web"], "needs_repo"), (["web"], "needs_staging"), (["app"], "queued")):
+            with self.subTest(repos=repos):
+                task = next(t for t in self.preview(self.cfg, repos) if t["gid"] == self.gid)
+                self.assertEqual((task["stage"], task["auto_start"]), (stage, stage == "queued"))
+        self.post("/api/config", {"scope": "project.example", "value": {"name": "example", "source": "notion",
+                  "notion": self.cfg, "repos": [{"repo": name, "role": "app"} for name in ("app", "web")]}})
+        cli.main(["sync"])
+        self.assertEqual(self.ticket(self.gid)["stage"], "needs_repo")
+        pipeline.assign(self.gid, "web")
+        self.assertEqual(self.ticket(self.gid)["stage"], "needs_staging")
+        task = next(t for t in self.preview(self.cfg, ["app"]) if t["gid"] == self.gid)
+        self.assertFalse(task["auto_start"])  # the explicit override still selects web
+        pipeline.assign(self.gid, "app")
+        self.assertEqual(self.ticket(self.gid)["stage"], "queued")
+
+    def test_staging_disabled_while_reading_the_brief_holds_the_subtask(self):
+        cli.main(["sync"])
+        self.fixture.on_markdown = lambda: self.add_repo("app", modes=["direct"], staging=None)
+        with mock.patch.object(pipeline, "github_token", return_value="fixture"), \
+                mock.patch.object(pipeline.R, "worktrees") as worktrees:
+            self.assertEqual(pipeline.dispatch(only=self.gid), [])
+        worktrees.assert_not_called()
+        self.assertEqual(self.ticket(self.gid)["stage"], "needs_staging")
+
     def merged_pr(self, gid, repo, base):
         rid = self.con.execute("INSERT INTO runs(ticket_gid,repo,state,ws_status) VALUES (?,?,'active','in-review')",
                                (gid, repo)).lastrowid
@@ -201,6 +254,54 @@ class NotionMilestones(NotionDashboard):
         row = self.con.execute("SELECT status,reason FROM releases ORDER BY id DESC LIMIT 1").fetchone()
         self.assertEqual(row["status"], "failed")
         self.assertIn(reason, row["reason"])
+
+    def test_reviewed_main_pr_explains_missing_staging_until_settings_are_fixed(self):
+        cli.main(["sync"])
+        url = self.reviewed_pr(self.gid, "main")
+        for rule in (None, {"modes": ["direct"], "staging": None}, {"modes": ["direct"], "pr_into_staging": True},
+                     {"staging": {"branch": "main"}, "train": True, "preview_label": "preview"},
+                     {"staging": {"branch": "main"}, "via": "next"}):
+            with self.subTest(rule=rule):
+                if rule is None:
+                    self.post("/api/config", {"scope": "repo.app", "value": {"path": str(self.root), "github": "example/app"}})
+                else:
+                    self.add_repo("app", **rule)
+                pr = next(p for p in server._state(self.con)["prs"] if p["url"] == url)
+                reason = pr["staging_deploy_error"]
+                self.assertIn("app → 배포", reason)
+                self.assertEqual(pr["direct_deploy_error"], reason)
+                self.assertEqual(release.approval_target(self.con, self.ticket(self.gid))[1], reason)
+                for mode in ("direct", "staging", "preview"):
+                    status, result, _ = self.call("/api/deploy", {"mode": mode, "ticket": self.gid})
+                    self.assertEqual((status, result["error"]), (400, reason))
+                self.assertIsNone(self.con.execute("SELECT id FROM releases").fetchone())
+
+        self.add_repo("app")
+        run = pipeline.latest_run(self.con, self.gid)
+        pr = {"number": 1, "url": url, "state": "OPEN", "isDraft": True, "headRefOid": "head", "title": "task",
+              "createdAt": core.now(), "updatedAt": core.now(), "baseRefName": "main", "mergeable": "MERGEABLE"}
+        with mock.patch.object(pipeline, "gh_json", return_value=[pr]), mock.patch.object(pipeline, "run") as retarget, \
+                mock.patch.object(milestone, "_gh", return_value=mock.Mock(returncode=0)):
+            pipeline.refresh_prs(self.con, {**dict(run), "github": "example/app"}, "tp/example")
+        base = milestone.branch(self.parent_gid)
+        self.assertIn(f"base={base}", retarget.call_args.args[0])
+        self.assertEqual(release.approval_target(self.con, self.ticket(self.gid))[0]["base"], base)
+
+    def test_relaunch_checks_the_existing_worktrees_repo(self):
+        cli.main(["sync"])
+        self.reviewed_pr(self.gid, "main")
+        self.add_repo("app", modes=["direct"], staging=None)
+        self.add_repo("web")
+        pipeline.assign(self.gid, "web")  # the existing worktree and PR still belong to app
+        for stage, handler in (("rework", "rework"), ("conflict", "resolve_conflict"), ("blocked", "unblock")):
+            with self.subTest(stage=stage):
+                self.con.execute("UPDATE tickets SET stage=?, reply='계속' WHERE gid=?", (stage, self.gid))
+                self.con.commit()
+                lines = []
+                with mock.patch.object(pipeline, handler) as resume:
+                    pipeline.dispatch(only=self.gid, dry_run=True, log=lines.append)
+                resume.assert_not_called()
+                self.assertTrue(any("app → 배포" in s for s in lines))
 
     def test_direct_request_checks_both_relation_and_original_pr_base(self):
         cli.main(["sync"])

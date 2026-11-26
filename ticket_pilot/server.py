@@ -95,6 +95,10 @@ def _state(con) -> dict:
                       OR gid IN ({','.join('?' for _ in staged_gids)})""", *staged_gids)
     landed = {r["ticket_gid"]: r for r in con.execute(MS.LANDED_NOTION)}
     for t in tickets:
+        if t["stage"] == "needs_staging" and (repo := P.chosen_repo(con, t)):
+            t["staging_config_error"] = MS.staging_config_error(t, repo["repo"])
+        elif t["stage"] == "blocked" and not t["milestone_error"]:
+            t["staging_config_error"] = P.resume_staging_error(con, t)
         if (ms := landed.get(t["gid"])) and t["parent_gid"] != ms["parent_gid"]:
             t.update(parent_gid=ms["parent_gid"], parent_name=ms["parent_name"], parent_url=ms["url"], in_milestone=1)
         if t["open_deps"]:  # deps merged into the feature base no longer block (TP-20)
@@ -108,7 +112,9 @@ def _state(con) -> dict:
             cs = K.check_state(con, p)
             p["checks"] = {"state": cs["state"], "rows": cs["rows"], "gate": K.gate_error(con, p)}
             if t := tickets_by_gid.get(p["ticket_gid"]):
-                p["direct_deploy_error"] = D.milestone_deploy_error("direct", t, p["base"])
+                errors = D.milestone_deploy_errors(t, p["repo"], p["base"])
+                p["staging_deploy_error"] = errors.get("staging")
+                p["direct_deploy_error"] = errors.get("direct")
         elif p["url"] in staged_urls and MS.awaiting_next_round(con, p["ticket_gid"]):
             p["awaiting_milestone_round"] = True
     return {

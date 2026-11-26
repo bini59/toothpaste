@@ -15,6 +15,7 @@ export const STAGES: Record<string, [string, Status]> = {
   in_progress: ["작업 중", "info"],
   blocked: ["막힘", "danger"],
   milestone_error: ["마일스톤 연결 확인", "danger"],
+  needs_staging: ["staging 설정 필요", "danger"],
   agent_done: ["에이전트 완료", "success"],
   pr_open: ["리뷰 대기", "info"],
   reviewed: ["리뷰 완료", "success"],
@@ -35,7 +36,7 @@ export const DROPPABLE = ["conflict", "rework", "dispatched", "in_progress", "bl
 export const BOARD: { title: string; color: string; stages: string[] }[] = [
   { title: "대기", color: "bg-grey-300", stages: ["conflict", "rework", ...PENDING, "ms_hold"] },
   { title: "작업 중", color: "bg-primary-500", stages: ["collecting", "dispatched", "in_progress"] },
-  { title: "막힘", color: "bg-danger-500", stages: ["blocked", "milestone_error"] },
+  { title: "막힘", color: "bg-danger-500", stages: ["blocked", "milestone_error", "needs_staging"] },
   { title: "PR / 리뷰 대기", color: "bg-warning-500", stages: ["agent_done", "pr_open"] },
   { title: "리뷰 완료", color: "bg-success-500", stages: ["reviewed", "approving"] },
   { title: "배포 대기", color: "bg-info-300", stages: ["milestone", "deploying", "staged", "merged"] },
@@ -45,8 +46,8 @@ export const BOARD: { title: string; color: string; stages: string[] }[] = [
 export const DONE_KEEP_DAYS = 7;
 export const staleDone = (t: Ticket) =>
   ["done", "closed"].includes(t.stage) && !!t.done_at && Date.now() - new Date(t.done_at).getTime() > DONE_KEEP_DAYS * 864e5;
-// milestone subtasks live on the 마일스톤 page; boards show their milestone ticket (ms:<gid>:<repo>) instead
-export const onBoard = (t: Ticket) => !(t.in_milestone && t.parent_gid);
+// A subtask waiting for repo setup needs attention before its milestone ticket exists.
+export const onBoard = (t: Ticket) => t.stage === "needs_staging" || !(t.in_milestone && t.parent_gid);
 export const VERDICT: Record<string, [string, Status]> = {
   approve: ["괜찮음", "success"],
   changes: ["수정 필요", "warning"],
@@ -145,7 +146,7 @@ export function inProject(s: State, I: Index, t: Ticket, p: Project): boolean {
 export const MILESTONE_COLS: { title: string; stages: string[] }[] = [
   { title: "대기", stages: ["conflict", "rework", ...PENDING, "collecting", "open"] },
   { title: "작업 중", stages: ["dispatched", "in_progress"] },
-  { title: "막힘", stages: ["blocked", "milestone_error"] },
+  { title: "막힘", stages: ["blocked", "milestone_error", "needs_staging"] },
   { title: "리뷰 중", stages: ["agent_done", "pr_open", "reviewed", "approving"] },
   { title: "반영 완료", stages: ["milestone", "deploying", "staged", "merged", "done", "closed", "skipped"] },
 ];

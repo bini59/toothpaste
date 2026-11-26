@@ -73,6 +73,8 @@ def approval_target(con, t):
     pr = r and run_pr(con, r["id"])
     if not pr or pr["state"] != "OPEN":
         return None, "열린 PR이 없어요"
+    if err := M.staging_config_error(t, pr["repo"], pr["base"]):
+        return None, err
     stg = staging_branch(pr["repo"])
     if not stg:
         return None, f"{pr['repo']}는 staging 머지를 쓰지 않아요 (배포 규칙)"
