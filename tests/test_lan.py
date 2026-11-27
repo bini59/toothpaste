@@ -6,6 +6,7 @@ import json
 import os
 import plistlib
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -98,7 +99,8 @@ class LanTest(unittest.TestCase):
         self.assertEqual(self.call("GET", "/api/state", cookie=sid)[0], 403)
 
     def test_no_cookie_401_but_login_screen_loads(self):
-        self.assertEqual(self.call("GET", "/api/state")[0], 401)
+        for path in ("/api/state", "/api/reviews", "/api/events"):
+            self.assertEqual(self.call("GET", path)[0], 401, path)
         self.assertEqual(self.call("GET", "/api/config")[0], 401)
         self.assertEqual(self.call("POST", "/api/view", {"tab": "board"})[0], 401)
         self.assertEqual(self.call("GET", "/api/state", cookie="forged")[0], 401)
@@ -110,6 +112,20 @@ class LanTest(unittest.TestCase):
         sid = self.session()
         self.assertEqual(self.call("GET", "/api/state", cookie=sid)[0], 200)
         self.assertEqual(self.call("GET", "/api/lan/me", cookie=sid)[1]["login"], "alice")
+
+    def test_monitoring_endpoints_keep_review_bodies_and_the_recent_non_view_events(self):
+        sid = self.session()
+        with sqlite3.connect(core.DB_PATH) as con:
+            con.executemany("INSERT INTO reviews(summary,body) VALUES (?,?)", [("First", "Body A"), ("Second", "Body B")])
+            con.executemany("INSERT INTO events(kind,message) VALUES ('review',?)", [(str(i),) for i in range(510)])
+            con.execute("INSERT INTO events(kind,message) VALUES ('view','latest tab visit')")
+
+        code, data, _ = self.call("GET", "/api/reviews", cookie=sid)
+        self.assertEqual(code, 200)
+        self.assertEqual([r["body"] for r in data["reviews"]], ["Body B", "Body A"])
+        code, data, _ = self.call("GET", "/api/events", cookie=sid)
+        self.assertEqual(code, 200)
+        self.assertEqual([e["message"] for e in data["events"]], [str(i) for i in range(509, 9, -1)])
 
     def test_session_cookie_among_foreign_cookies(self):  # TP-178
         sid = self.session()

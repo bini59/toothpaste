@@ -86,7 +86,26 @@ def _state(con) -> dict:
     rules = repo_rules()
     staged_pr_urls = R.staged_pr_urls(con, list(rules))
     staged_urls = {url for urls in staged_pr_urls.values() for url in urls}
-    prs = rows("SELECT * FROM prs")
+    # The board uses the head's AI verdict, while the deploy screen uses the last verdict from any source.
+    # The office uses the newest summary by timestamp and counts every review sent back for rework.
+    prs = rows("""WITH ranked AS (
+            SELECT r.id, r.pr_url, r.source, r.rework_at, r.head_sha IS p.head_sha AS matches_head,
+                   ROW_NUMBER() OVER (PARTITION BY r.pr_url ORDER BY r.created_at DESC, r.id DESC) AS summary_rank
+            FROM reviews r JOIN prs p ON p.url = r.pr_url
+        ), review_ids AS (
+            SELECT pr_url,
+                   MAX(CASE WHEN matches_head THEN id END) AS head_id,
+                   MAX(CASE WHEN matches_head AND NULLIF(source, '') IS NULL THEN id END) AS ai_id,
+                   MAX(CASE WHEN summary_rank = 1 THEN id END) AS summary_id,
+                   COUNT(NULLIF(rework_at, '')) AS rework_count
+            FROM ranked GROUP BY pr_url
+        )
+        SELECT p.*, head.verdict AS head_verdict, ai.verdict AS head_ai_verdict,
+               latest.summary AS latest_review_summary, COALESCE(v.rework_count, 0) AS rework_count
+        FROM prs p LEFT JOIN review_ids v ON v.pr_url = p.url
+        LEFT JOIN reviews head ON head.id = v.head_id
+        LEFT JOIN reviews ai ON ai.id = v.ai_id
+        LEFT JOIN reviews latest ON latest.id = v.summary_id""")
     staged_gids = {p["ticket_gid"] for p in prs if p["url"] in staged_urls}
     tickets = rows(f"""SELECT gid,key,name,url,project_gid,project_name,section,parent_gid,parent_name,parent_url,milestone_error,due_on,tags,has_tag,
                       deps_json,open_deps,completed,assigned,stage,repo_override,skip,first_seen,last_seen,
@@ -133,10 +152,8 @@ def _state(con) -> dict:
         "runs": rows("SELECT id,ticket_gid,repo,worktree_name,worktree_path,branch,terminal,ws_status,ws_comment,state,origin,created_at,updated_at FROM runs"),
         "prs": prs,
         "staged_pr_urls": staged_pr_urls,
-        "reviews": rows("SELECT * FROM reviews ORDER BY id DESC"),
         "repos": [{**r, **factory_repo(r["name"])} for r in rows("SELECT * FROM repos")],
         "project_map": rows("SELECT * FROM project_map"),
-        "events": rows("SELECT * FROM events WHERE kind != 'view' ORDER BY id DESC LIMIT 500"),
         "releases": rows("SELECT * FROM releases ORDER BY id DESC LIMIT 100"),
         "dev_servers": DS.status(con),
     }
@@ -654,6 +671,13 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, asana_status())
         if self.path == "/api/state":
             return self._send(200, state())
+        if self.path == "/api/reviews":
+            with closing(db()) as con:
+                return self._send(200, {"reviews": [dict(r) for r in con.execute("SELECT * FROM reviews ORDER BY id DESC")]})
+        if self.path == "/api/events":
+            with closing(db()) as con:
+                events = con.execute("SELECT * FROM events WHERE kind != 'view' ORDER BY id DESC LIMIT 500")
+                return self._send(200, {"events": [dict(e) for e in events]})
         if self.path == "/api/config":
             return self._send(200, G.api_state())
         if self.path == "/api/config/history":  # 모니터링 > 설정 이력 (TP-168): every scope, newest first

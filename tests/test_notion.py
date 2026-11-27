@@ -337,7 +337,8 @@ class NotionAppTest(NotionDashboard):
                          (connection, uid(10), "회사", OWNER, "민지"))
         self.con.commit()
         cfg = {"connection_id": connection, "data_source_id": TEAM_DB, "assignee": MEMBER, "people_property": "people-id",
-               "tag_property": "tag-id", "tag_option": "docs-id", "status_property": "status-id", "status_option": "todo-id"}
+               "tag_property": "tag-id", "tag_option": "docs-id", "status_property": "status-id", "status_option": "todo-id",
+               "stage_statuses": {"in_progress": "doing-id", "done": "done-id"}}
         self.save(cfg)
         accounts = self.post("accounts")
         self.assertTrue(accounts["configured"])
@@ -347,6 +348,12 @@ class NotionAppTest(NotionDashboard):
         self.assertEqual(self.fixture.refreshes, 1)
         self.assertEqual(self.stages(), {"사용 설명": "open"})
         self.assertEqual(core.project_map()["projects"][0]["notion"], cfg)
+        self.assertEqual([t["title"] for t in self.preview(cfg)], ["사용 설명"])
+
+        edited = {**cfg, "status_option": "", "stage_statuses": {**cfg["stage_statuses"], "dispatched": "doing-id"}}
+        self.save(edited)
+        self.assertEqual(core.project_map()["projects"][0]["notion"], edited)
+        self.assertEqual([t["title"] for t in self.preview(edited)], ["사용 설명"])
 
 
 class NotionTest(NotionDashboard):
