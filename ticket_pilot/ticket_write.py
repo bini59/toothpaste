@@ -93,7 +93,7 @@ def _asana_create(con, project, args, parent, is_milestone):
     return result
 
 
-def _notion_create(project, args, parent, is_milestone):
+def _notion_create(project, args, parent, is_milestone, *, with_subtasks):
     cfg = project.get("notion") or {}
     if not cfg.get("data_source_id") or not cfg.get("connection_id"):
         raise CreateError("source_unsupported", "프로젝트에 Notion 작업 DB를 연결하세요")
@@ -110,7 +110,8 @@ def _notion_create(project, args, parent, is_milestone):
             assignee = cfg.get("assignee", "me")
     values = argparse.Namespace(op="create", project=project["id"], title=args.title, body=args.body, assignee=assignee,
                                 tag=args.tag, status=None, due=None, parent=parent if args.parent else None)
-    return notion_write.run(values, milestone=parent if args.milestone else None, milestone_parent=is_milestone)
+    return notion_write.run(values, milestone=parent if args.milestone else None, milestone_parent=is_milestone,
+                            with_subtasks=with_subtasks)
 
 
 def _github_parent(ref, gh, for_milestone):
@@ -167,8 +168,9 @@ def _github_create(con, project, args, parent, is_milestone, actor):
 def create(project, args, *, is_milestone=False):
     try:
         actor = asana_write.write_actor(agents_only=False)
+        with_subtasks = is_milestone and bool(args.subtask)
         if is_milestone or args.milestone is not None:
-            supported, reason = milestone.supported(project)
+            supported, reason = milestone.supported(project, for_subtasks=with_subtasks or args.milestone is not None)
             if not supported:
                 raise CreateError("milestone_unsupported", reason)
         ref = args.parent if args.parent is not None else args.milestone
@@ -182,7 +184,7 @@ def create(project, args, *, is_milestone=False):
         if source == "asana":
             return _asana_create(con, project, args, parent, is_milestone)
         if source == "notion":
-            return _notion_create(project, args, parent, is_milestone)
+            return _notion_create(project, args, parent, is_milestone, with_subtasks=with_subtasks)
         return _github_create(con, project, args, parent, is_milestone, actor)
     except notion.PageNotFound as e:
         raise CreateError("parent_not_found", str(e)) from e

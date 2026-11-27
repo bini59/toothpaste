@@ -113,7 +113,7 @@ class NotionMilestones(NotionDashboard):
         self.assertEqual(len(result["subtasks"]), 1)
         self.assertEqual(self.fixture.pages[TEAM_DB][-1]["properties"]["출시"], relation(result["gid"].removeprefix("notion:")))
 
-    def test_creation_requires_a_configured_work_tag_column(self):
+    def test_creating_subtasks_requires_a_configured_work_tag_column(self):
         del self.cfg["tag_property"]
         self.save_project()
         with mock.patch.object(notion, "Client") as client:
@@ -124,6 +124,10 @@ class NotionMilestones(NotionDashboard):
                     self.assertIn("태그 열", result["message"])
             client.assert_not_called()
         self.assertEqual(self.fixture.writes, [])
+
+        result = command("milestone", "create", "--project", "example", "--title", "Release")
+        self.assertEqual(result["subtasks"], [])
+        self.assertEqual(result["gid"], "notion:" + self.fixture.pages[DOCS_DB][-1]["id"])
 
     def test_single_select_import_tag_must_also_be_the_work_tag(self):
         prop = self.fixture.props["라벨"]
@@ -141,6 +145,13 @@ class NotionMilestones(NotionDashboard):
                     self.assertIn("다중 선택", result["message"])
         self.assertEqual([c.args[:2] for c in respond.call_args_list], [("GET", "/data_sources/" + TEAM_DB)] * 2)
         self.assertEqual(self.fixture.writes, [])
+
+        with mock.patch.object(self.fixture, "respond", wraps=self.fixture.respond) as respond:
+            result = command("milestone", "create", "--project", "example", "--title", "Release without subtasks")
+        parent = self.fixture.pages[DOCS_DB][-1]
+        self.assertEqual(result, {"ok": True, "source": "notion", "key": notion_tickets.ticket_key(parent["id"]),
+                                  "gid": "notion:" + parent["id"], "url": parent["url"], "subtasks": []})
+        self.assertEqual([c.args[:2] for c in respond.call_args_list], [("GET", "/data_sources/" + DOCS_DB), ("POST", "/pages")])
 
         self.cfg["tag_option"] = "tp-id"
         next(o for o in prop["select"]["options"] if o["id"] == "tp-id")["name"] = "TP"

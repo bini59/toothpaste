@@ -99,8 +99,8 @@ def staging_of(repo: str | None, *, notion: bool = False) -> str | None:
     return None
 
 
-def supported(project: dict) -> tuple[bool, str]:
-    """Check the source binding and eligible work repos from settings, before creating anything."""
+def supported(project: dict, *, for_subtasks: bool = False) -> tuple[bool, str]:
+    """Check the source binding, eligible work repos and settings needed for requested subtasks."""
     source = project["source"]
     repos = [r["repo"] for r in project.get("repos") or []]
     if source == "github":
@@ -111,7 +111,7 @@ def supported(project: dict) -> tuple[bool, str]:
         cfg = project.get("notion") or {}
         if not all(cfg.get(k) for k in ("connection_id", "data_source_id", "milestone_data_source_id", "milestone_property")):
             return False, "프로젝트에 Notion 마일스톤 DB와 관계 열을 설정하세요"
-        if not cfg.get("tag_property"):
+        if for_subtasks and not cfg.get("tag_property"):
             return False, "Notion 하위 티켓에 작업 태그를 넣을 태그 열을 설정하세요"
         if cfg["milestone_data_source_id"] == cfg["data_source_id"] and not all(
                 cfg.get(k) for k in notion_tickets.MILESTONE_KIND_FIELDS):

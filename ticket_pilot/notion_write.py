@@ -288,7 +288,7 @@ class ProjectPages:
             raise notion.NotionError("댓글 ID를 확인할 수 없어요. 다시 요청하기 전에 Notion 페이지에서 댓글을 확인하세요")
 
 
-def run(args, *, milestone=None, milestone_parent=False):
+def run(args, *, milestone=None, milestone_parent=False, with_subtasks=False):
     if os.environ.get("TP_AGENT", "").startswith("auto-"):
         raise notion.NotionError("자동화 에이전트는 Notion 페이지를 수정할 수 없어요")
     con = core.db()
@@ -306,7 +306,8 @@ def run(args, *, milestone=None, milestone_parent=False):
         raise notion.NotionError(f"프로젝트 {pid}에 연결된 Notion 데이터베이스가 없어요")
     pages = ProjectPages(con, cfg)
     if milestone_parent:
-        pages.milestone_task_filters()
+        if with_subtasks:
+            pages.milestone_task_filters()
         if cfg["milestone_data_source_id"] != pages.source:
             pages = ProjectPages(con, cfg, source=cfg["milestone_data_source_id"])
     if args.op == "create":
