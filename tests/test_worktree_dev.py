@@ -165,8 +165,17 @@ if (args.includes('build')) {
   assert.deepEqual(args, ['--mode', 'staging', 'build']);
   fs.writeFileSync('built', '');
 } else {
-  assert(args.includes('--strictPort'));
-  const port = Number(args.join(' ').match(/--port[= ]([0-9]+)/)[1]);
+  if (args[0] === 'preview') args.shift();
+  const strict = args.indexOf('--strictPort');
+  assert(strict >= 0);
+  args.splice(strict, 1);
+  const open = args.indexOf('--open');
+  if (open >= 0) {
+    assert.deepEqual(args.splice(open, 2), ['--open', '/docs --port 5173 --strictPort']);
+  }
+  const [option, value] = args;
+  assert(option === '--port' ? args.length === 2 : option.startsWith('--port=') && args.length === 1);
+  const port = Number(option === '--port' ? value : option.split('=')[1]);
   assert.equal(port, Number(process.env.PORT));
   require('node:http').createServer((req, res) => res.end(fs.readFileSync('index.html')))
     .listen(port, '127.0.0.1');
@@ -178,7 +187,9 @@ if (args.includes('build')) {
                  ("", "vite --port 5173 & wait", True),
                  ("npm run dev -- --port {port}", "vite --port 5173 & wait", True),
                  ("npm run dev", 'NODE_OPTIONS=--no-warnings vite --port "$PORT" & wait', True),
-                 ("", "vite --mode staging build && vite preview --port=5173 & wait", False)]
+                 ("", "vite --mode staging build && vite preview --port=5173 & wait", False),
+                 ("", 'vite --open "/docs --port 5173 --strictPort" --port=6100 & wait', False),
+                 ("npm run dev -- --open '/docs --port 5173 --strictPort' --port=6100", "vite & wait", True)]
         for command, body, explicit in cases:
             with self.subTest(command=command, body=body, explicit=explicit), socket.socket() as foreign:
                 (self.wt / "package.json").write_text(json.dumps({"scripts": {"predev": "touch prepared", "dev": body}}))
@@ -187,7 +198,11 @@ if (args.includes('build')) {
                 foreign.listen()
                 self.port = foreign.getsockname()[1]
                 requested = free_port() if explicit else None
-                server = dev.start(self.con, self.wt, requested)
+                try:
+                    server = dev.start(self.con, self.wt, requested)
+                except devserver.DevError as exc:
+                    logs = [p.read_text() for p in (self.root / "logs").glob("*.log")]
+                    self.fail(f"{exc}\n" + "\n".join(logs))
                 self.assertNotEqual(server["port"], self.port)
                 if explicit:
                     self.assertEqual(server["port"], requested)

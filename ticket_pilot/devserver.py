@@ -33,13 +33,14 @@ from pathlib import Path
 from . import milestone as M
 from . import runner as R
 from .core import DATA, db, event, meta_get, meta_set, now, run
-from .dev_package import PORT_FLAG, bind_port
+from .dev_package import bind_port, declared_port
 
 KEY = "dev_servers"
 LOGS = DATA / "dev"
 SCRIPTS = ("dev", "start:dev", "develop", "serve", "start")
 EXAMPLE = re.compile(r"^\.env\.(example|sample|template|dist)$")
 ENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$")
+PORT_FLAG = re.compile(r"(?:^|\s)(?:-p|--port)[ =](\d{2,5})\b")
 VITE_CMD = re.compile(r"(^|[\s/])(vite|remix vite:dev|react-router dev)(?=\s|$)")
 # env vars of the dashboard that a dev server has no business seeing
 SECRET_ENV = ("ASANA_PAT", "GITHUB_TOKEN", "GH_TOKEN", "TP_DB", "TP_PORT", "TP_HOST", "CLAUDE_CODE_OAUTH_TOKEN",
@@ -199,17 +200,21 @@ def detect(repo: str, wt: Path, *, port_hint: int | None = None, ticket: bool = 
         cmd = f"{pm} run {script}"
         how = f"package.json {script}: {body}"
     kind = _kind(re.sub(r"[;&|()]", " ", body) if ticket else body)
-    fixed = PORT_FLAG.search(body)
-    port = (conf.get("port") or (int(fixed.group(1)) if fixed else None) or _env_port(wt)
+    if ticket:
+        declared = declared_port(body)
+    else:
+        flag = PORT_FLAG.search(body)
+        declared = int(flag[1]) if flag else None
+    port = (conf.get("port") or declared or _env_port(wt)
             or (_vite_port(wt) if kind == "vite" else None) or {"next": 3000, "vite": 5173}.get(kind or "")
             or (3000 if "nest start" in body else port_hint))
     if not port:
         raise DevError(f"{repo}: dev 서버 포트를 모르겠어요. 설정 > 기본 > dev 서버 포트를 채워주세요")
-    if not ticket and not configured and kind and not fixed:
+    if not ticket and not configured and kind and declared is None:
         extra = "--port {port}" + (" --strictPort" if kind == "vite" else "")
         cmd += f" {'-- ' if pm == 'npm' else ''}{extra}"
     return {"cmd": bind_port(cmd, "{port}") if ticket else cmd,
-            "port": int(port), "how": how, "fixed": bool(fixed) and "{port}" not in cmd}
+            "port": int(port), "how": how, "fixed": declared is not None and "{port}" not in cmd}
 
 
 # ---------------------------------------------------------------- ports

@@ -1,6 +1,7 @@
 """Milestone dev servers (devserver.py): command/port detection, the .env check, and start() with a port in use
 (refused, kill, other port) against real processes. Run: python3 -m unittest discover tests"""
 import json
+import shlex
 import socket
 import sqlite3
 import subprocess
@@ -84,6 +85,27 @@ class DetectTest(unittest.TestCase):
                 self.assertEqual(result["port"], 6200)
                 with self.assertRaises(DS.DevError):
                     DS.detect("Site", self.d)  # milestone preflight still requires its configured port
+
+    def test_ticket_detects_and_replaces_only_port_option_words(self):
+        for open_arg in ('"/docs --port 5173 --strictPort"', "'/docs --port 5173 --strictPort'",
+                         r"/docs\ --port\ 5173\ --strictPort"):
+            for port_arg in ('--port 6100', '--port="6100"', "'--port=6100'", "-p '6100'"):
+                with self.subTest(open_arg=open_arg, port_arg=port_arg):
+                    self.conf = {"dev": {"cmd": f"vite --open {open_arg} {port_arg}"}}
+                    result = DS.detect("Site", self.d, ticket=True)
+                    self.assertEqual(result["port"], 6100)
+                    argv = shlex.split(result["cmd"].format(port=6000))
+                    self.assertEqual(argv[:4], ["vite", "--strictPort", "--open", "/docs --port 5173 --strictPort"])
+                    self.assertIn(argv[4:], [["--port", "6000"], ["--port=6000"], ["-p", "6000"]])
+
+    def test_ticket_ignores_port_text_in_non_options(self):
+        for suffix in ('--open "/docs --port 6100"', '> "--port=6100"', '# --port 6100', '-- --port 6100'):
+            with self.subTest(suffix=suffix):
+                command = f"vite {suffix}"
+                self.conf = {"dev": {"cmd": command}}
+                result = DS.detect("Site", self.d, ticket=True)
+                self.assertEqual(result["port"], 5173)
+                self.assertEqual(result["cmd"], f"vite --port {{port}} --strictPort {suffix}")
 
     def test_env_check_reports_missing_and_empty_keys_without_values(self):
         main = Path(tempfile.mkdtemp())
