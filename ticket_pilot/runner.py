@@ -158,7 +158,7 @@ def checkout(repo: str, repo_path: str, name: str, branch: str) -> dict:
     return {"id": str(path), "path": str(path), "repo": repo, "displayName": name, "branch": branch}
 
 
-# role of each automation's AI step (cli.AUTOMATIONS ids) for the agents.<role> setting (TP-168)
+# role of each automation's AI step (automation.AUTOMATIONS ids) for the agents.<role> setting (TP-168)
 AUTOMATION_ROLES = {"dispatch": "check", "review": "review", "diff": "check", "cleanup": "check"}
 
 

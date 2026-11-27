@@ -10,7 +10,7 @@ from unittest import mock
 
 import test_lan  # module import: its LanTest must not be collected twice
 
-from ticket_pilot import cli, core, lan as L, server as S, sysjobs as SJ
+from ticket_pilot import cli, core, lan as L, server as S, sysjobs as SJ, tick
 
 LOCAL = "127.0.0.1"
 
@@ -223,7 +223,7 @@ class DockerStartTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"TP_MODE": "docker", "TP_ADMINS": " , ", "TP_ORG": ""}):
             self.assertIn("TP_ADMINS", L.docker_problem())
             with mock.patch.object(S, "ThreadingHTTPServer") as srv, self.assertRaises(SystemExit) as e:
-                S.serve(1, block=False)
+                cli.main(["run"])
             srv.assert_not_called()
             self.assertIn("TP_ADMINS", str(e.exception))
         with mock.patch.dict(os.environ, {"TP_MODE": "docker", "TP_ADMINS": "", "TP_ORG": "example-org"}):
@@ -277,7 +277,7 @@ class RunLoopTest(unittest.TestCase):
             return real_wait(0)
         stop.wait = wait
         with contextlib.redirect_stdout(io.StringIO()) as out:
-            cli.run_loop(stop, spawn, every=60)
+            tick.run_loop(stop, spawn, every=60)
         # turn 1 spawns, 2 spawns the long tick, 3 and 4 skip it, 5 spawns again; stop waits for that last one
         self.assertEqual(turns, [1, 2, 2, 2, 3])
         self.assertEqual(out.getvalue().count("still running"), 2)
@@ -288,7 +288,7 @@ class RunLoopTest(unittest.TestCase):
         stop = threading.Event()
         stop.set()
         spawn = mock.Mock()
-        cli.run_loop(stop, spawn)
+        tick.run_loop(stop, spawn)
         spawn.assert_not_called()
 
 
