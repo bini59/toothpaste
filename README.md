@@ -43,7 +43,7 @@ Contributing: [CONTRIBUTING.md](CONTRIBUTING.md).
 Agent in the worktree: implement -> commit -> push -> draft PR
   -> tp ws-set --status in-review                     (completion signal)
   -> or tp ws-set --status todo --comment "BLOCKED: ..."  (needs the owner)
-  exits without either: exit 0 + open PR = in-review, else BLOCKED with its last message (pipeline.agent_exits)
+  exits without either: exit 0 + open PR = in-review, else BLOCKED with its last message (pr_tracking.agent_exits)
   still running after agent_max_min (default 240): stopped, BLOCKED (event agent_timeout)
 
 [automation "ticket-pilot: PR review", every 5 min]
@@ -78,7 +78,7 @@ local runner keep reading their status from Orca until tp relaunches them, and c
 `orca worktree rm`.
 
 Agents run with the owner's gh login and no sandbox, and the base branches are not protected on GitHub, so the brief's
-"never merge / never push to main or staging" rules are checked after the fact on every scan (`pipeline.audit_pushes`):
+"never merge / never push to main or staging" rules are checked after the fact on every scan (`pr_tracking.audit_pushes`):
 a `[KEY] ...` commit of the ticket on main/master/staging/dev/develop/production or the repo's deploy branches while
 its PR is unmerged, or a PR merged while tp's agent for it was running. Either stops the agent, blocks the ticket with
 `BLOCKED: 규칙 위반: ...` (shown as 막힘 even over an approved review) and logs a `violation` event, once per commit/PR.

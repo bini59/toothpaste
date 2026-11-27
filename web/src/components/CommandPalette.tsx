@@ -3,7 +3,7 @@ import { FolderGit2, Search, Star, type LucideIcon } from "lucide-react";
 import { cn } from "../ui";
 import { getJson } from "../api";
 import type { Project } from "../types";
-import { projectHref } from "../views/Projects";
+import { projectHref } from "../app/navigation";
 
 export interface PaletteTab { key: string; label: string; group: string | null; icon: LucideIcon }
 interface Item { id: string; label: string; hint: string; href: string; icon: LucideIcon }

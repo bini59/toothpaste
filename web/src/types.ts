@@ -114,7 +114,7 @@ export interface Review {
   created_at: string;
   /** null = AI review, "check" = tp check failure sent back to the agent */
   source: "check" | null;
-  /** set when this review was sent back to the agent as a fix round (pipeline.rework_rounds) */
+  /** set when this review was sent back to the agent as a fix round (review.rework_rounds) */
   rework_at: string | null;
 }
 export interface Repo {

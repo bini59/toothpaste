@@ -576,6 +576,13 @@ def orca_json(args: list[str], timeout: int = 300) -> dict:
     return j["result"]
 
 
+def gh_api(method: str, path: str, body: dict | None = None) -> dict:
+    cmd = ["gh", "api", "-X", method, path]
+    if body is not None:
+        cmd += ["--input", "-"]
+    return json.loads(run(cmd, timeout=120, input=json.dumps(body) if body is not None else None).stdout or "{}")
+
+
 def gh_json(args: list[str], cwd: str | None = None):
     p = run(["gh", *args], cwd=cwd, timeout=120)
     return json.loads(p.stdout or "null")

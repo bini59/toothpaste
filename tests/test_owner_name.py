@@ -9,17 +9,17 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from ticket_pilot import asana_write, chat, core, pipeline
+from ticket_pilot import asana_write, briefs, chat, core, review
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
 class OwnerNameTest(unittest.TestCase):
     def prompts(self, st):
-        with mock.patch.object(pipeline, "settings", lambda: st), mock.patch.object(chat, "settings", lambda: st), \
+        with mock.patch.object(briefs, "settings", lambda: st), mock.patch.object(chat, "settings", lambda: st), \
                 mock.patch.object(asana_write, "settings", lambda: st):
             t = {"key": "TP-1", "name": "n", "url": "u"}
-            brief = pipeline.build_conflict_brief(t, {"branch": "b"}, {"url": "p", "number": 1, "head_sha": "abc", "base": "main"})
+            brief = review.build_conflict_brief(t, {"branch": "b"}, {"url": "p", "number": 1, "head_sha": "abc", "base": "main"})
             msg = chat.prompt({"name": "P", "repos": [], "repo": "r", "github": "o/r", "path": "/x"}, "hi {{OWNER}}")
         return brief, msg
 

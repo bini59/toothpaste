@@ -337,7 +337,7 @@ class UpdateTest(unittest.TestCase):
         """POST /api/update/check (TP-153): fetches within the 6 hours, stamps the check, reports a failed fetch"""
         mock.patch.object(core, "DB_PATH", self.tmp / "tp.db").start()
         mock.patch.object(connection, "_main_connections", {}).start()
-        mock.patch.object(S.UP, "check_latest", functools.partial(U.check_latest, root=self.co)).start()
+        mock.patch.object(U, "check_latest", functools.partial(U.check_latest, root=self.co)).start()
         self.addCleanup(mock.patch.stopall)
         srv = ThreadingHTTPServer(("127.0.0.1", 0), S.H)
         threading.Thread(target=srv.serve_forever, daemon=True).start()

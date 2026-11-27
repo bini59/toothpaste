@@ -25,6 +25,7 @@ from . import metrics_usage as MU
 from . import automation, notion, notion_write, precheck, tick, ticket_write
 from . import pipeline as P
 from . import release as R
+from . import review
 from . import setup as S
 from . import runner
 from . import track as T
@@ -349,7 +350,7 @@ def main(argv=None):
     sc.add_argument("--device", help='Playwright device, e.g. "iPhone 12" (default: desktop)')
     sc.add_argument("--repo", default=".", help="worktree; uses its Playwright if installed, else Orca's browser")
     sc.add_argument("--js", help="JS to run before capture, e.g. scroll")
-    sc.set_defaults(fn=lambda a: P.screenshot(a.url, a.out, a.wait_ms, a.device, a.js, a.repo))
+    sc.set_defaults(fn=lambda a: review.screenshot(a.url, a.out, a.wait_ms, a.device, a.js, a.repo))
 
     ap_ = sp.add_parser("approve", help="request a staging merge for an AI-approved #03 PR (same as the dashboard button)")
     ap_.add_argument("ticket")

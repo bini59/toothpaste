@@ -1,10 +1,12 @@
 """Rework cap: after review.max_rework_rounds fix rounds a 'changes' verdict goes to the owner as BLOCKED, and their reply
 relaunches the agent and restarts the count. Run: python3 -m unittest discover tests"""
 import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
-from ticket_pilot import core, pipeline as P
+from ticket_pilot import core, pipeline as P, review
 
 
 class ReworkCapTest(unittest.TestCase):
@@ -99,6 +101,45 @@ class ReworkCapTest(unittest.TestCase):
         q = P.review_queue(self.con)
         self.assertEqual(q[0]["round"], 2)
         self.assertEqual(q[0]["previous_review"]["head_sha"], "s0")
+
+    def test_saving_an_old_head_keeps_the_current_head_queued(self):
+        self.con.execute("UPDATE prs SET head_sha=?", ("b" * 40,))
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(review, "db", return_value=self.con), \
+                mock.patch.object(review, "run") as gh, mock.patch("builtins.print"):
+            body = Path(tmp) / "review.md"
+            body.write_text("old review")
+            P.review_save("u", "a" * 40, "approve", str(body), "old", post=False)
+            gh.assert_not_called()
+            [item] = P.review_queue(self.con)
+            self.assertEqual(item["head_sha"], "b" * 40)
+            self.assertEqual(item["previous_review"]["head_sha"], "a" * 40)
+            self.assertEqual(self.stage(), "pr_open")
+
+            P.review_save("u", "b" * 40, "approve", str(body), "current", post=False)
+            self.assertEqual(P.review_queue(self.con), [])
+            self.assertEqual(self.stage(), "reviewed")
+
+    def test_dispatch_retries_a_conflict_once_per_head(self):
+        self.con.execute("UPDATE prs SET base='staging', mergeable='CONFLICTING'")
+        self.con.execute("UPDATE tickets SET approve_requested_at='old', approve_error='old error'")
+        self.assertEqual(self.stage(), "conflict")
+        self.assertEqual(P.dispatch(log=lambda *_: None), ["A"])
+        p = self.con.execute("SELECT conflict_sha, conflict_at FROM prs").fetchone()
+        self.assertEqual(p["conflict_sha"], "s0")
+        self.assertTrue(p["conflict_at"])
+        self.assertIn("staging", self.launch.call_args.args[1])
+        self.assertEqual(tuple(self.con.execute("SELECT approve_requested_at, approve_error FROM tickets").fetchone()),
+                         (None, None))
+
+        self.con.execute("UPDATE runs SET ws_status='in-review'")
+        self.assertEqual(self.stage(), "pr_open")
+        self.assertEqual(P.dispatch(log=lambda *_: None), [])
+        self.assertEqual(len(self.launched()), 1)
+
+        self.con.execute("UPDATE prs SET head_sha='s1'")
+        self.assertEqual(self.stage(), "conflict")
+        self.assertEqual(P.dispatch(log=lambda *_: None), ["A"])
+        self.assertEqual(len(self.launched()), 2)
 
     def test_answer_without_commit_is_rereviewed(self):
         self.review_changes(0)

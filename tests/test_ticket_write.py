@@ -46,7 +46,7 @@ class TicketWriteTest(unittest.TestCase):
                                     "projects": []}}
         self.asana = self.enterContext(mock.patch.object(asana_write, "asana"))
         self.read_asana = self.enterContext(mock.patch.object(core, "asana"))
-        self.gh = self.enterContext(mock.patch.object(pipeline, "gh_api"))
+        self.gh = self.enterContext(mock.patch.object(core, "gh_api"))
         self.notion = self.enterContext(mock.patch.object(notion, "Client"))
 
     def project(self, source, **kwargs):

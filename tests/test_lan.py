@@ -19,8 +19,9 @@ from pathlib import Path
 from unittest import mock
 
 from ticket_pilot import config as G, core, lan as L, release as R
+from ticket_pilot import server as S, setup as SU, usage
+from ticket_pilot.http_api import connections
 from ticket_pilot.storage import connection
-from ticket_pilot import server as S, setup as SU
 
 ROOT = Path(__file__).resolve().parent.parent
 LAN_IP = "192.168.0.23"
@@ -40,7 +41,7 @@ class LanTest(unittest.TestCase):
         mock.patch.object(connection, "_main_connections", {}).start()
         # /api/state would start a real claude/codex usage fetch in a thread that outlives the test and writes to
         # whatever DB a later test has patched in (it recreated test_migrate's moved data/tp.db)
-        mock.patch.object(S.U, "cached", lambda con, key="claude_usage", fn=None: core.meta_get(con, key)).start()
+        mock.patch.object(usage, "cached", lambda con, key="claude_usage", fn=None: core.meta_get(con, key)).start()
         mock.patch.object(G, "backup_dir", lambda: self.tmp / "backups").start()
         core.config_cache_clear()
         self.addCleanup(core.config_cache_clear)
@@ -188,10 +189,10 @@ class LanTest(unittest.TestCase):
         self.assertEqual(con.execute("SELECT actor FROM settings_history ORDER BY id DESC").fetchone()[0], "Owner")
 
     def test_sharing_toggle_reruns_install_only_for_this_checkouts_launchd(self):
-        mock.patch.object(S, "_plist_dir", lambda: self.tmp).start()
+        mock.patch.object(connections, "_plist_dir", lambda: self.tmp).start()
         mock.patch.object(SU, "UNIT", self.tmp / "ticket-pilot-dashboard.service").start()  # Linux
         mock.patch.dict(os.environ, {"TP_LOG_DIR": str(self.tmp / "logs")}).start()
-        pop = mock.patch.object(S.subprocess, "Popen").start()
+        pop = mock.patch.object(subprocess, "Popen").start()
         r = S.lan_share_set(False, "example-org", "Owner")
         self.assertFalse(r["restart"])  # no plist of this checkout: a dev server
         pop.assert_not_called()
@@ -276,7 +277,7 @@ class LanTest(unittest.TestCase):
         return self.call("POST", "/api/lan/login/poll", {"id": start["id"]})
 
     def test_login_active_member(self):
-        sec = mock.patch.object(S.subprocess, "run").start()  # nothing goes to the keychain
+        sec = mock.patch.object(subprocess, "run").start()  # nothing goes to the keychain
         code, out, ck = self._login({"state": "active", "role": "member"})
         self.assertEqual((code, out), (200, {"login": "alice"}))
         for part in ("HttpOnly", "SameSite=Strict", "Path=/"):

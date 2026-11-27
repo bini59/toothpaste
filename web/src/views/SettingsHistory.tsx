@@ -3,7 +3,7 @@ import { Card, Input } from "../ui";
 import { getJson } from "../api";
 import { Select } from "../components/Select";
 import type { HistoryRow } from "../types";
-import { ACTOR, History } from "./Settings";
+import { ACTOR, History } from "./settings/History";
 
 type Kind = "" | "global" | "repo" | "project";
 const KIND: Record<Exclude<Kind, "">, string> = { global: "전역", repo: "저장소", project: "프로젝트" };
