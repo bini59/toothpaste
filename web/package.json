@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "check": "node src/views/factory/layout.check.ts && node src/views/settings.check.mjs && node src/ui/button.check.mjs",
+    "check": "node src/views/factory/layout.check.ts && node src/views/settings.check.mjs && node src/ui/button.check.mjs && node src/views/model-lab/catalog.check.mjs",
+    "check:lab-focus": "npm run build && node --test src/views/model-lab/focus.browser.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -16,13 +17,16 @@
     "react-dom": "^19.2.0",
     "react-markdown": "^10.1.0",
     "remark-breaks": "^4.0.0",
-    "remark-gfm": "^4.0.1"
+    "remark-gfm": "^4.0.1",
+    "three": "^0.187.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.1",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
+    "@types/three": "^0.187.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "playwright-core": "^1.65.1",
     "tailwindcss": "^4.3.1",
     "typescript": "^5.7.0",
     "vite": "^6.0.0"

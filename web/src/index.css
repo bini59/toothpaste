@@ -7,3 +7,10 @@
 html {
   scrollbar-gutter: stable;
 }
+
+@font-face {
+  font-family: LabMincho;
+  src: url("/model-lab/literary-serif.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+}

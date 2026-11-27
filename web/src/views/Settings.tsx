@@ -11,6 +11,7 @@ import { Update } from "./Update";
 import { ModeSection } from "./Mode";
 import { emptyNotion, NotionAccounts, notionError, NotionSource } from "./NotionSource";
 import { LanShare, Tunnel } from "./Lan";
+import { modelsForTool } from "../agentModels";
 import { applyTheme, loadThemes, type ThemeList } from "../theme/theme";
 
 const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v));
@@ -518,7 +519,7 @@ function AgentFields({ a, onChange, c, inherit, accounts }: {
   a: AgentConf; onChange: (v: AgentConf | null) => void; c: ConfigState; inherit: { label: string; tool: string }; accounts?: AgentAccounts | null;
 }) {
   const tool = a.tool || inherit.tool;
-  const models = (tool === "agy" ? accounts?.tools.agy?.models : undefined) ?? c.agent_models?.[tool] ?? [];
+  const models = modelsForTool(tool, c.agent_models, accounts);
   const listed = models.find((m) => m.id === a.model);
   // a saved model the list does not have (hidden in the catalog, a full claude name) stays editable as typed text
   const [typing, setTyping] = useState(false);
