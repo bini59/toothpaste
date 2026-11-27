@@ -25,7 +25,7 @@
 
 - **화면·API** — [Milestones.tsx](../web/src/views/Milestones.tsx)의 작업 완료는 `POST /api/milestone-done`을 사용한다. [Release.tsx](../web/src/views/Release.tsx)는 `GET /api/state`의 배포 상태를 표시하고 `POST /api/deploy`, `POST /api/deploy-cancel`, `POST /api/release-hold`로 요청을 보낸다.
 - **처리** — [milestone.py](../ticket_pilot/milestone.py)와 [release.py](../ticket_pilot/release.py)의 `process_approvals()`가 마일스톤과 스테이징 병합을 처리한다. [deploy.py](../ticket_pilot/deploy.py)의 `deploy_tick()`은 대시보드 배포를, `release.release_tick()`은 정기 배포를 진행한다. `release.verify_deploy()`와 `release.finalize()`가 프로덕션 반영을 확인하고 티켓 완료를 처리한다. 별도로 병합된 PR의 프로덕션 상태는 [track.py](../ticket_pilot/track.py)가 추적한다.
-- **공개 릴리스** — [test.yml](../.github/workflows/test.yml)의 전체 테스트는 같은 저장소의 `staging → main` PR에서 실행한다. [release_checks.py](../ticket_pilot/release_checks.py)는 호스트가 머지하기 전에 테스트 결과를 확인한다. [release.yml](../.github/workflows/release.yml)은 머지 이벤트를 받고 같은 모듈에서 최종 테스트 결과와 머지 트리를 대조한 뒤 발행한다. [test_verify_release.py](../tests/test_verify_release.py)는 머지와 발행 전 검사 조건을 확인한다.
+- **공개 릴리스** — [test.yml](../.github/workflows/test.yml)의 전체 테스트는 같은 저장소의 `staging → main` PR에서 실행한다. PR 편집 이벤트에서는 대상 브랜치가 바뀔 때 실행한다. 배포 화면과 열차는 [release_checks.py](../ticket_pilot/release_checks.py)에서 테스트 결과와 머지 후보의 부모를 확인하고 GitHub `updateRefs`의 단일 트랜잭션으로 두 브랜치의 SHA를 고정해 검사한 커밋을 반영한다. [release.yml](../.github/workflows/release.yml)은 머지 이벤트를 받고 같은 모듈에서 최종 테스트 결과와 머지 트리를 대조한 뒤 발행한다. [test_verify_release.py](../tests/test_verify_release.py)는 브랜치 갱신과 머지 요청이 경합하는 경우와 발행 조건을 검증한다.
 - **테스트** — [test_milestone.py](../tests/test_milestone.py), [test_release_candidates.py](../tests/test_release_candidates.py), [test_busy_release.py](../tests/test_busy_release.py), [test_track.py](../tests/test_track.py)
 
 ## 프로젝트와 저장소 설정

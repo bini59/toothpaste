@@ -26,7 +26,7 @@ from . import milestone as M
 from . import notifications as N
 from .core import asana, current_actor, db, event, gh_json, meta_get, now, repo_rules, run, settings, train_repos
 from .pipeline import VIOLATION, active_deploy, active_release_pr_urls, latest_run, restage, review_overridden, run_pr
-from .release_checks import AwaitingTests, PUBLIC_REPOSITORY, tested_deployment_head
+from .release_checks import AwaitingTests, PUBLIC_REPOSITORY, StagingAdvanced, merge_deployment_pr
 
 
 def cfg() -> dict:
@@ -456,21 +456,24 @@ def _start(con, rel, log) -> str:
         url = existing[0]["url"] if existing else _gh(["pr", "create", "--repo", gh, "--base", main, "--head", stg,
                                                        "--title", title[:200], "--body", body]).stdout.strip().splitlines()[-1]
         try:
-            tested_head = tested_deployment_head(gh, url.rsplit("/", 1)[-1])
+            sha = merge_deployment_pr(gh, url.rsplit("/", 1)[-1], base=main, method="merge", approved_head=approved_head)
+        except StagingAdvanced as error:
+            log(f"release {rel['repo']}: {error}")
+            return "waiting for staging recheck"
         except AwaitingTests as error:
             log(f"release {rel['repo']}: {error}")
             return "waiting for deployment PR tests"
-        if tested_head and tested_head != head:
-            log(f"release {rel['repo']}: {stg} advanced; rechecking approved commits")
-            return "waiting for staging recheck"
-        match = ["--match-head-commit", tested_head] if tested_head else []
-        _gh(["pr", "merge", url, "--merge", *match])
-        info = gh_json(["pr", "view", url, "--json", "state,mergedAt,mergeCommit"])
-        if info["state"] != "MERGED":
-            _finish(con, rel, "failed", f"{url} merge 실패 (state={info['state']})")
-            return "failed"
+        if sha:
+            merged_at = now()
+        else:
+            _gh(["pr", "merge", url, "--merge"])
+            info = gh_json(["pr", "view", url, "--json", "state,mergedAt,mergeCommit"])
+            if info["state"] != "MERGED":
+                _finish(con, rel, "failed", f"{url} merge 실패 (state={info['state']})")
+                return "failed"
+            sha, merged_at = info["mergeCommit"]["oid"], info["mergedAt"]
         con.execute("UPDATE releases SET status='deploying', release_pr_url=?, merge_sha=?, merged_at=? WHERE id=?",
-                    (url, info["mergeCommit"]["oid"], info["mergedAt"], rel["id"]))
+                    (url, sha, merged_at, rel["id"]))
         event(con, "release", f"release {rel['day']} {rel['repo']}: {url} merged ({keys}); waiting for the prod pipeline")
         con.commit()
         log(f"release {rel['repo']}: merged {url}")

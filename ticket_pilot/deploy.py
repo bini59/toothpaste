@@ -33,7 +33,7 @@ from .core import db, event, gh_json, now, repo_rules, run
 from .pipeline import latest_run, restage, run_pr, slug
 from .release import (_execution_for, _finish, _gh, _today, deploy_timeout_min, expire_stale_train,
                       request_approval, staged_by_repo, staging_branch, verify_deploy)
-from .release_checks import AwaitingTests, tested_deployment_head
+from .release_checks import AwaitingTests, merge_deployment_pr
 
 MODES = {
     "staging": "티켓 → staging",
@@ -413,6 +413,7 @@ def _merge(con, rel, rr, st, log) -> str:
     while True:
         info = gh_json(["pr", "view", url, "--json", fields])
         if info["state"] == "MERGED":
+            sha = info["mergeCommit"]["oid"]
             break
         if info["state"] == "CLOSED":
             raise RuntimeError(f"PR #{info['number']}이 닫혔어요")
@@ -426,12 +427,13 @@ def _merge(con, rel, rr, st, log) -> str:
             raise RuntimeError(f"PR #{info['number']} 체크 실패: {', '.join(failed[:5])}")
         if info["mergeable"] == "MERGEABLE" and not pending:
             try:
-                tested_head = tested_deployment_head(rel["github"], info["number"])
+                sha = merge_deployment_pr(rel["github"], info["number"], base=into, method=st["method"])
             except AwaitingTests:
                 pending.append("test")
             else:
-                match = ["--match-head-commit", tested_head] if tested_head else []
-                _gh(["pr", "merge", url, f"--{st['method']}", *match])
+                if sha:
+                    break  # the conditional ref update reports the landed SHA directly
+                _gh(["pr", "merge", url, f"--{st['method']}"])
                 continue  # re-read the merge commit
         if datetime.now(timezone.utc) > deadline:
             raise RuntimeError(f"PR #{info['number']}: {deploy_timeout_min()}분 동안 머지할 수 없었어요 "
@@ -440,14 +442,14 @@ def _merge(con, rel, rr, st, log) -> str:
             _save(con, rel["id"], step=f"PR #{info['number']} 체크/머지 가능 여부 대기" + (f" ({', '.join(pending[:3])})" if pending else ""))
             return "waiting for checks"
         time.sleep(5)
-    sha = info["mergeCommit"]["oid"]
     notes = []
     if st.get("backsync"):  # the ticket PR also lands where it was aimed (staging/dev) so branches do not drift
         try:
             b = gh_json(["pr", "view", st["backsync"], "--json", "state,isDraft,number,baseRefName"])
             if b["state"] == "OPEN":
                 _ready_for_merge(con, rel, st["backsync"], b, source_base=b["baseRefName"])
-                _gh(["pr", "merge", st["backsync"], "--merge"])
+                if not merge_deployment_pr(rel["github"], b["number"], base=b["baseRefName"], method="merge"):
+                    _gh(["pr", "merge", st["backsync"], "--merge"])
                 notes.append(f"원래 PR #{b['number']}도 {b['baseRefName']}에 머지")
         except Exception as e:  # noqa: BLE001
             notes.append(f"원래 PR {st['backsync'].rsplit('/', 1)[-1]} {e!s:.120} (직접 머지 필요)")

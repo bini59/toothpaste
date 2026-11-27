@@ -1,18 +1,23 @@
 # Full tests for same-repository staging -> main PRs.
 name: test
-run-name: "test PR #${{ github.event.pull_request.number }} at ${{ github.sha }}"
+# The host matches deployment runs by name. Metadata edits must not shadow or cancel them.
+run-name: >-
+  ${{ (github.event.action != 'edited' || github.event.changes.base.ref.from) &&
+      format('test PR #{0} at {1}', github.event.pull_request.number, github.sha) || 'PR metadata edited' }}
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, edited]
     branches: [main]
 permissions:
   contents: read
 concurrency:
-  group: test-${{ github.ref }}
+  group: test-${{ github.event.action == 'edited' && !github.event.changes.base.ref.from && github.run_id || github.ref }}
   cancel-in-progress: true
 jobs:
   deployment-pr:
-    if: github.head_ref == 'staging' && github.event.pull_request.head.repo.full_name == github.repository
+    if: >-
+      github.head_ref == 'staging' && github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.action != 'edited' || github.event.changes.base.ref.from)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
