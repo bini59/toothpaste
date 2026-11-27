@@ -36,8 +36,14 @@ jobs:
           node-version: "24"  # runs the .ts check directly
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - name: python -m unittest
-        run: python -m unittest discover tests
+      - name: python -m unittest (test files in parallel)
+        # the tests mostly wait on subprocesses and git; serial runs took ~10 min on macos-latest.
+        # test_devserver / test_worktree_dev free a probed port and bind it again, so they run alone afterwards.
+        run: |
+          ls tests/test_*.py | xargs -n1 basename | grep -vxE 'test_(devserver|worktree_dev)\.py' | xargs -P 4 -I{} sh -c \
+            'python -m unittest discover tests -p {} >"$RUNNER_TEMP/{}.log" 2>&1 || { cat "$RUNNER_TEMP/{}.log"; exit 1; }'
+          python -m unittest discover tests -p 'test_devserver.py'
+          python -m unittest discover tests -p 'test_worktree_dev.py'
       - name: web build and check
         working-directory: web
         run: npm ci --no-audit --no-fund && npm run build && npm run check
