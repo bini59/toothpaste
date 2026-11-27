@@ -12,6 +12,7 @@ from urllib.parse import parse_qs
 
 from ticket_pilot import core
 from ticket_pilot import server as S
+from ticket_pilot.http_api import connections
 
 TOK = "gho_abc123"
 
@@ -60,8 +61,8 @@ class ClientIdTest(unittest.TestCase):
     def setUp(self):
         self.addCleanup(mock.patch.stopall)
         self.f = Path(tempfile.mkdtemp()) / "github-oauth.json"
-        mock.patch.object(S, "GITHUB_OAUTH_FILE", self.f).start()
-        self.kc = mock.patch.object(S, "secret_get", return_value=None).start()
+        mock.patch.object(connections, "GITHUB_OAUTH_FILE", self.f).start()
+        self.kc = mock.patch.object(connections, "secret_get", return_value=None).start()
 
     def test_order(self):
         self.assertEqual(S._client_id(), S.GITHUB_CLIENT_ID)
@@ -88,15 +89,15 @@ DEVICE = {"device_code": "dev-secret-code", "user_code": "ABCD-1234", "verificat
 class DeviceFlowTest(unittest.TestCase):
     def setUp(self):
         self.addCleanup(mock.patch.stopall)
-        S._device.clear()
-        mock.patch.object(S, "_client_id", return_value="cid").start()
+        connections._device.clear()
+        mock.patch.object(connections, "_client_id", return_value="cid").start()
         self.kc = {}
-        mock.patch.object(S, "github_token", side_effect=lambda: self.kc.get("tok")).start()
+        mock.patch.object(connections, "github_token", side_effect=lambda: self.kc.get("tok")).start()
         mock.patch.object(core, "KEYCHAIN", True).start()  # the macOS path on every OS; `security` is faked below
         mock.patch.object(core, "secret_get", side_effect=lambda s, a=None: self.kc.get("tok")).start()
-        self.sp = mock.patch.object(S.subprocess, "run", side_effect=self._security).start()
+        self.sp = mock.patch.object(connections.subprocess, "run", side_effect=self._security).start()
         self.answers = []
-        self.op = mock.patch.object(S.urllib.request, "urlopen",
+        self.op = mock.patch.object(connections.urllib.request, "urlopen",
                                     side_effect=lambda req, timeout: _resp(self.answers.pop(0))).start()
 
     def _security(self, argv, input=None, **kw):
@@ -144,28 +145,28 @@ class DeviceFlowTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, msg) as e:
                 S.github_device_poll()
             self.assertNotIn("dev-secret-code", str(e.exception))
-            self.assertEqual(S._device, {})
+            self.assertEqual(connections._device, {})
         self.sp.assert_not_called()
 
     def test_network_error_keeps_waiting(self):
         self.start()
         self.op.side_effect = OSError("timed out")
         self.assertEqual(S.github_device_poll(), {"pending": True, "interval": 5})
-        self.assertEqual(S._device["code"], "dev-secret-code")
+        self.assertEqual(connections._device["code"], "dev-secret-code")
 
     def test_stale_poll_leaves_new_code(self):
         self.start()
         def answer(req, timeout):  # 새 코드 받기 lands while the old poll waits on GitHub
-            S._device.update(code="new-code")
+            connections._device.update(code="new-code")
             return _resp({"error": "expired_token"})
         self.op.side_effect = answer
         with self.assertRaisesRegex(RuntimeError, "만료"):
             S.github_device_poll()
-        self.assertEqual(S._device["code"], "new-code")
+        self.assertEqual(connections._device["code"], "new-code")
 
     def test_local_expiry_skips_github(self):
         self.start()
-        S._device["exp"] = 0
+        connections._device["exp"] = 0
         with self.assertRaisesRegex(RuntimeError, "만료"):
             S.github_device_poll()
         self.assertEqual(self.op.call_count, 1)
@@ -175,7 +176,7 @@ class DeviceFlowTest(unittest.TestCase):
         self.answers.append({"error": "device_flow_disabled", "error_description": "Device Flow must be explicitly enabled"})
         with self.assertRaisesRegex(RuntimeError, "explicitly enabled"):
             S.github_device_start()
-        self.assertEqual(S._device, {})
+        self.assertEqual(connections._device, {})
 
     def test_odd_token_is_not_stored(self):
         self.start()
@@ -188,7 +189,7 @@ class DeviceFlowTest(unittest.TestCase):
 class DeviceHttpTest(unittest.TestCase):
     def setUp(self):
         self.addCleanup(mock.patch.stopall)
-        S._device.clear()
+        connections._device.clear()
         self.srv = ThreadingHTTPServer(("127.0.0.1", 0), S.H)
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
         self.addCleanup(self.srv.server_close)
@@ -202,18 +203,18 @@ class DeviceHttpTest(unittest.TestCase):
         return r.status, json.loads(r.read())
 
     def test_foreign_origin_forbidden(self):
-        with mock.patch.object(S.urllib.request, "urlopen") as op:
+        with mock.patch.object(connections.urllib.request, "urlopen") as op:
             for path in ("/api/github/device", "/api/github/device/poll"):
                 self.assertEqual(self.call(path, "https://evil.example")[0], 403)
             op.assert_not_called()
 
     def test_routes(self):
-        with mock.patch.object(S.urllib.request, "urlopen", side_effect=[_resp(DEVICE), _resp({"error": "authorization_pending"})]):
+        with mock.patch.object(connections.urllib.request, "urlopen", side_effect=[_resp(DEVICE), _resp({"error": "authorization_pending"})]):
             st, j = self.call("/api/github/device", "http://127.0.0.1:3032")
             self.assertEqual((st, j["user_code"]), (200, "ABCD-1234"))
             self.assertNotIn("device_code", j)
             self.assertEqual(self.call("/api/github/device/poll"), (200, {"pending": True, "interval": 5}))
-        S._device.clear()
+        connections._device.clear()
         st, j = self.call("/api/github/device/poll")
         self.assertEqual(st, 500)
         self.assertIn("다시 연결", j["error"])
@@ -224,12 +225,12 @@ class StatusTest(unittest.TestCase):
         resp = mock.MagicMock()
         resp.__enter__.return_value.read.return_value = b'{"login": "alice"}'
         resp.__enter__.return_value.headers = {"X-OAuth-Scopes": "repo, workflow"}
-        with mock.patch.object(S, "github_token", return_value=TOK), \
-             mock.patch.object(S.urllib.request, "urlopen", return_value=resp):
+        with mock.patch.object(connections, "github_token", return_value=TOK), \
+             mock.patch.object(connections.urllib.request, "urlopen", return_value=resp):
             st = S.github_status()
         self.assertEqual(st, {"connected": True, "login": "alice", "scopes": ["repo", "workflow"]})
         self.assertNotIn(TOK, str(st))
-        with mock.patch.object(S, "github_token", return_value=None):
+        with mock.patch.object(connections, "github_token", return_value=None):
             self.assertEqual(S.github_status(), {"connected": False})
 
 

@@ -1,10 +1,13 @@
 """Rework cap: after review.max_rework_rounds fix rounds a 'changes' verdict goes to the owner as BLOCKED, and their reply
 relaunches the agent and restarts the count. Run: python3 -m unittest discover tests"""
 import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
-from ticket_pilot import core, pipeline as P
+from ticket_pilot import dispatch as D
+from ticket_pilot import core, pipeline as P, review
 
 
 class ReworkCapTest(unittest.TestCase):
@@ -18,12 +21,13 @@ class ReworkCapTest(unittest.TestCase):
                                   VALUES ('A','r','/wt','in-review','active')""").lastrowid
         self.con.execute("INSERT INTO prs(url,run_id,ticket_gid,repo,number,state,head_sha) VALUES ('u',?,'A','r',1,'OPEN','s0')",
                          (rid,))
-        self.p = [mock.patch.object(P, "db", lambda: self.con), mock.patch.object(P, "github_token", return_value="tok"),
+        self.p = [mock.patch.object(P, "db", lambda: self.con), mock.patch.object(D, "db", lambda: self.con),
+                  mock.patch.object(D, "github_token", return_value="tok"),
                   mock.patch.object(P.R, "launch", return_value="1 /tmp/tp-test-agent.log"),
                   mock.patch.object(P.R, "running", return_value=False),
-                  mock.patch.object(P, "max_rework_rounds", return_value=3),
+                  mock.patch.object(review, "max_rework_rounds", return_value=3),
                   mock.patch.object(P.N.CH, "_layout", return_value=[]),
-                  mock.patch.object(P, "settings", return_value={"max_active_runs": 3, "agent": "codex"})]
+                  mock.patch.object(D, "settings", return_value={"max_active_runs": 3, "agent": "codex"})]
         for x in self.p:
             x.start()
             self.addCleanup(x.stop)
@@ -80,14 +84,14 @@ class ReworkCapTest(unittest.TestCase):
     def test_no_github_token_no_agent_but_escalation_runs(self):
         """TP-112: without tp's GitHub token no agent starts (one error event), the cap still goes to the owner."""
         errors = lambda: self.con.execute("SELECT count(*) c FROM events WHERE kind='error'").fetchone()["c"]  # noqa: E731
-        with mock.patch.object(P, "github_token", return_value=None):
+        with mock.patch.object(D, "github_token", return_value=None):
             self.review_changes(0)
             P.dispatch(log=lambda *a: None)
             P.dispatch(log=lambda *a: None)
             self.assertEqual(len(self.launched()), 0)
             self.assertEqual(self.stage(), "rework")
             self.assertEqual(errors(), 1)
-            with mock.patch.object(P, "max_rework_rounds", return_value=1):
+            with mock.patch.object(review, "max_rework_rounds", return_value=1):
                 self.con.execute("UPDATE reviews SET rework_at='2000-01-01'")  # one round already sent
                 P.dispatch(log=lambda *a: None)
             self.assertEqual(self.stage(), "blocked")
@@ -99,6 +103,45 @@ class ReworkCapTest(unittest.TestCase):
         q = P.review_queue(self.con)
         self.assertEqual(q[0]["round"], 2)
         self.assertEqual(q[0]["previous_review"]["head_sha"], "s0")
+
+    def test_saving_an_old_head_keeps_the_current_head_queued(self):
+        self.con.execute("UPDATE prs SET head_sha=?", ("b" * 40,))
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(review, "db", return_value=self.con), \
+                mock.patch.object(review, "run") as gh, mock.patch("builtins.print"):
+            body = Path(tmp) / "review.md"
+            body.write_text("old review")
+            P.review_save("u", "a" * 40, "approve", str(body), "old", post=False)
+            gh.assert_not_called()
+            [item] = P.review_queue(self.con)
+            self.assertEqual(item["head_sha"], "b" * 40)
+            self.assertEqual(item["previous_review"]["head_sha"], "a" * 40)
+            self.assertEqual(self.stage(), "pr_open")
+
+            P.review_save("u", "b" * 40, "approve", str(body), "current", post=False)
+            self.assertEqual(P.review_queue(self.con), [])
+            self.assertEqual(self.stage(), "reviewed")
+
+    def test_dispatch_retries_a_conflict_once_per_head(self):
+        self.con.execute("UPDATE prs SET base='staging', mergeable='CONFLICTING'")
+        self.con.execute("UPDATE tickets SET approve_requested_at='old', approve_error='old error'")
+        self.assertEqual(self.stage(), "conflict")
+        self.assertEqual(P.dispatch(log=lambda *_: None), ["A"])
+        p = self.con.execute("SELECT conflict_sha, conflict_at FROM prs").fetchone()
+        self.assertEqual(p["conflict_sha"], "s0")
+        self.assertTrue(p["conflict_at"])
+        self.assertIn("staging", self.launch.call_args.args[1])
+        self.assertEqual(tuple(self.con.execute("SELECT approve_requested_at, approve_error FROM tickets").fetchone()),
+                         (None, None))
+
+        self.con.execute("UPDATE runs SET ws_status='in-review'")
+        self.assertEqual(self.stage(), "pr_open")
+        self.assertEqual(P.dispatch(log=lambda *_: None), [])
+        self.assertEqual(len(self.launched()), 1)
+
+        self.con.execute("UPDATE prs SET head_sha='s1'")
+        self.assertEqual(self.stage(), "conflict")
+        self.assertEqual(P.dispatch(log=lambda *_: None), ["A"])
+        self.assertEqual(len(self.launched()), 2)
 
     def test_answer_without_commit_is_rereviewed(self):
         self.review_changes(0)

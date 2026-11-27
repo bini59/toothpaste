@@ -6,7 +6,7 @@ for the automations' AI steps). The wrapper writes "<log>.exit" with the exit co
 after its process is gone; "<log>.json" keeps the agent name and session id for `tp attach` (resume by hand).
 
 The agent signals completion itself with `tp ws-set` (pipeline.ws_set); an agent that exits without it is handled by
-pipeline.agent_exits. A repo's settings `setup` script (what Orca's worktree setup ran: install deps, copy .env) runs
+pr_tracking.agent_exits. A repo's settings `setup` script (what Orca's worktree setup ran: install deps, copy .env) runs
 first, in the same wrapper and log, with TP_/ORCA_ROOT_PATH (main checkout) and TP_/ORCA_WORKTREE_PATH set.
 """
 from __future__ import annotations
@@ -23,10 +23,11 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
+from subprocess import TimeoutExpired
 
 from . import antigravity, chat_usage
 from .asana_write import rules as asana_rules
-from .core import DATA, ROOT, gh_env, run, settings
+from .core import DATA, ROOT, feature_base, gh_env, project_map, run, settings
 
 LOGS = DATA / "agents"
 # Full access like the owner's interactive sessions: agents push branches, open PRs and call bin/tp (writes data/tp.db).
@@ -39,6 +40,17 @@ SESSION = re.compile(r"session id: ([0-9a-f-]{36})", re.I)
 # folders never searched for .env files to copy into a new worktree
 ENV_SKIP_DIRS = {"node_modules", ".git", "dist", "build", ".next", ".turbo", ".venv", "venv", "vendor", "coverage", ".cache"}
 ENV_MAX_DEPTH = 3
+
+
+def repo_extra(repo: str | None) -> dict:
+    """A repo's settings entry (repo.<name>): setup, worktree_base, checks, ..."""
+    return ((project_map().get("repos") or {}).get(repo or "") or {})
+
+
+def worktree_base(repo: str) -> str | None:
+    """Branch new ticket worktrees start from: the feature base (PRs target it), else the repo's worktree_base
+    setting (what Orca's per-repo base ref was, e.g. staging or dev), else origin's default branch."""
+    return feature_base(repo) or (repo_extra(repo).get("worktree_base") or "").removeprefix("origin/") or None
 
 
 def node_bin() -> str | None:
@@ -128,6 +140,40 @@ def worktrees(repos) -> list[dict]:
     return out
 
 
+def _checkout_marker(path: str) -> Path:
+    if not (Path(path) / ".git").is_file():
+        raise OSError(f"Not a linked worktree: {path}")
+    git_dir = _git(path, "rev-parse", "--absolute-git-dir", timeout=10).stdout.rstrip("\n")
+    return Path(git_dir) / "ticket-pilot-checkout-id"
+
+
+def mark_checkout(path: str) -> str:
+    """Record a new checkout's identity in Git's per-worktree directory, which Git removes with the registration."""
+    checkout_id = uuid.uuid4().hex
+    with _checkout_marker(path).open("x", encoding="ascii") as f:
+        f.write(checkout_id)
+    return checkout_id
+
+
+def owns_checkout(path: str, branch: str, checkout_id: str | None) -> bool:
+    if not checkout_id:
+        return False
+    try:
+        marker = _checkout_marker(path)
+        head = marker.with_name("HEAD").read_bytes().rstrip(b"\n")
+        return head == os.fsencode(f"ref: refs/heads/{branch}") and marker.read_text(encoding="ascii") == checkout_id
+    except (OSError, RuntimeError, TimeoutExpired, UnicodeError):
+        return False
+
+
+def branch_prefix() -> str:
+    return settings().get("branch_prefix", "tp/")
+
+
+def local_branches(repo_path: str) -> list[str]:
+    return _git(repo_path, "for-each-ref", "--format=%(refname:lstrip=2)", "refs/heads/").stdout.splitlines()
+
+
 def create(repo: str, repo_path: str, name: str, base: str | None, *, before_add=None) -> dict:
     """New branch <branch_prefix><name> from origin/<base> (or origin's default branch) in <root>/<repo>/<name>."""
     path = root() / repo / name
@@ -137,7 +183,7 @@ def create(repo: str, repo_path: str, name: str, base: str | None, *, before_add
     _git(repo_path, "fetch", "-q", "origin")
     start = f"origin/{base}" if base else (
         _git(repo_path, "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD", check=False).stdout.strip() or "HEAD")
-    branch = f"{settings().get('branch_prefix', 'tp/')}{name}"
+    branch = f"{branch_prefix()}{name}"
     if before_add:
         before_add()
     # --no-track: the agent pushes its own upstream (`git push -u`); tracking origin/<base> would make a bare
@@ -158,7 +204,7 @@ def checkout(repo: str, repo_path: str, name: str, branch: str) -> dict:
     return {"id": str(path), "path": str(path), "repo": repo, "displayName": name, "branch": branch}
 
 
-# role of each automation's AI step (cli.AUTOMATIONS ids) for the agents.<role> setting (TP-168)
+# role of each automation's AI step (automation.AUTOMATIONS ids) for the agents.<role> setting (TP-168)
 AUTOMATION_ROLES = {"dispatch": "check", "review": "review", "diff": "check", "cleanup": "check"}
 
 

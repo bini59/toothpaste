@@ -363,7 +363,8 @@ def notify_ready(con) -> int:
 
 
 def _repo_has_work(con, parent, repo, gid):
-    from .pipeline import chosen_repo, latest_run
+    from .pipeline import chosen_repo
+    from .pr_tracking import latest_run
     # An existing PR follows its actual branch until it is retargeted, closed or verified live.
     if con.execute("""SELECT 1 FROM prs WHERE repo=? AND (ticket_gid=? OR (ticket_gid NOT LIKE 'ms:%' AND base=?))
                       AND (state='OPEN' OR (state='MERGED' AND prod_at IS NULL AND release_id IS NULL)) LIMIT 1""",
@@ -505,7 +506,10 @@ def _brief(t, b: str, fb: str, subs: str) -> str:
 def open_pr(con, t, log=print) -> int:
     """Every subtask is finished: check the milestone branch out in a worktree, open its PR into the feature base and
     give the milestone ticket a run (in review). A branch with nothing to ship completes the ticket."""
-    from .pipeline import ROOT, _insert_run, latest_run, refresh_prs, run_pr, slug
+    from .briefs import slug, write_brief
+    from .core import ROOT
+    from .pipeline import _insert_run
+    from .pr_tracking import latest_run, refresh_prs, run_pr
     parent, repo = parse(t["gid"])
     r0 = latest_run(con, t["gid"])
     r0 = r0 if r0 and r0["state"] != "abandoned" else None
@@ -523,8 +527,7 @@ def open_pr(con, t, log=print) -> int:
         return 0
     name = slug(t["key"])
     subs = "\n".join(f"- [{s['key']}] {s['name']} (#{s['number']} {s['url']})" for s in merged_subtasks(con, t)) or "(none)"
-    (ROOT / "data" / "briefs").mkdir(parents=True, exist_ok=True)
-    (ROOT / "data" / "briefs" / f"{name}.md").write_text(_brief(t, b, fb, subs))
+    write_brief(ROOT, t["gid"], _brief(t, b, fb, subs))
     path = R.root() / repo / name
     if path.is_dir():  # next round, or a retry: the worktree of an earlier milestone PR is still there
         run(["git", "-C", str(path), "pull", "-q", "--ff-only"], timeout=180, check=False)

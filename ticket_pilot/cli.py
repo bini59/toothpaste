@@ -2,17 +2,11 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import getpass
 import json
 import os
-import signal
-import subprocess
 import sys
-import threading
-import time
 import traceback
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import asana_write as AW
@@ -28,15 +22,16 @@ from . import mode as MO
 from . import milestone as MS
 from . import metrics as MET
 from . import metrics_usage as MU
-from . import notion, notion_stages, notion_write, ticket_write
+from . import automation, dispatch, notion, notion_write, precheck, tick, ticket_sync, ticket_write
 from . import pipeline as P
 from . import release as R
+from . import review
 from . import setup as S
 from . import runner
 from . import track as T
 from . import update as U
 from . import worktree_dev
-from .core import DATA, DOCKER_OFF, ROOT, db, docker, event, load_map, meta_get, meta_set, now
+from .core import DOCKER_OFF, db, docker, event, load_map
 
 
 def _log_errors(fn):
@@ -58,215 +53,30 @@ def _log_errors(fn):
     return wrap
 
 
-def _release_steps():
-    """Milestones (auto-merge requests for approved subtasks, branch sync, milestone PRs), dashboard approvals ->
-    staging / milestone merges, dashboard deploys (배포 page), then the weekday release train. Never breaks the precheck."""
-    for name, fn in (("milestones", MS.tick), ("approvals", R.process_approvals), ("deploys", D.deploy_tick),
-                     ("release", R.release_tick)):
-        try:
-            fn()
-        except Exception as e:  # noqa: BLE001
-            traceback.print_exc()
-            try:
-                con = db()
-                con.rollback()
-                event(con, "error", f"{name}: {e}")
-                con.commit()
-            except Exception:  # noqa: BLE001
-                pass
-
-
 @_log_errors
 def cmd_precheck_dispatch(a):
-    """Automation 1 precheck: sync + deterministic dispatch. Exit 0 only if LLM triage is needed."""
-    P.sync()
-    _release_steps()
-    P.dispatch()
-    pending = P.triage_list(mark=False)
-    print(f"triage needed: {len(pending)}")
+    pending = precheck.dispatch()
+    print(f"triage needed: {pending}")
     sys.exit(0 if pending else 1)
 
 
 @_log_errors
 def cmd_precheck_review(a):
-    """Automation 2 precheck: scan worktrees, agents + GitHub, tp checks (before the queue: a failed head never reaches the
-    reviewer). Exit 0 only if a PR needs review."""
-    P.scan()
-    _release_steps()
-    try:
-        T.track_deploys()  # read-only: did merged PRs outside the train reach production?
-    except Exception as e:  # noqa: BLE001
-        traceback.print_exc()
-        con = db()
-        con.rollback()
-        event(con, "error", f"track: {e}")
-        con.commit()
-    try:
-        K.tick()  # CI results + detached local check runs; failures go back to the agent (rework)
-    except Exception as e:  # noqa: BLE001
-        traceback.print_exc()
-        con = db()
-        con.rollback()
-        event(con, "error", f"check: {e}")
-        con.commit()
-    q = P.review_queue()
-    print(f"review queue: {len(q)}")
-    sys.exit(0 if q else 1)
+    count = precheck.review()
+    print(f"review queue: {count}")
+    sys.exit(0 if count else 1)
 
 
 @_log_errors
 def cmd_precheck_diff(a):
-    """Automation 3 precheck: production vs staging per repo. Exit 0 only if a new staging head needs an AI note."""
-    sys.exit(0 if F.precheck() else 1)
+    sys.exit(0 if precheck.diff() else 1)
 
 
 @_log_errors
 def cmd_precheck_cleanup(a):
-    """Automation 4 precheck: remove ticket worktrees whose change is live in production.
-    Exit 0 only if some worktree needs the agent's code comparison."""
-    C.cleanup_scan()
-    q = C.cleanup_queue()
-    print(f"cleanup queue: {len(q)}")
-    sys.exit(0 if q else 1)
-
-
-# The four automations Orca used to schedule: (id, name, prompt, every N minutes). Names keep "dispatch", "review",
-# "staging", "cleanup": the dashboard maps them to its roles by name (web/src/lib.ts ROLES).
-AUTOMATIONS = [
-    ("dispatch", "ticket-pilot: Asana dispatch", "automation_dispatch.md", 5),
-    ("review", "ticket-pilot: PR review", "automation_review.md", 5),
-    ("diff", "ticket-pilot: staging diff", "automation_diff.md", 10),
-    ("cleanup", "ticket-pilot: worktree cleanup", "automation_cleanup.md", 5),
-]
-AI_STEP_MAX_MIN = 60  # an automation's AI step still running after this is stopped (it would block the next runs)
-RUN_HISTORY = 40
-
-
-def cmd_tick(a):
-    """launchd runs this every minute (launchd/com.ticket-pilot.tick.plist). Each automation whose interval
-    has passed runs its precheck; exit 0 starts its AI step (prompts/automation_*.md) in the background from this
-    checkout, at most one at a time per automation. meta.automations is the dashboard's snapshot."""
-    lock = open(DATA / "tick.lock", "w")
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        print("tick: another tick is running")
-        return
-    if docker():
-        from .docker_update import maintenance
-        if maintenance():
-            return
-    con = db()
-    try:
-        CH.compact_idle(con)
-    except Exception as e:  # keep the regular tick running if chat compaction fails
-        con.rollback()
-        print(f"chat compaction: {e}", file=sys.stderr, flush=True)
-    snap = meta_get(con, "automations") or {}
-    prev = {x["id"]: x for x in snap.get("automations", [])}
-    usage = {i["automationId"]: i.get("usageSummary") or {} for i in snap.get("items", [])}
-    history = meta_get(con, "automation_runs") or []
-    t0 = datetime.now(timezone.utc)
-    for aid, name, prompt, every in AUTOMATIONS:
-        x = prev.get(aid) or {"id": aid}
-        x.update(name=name, rrule=f"{every}분마다", enabled=True)
-        u = usage.get(aid) or {"knownRuns": 0}
-        prev[aid], usage[aid] = x, u
-        if u.get("handle"):
-            alive, code = runner.agent_state(u["handle"])
-            started = runner.started_at(u["handle"])
-            if alive and started and time.time() - started > AI_STEP_MAX_MIN * 60:
-                runner.stop(u["handle"])
-                alive, code = False, None
-                event(con, "error", f"automation {aid}: AI step ran over {AI_STEP_MAX_MIN} min, stopped")
-            if alive:
-                continue
-            u["lastRunStatus"] = "completed" if code == 0 else f"failed ({code})"
-            for h in history:
-                if h.get("handle") == u["handle"]:
-                    h["status"] = u["lastRunStatus"]
-            u.pop("handle")
-        last = x.get("lastRunAt")
-        due = a.force or a.only or not last or (
-            t0 - datetime.fromisoformat(last)).total_seconds() >= every * 60 - 30
-        if a.only and aid not in a.only or not due:
-            continue
-        x["lastRunAt"] = now()
-        x["nextRunAt"] = (t0 + timedelta(minutes=every)).isoformat(timespec="seconds")
-        con.commit()
-        # python -m, not bin/tp: launchd's /bin/sh may not read scripts under ~/Desktop (TCC)
-        p = subprocess.run([sys.executable, "-m", "ticket_pilot.cli", f"precheck-{aid}"], cwd=ROOT, capture_output=True,
-                           text=True, timeout=1800, env={**os.environ, "PYTHONPATH": str(ROOT)})
-        print(f"{aid}: precheck exit {p.returncode} {p.stdout.strip()[-300:]}", flush=True)
-        if p.returncode == 0:
-            u["handle"] = runner.launch(str(ROOT), (ROOT / "prompts" / prompt).read_text(), f"auto-{aid}",
-                                       role=runner.AUTOMATION_ROLES[aid])
-            if aid == "review":
-                MU.register(con, u["handle"], "review")
-            u["lastRunStatus"] = "running"
-            u["knownRuns"] = u.get("knownRuns", 0) + 1
-            history.append({"automationId": aid, "name": name, "startedAt": now(), "status": "running",
-                            "handle": u["handle"]})
-        elif p.returncode == 1:
-            u["lastRunStatus"] = "skipped_precheck"
-        else:
-            u["lastRunStatus"] = f"precheck failed ({p.returncode})"
-            print(p.stderr[-2000:], file=sys.stderr, flush=True)
-    meta_set(con, "automations", {"automations": [prev[i] for i, *_ in AUTOMATIONS],
-                                  "items": [{"automationId": i, "usageSummary": usage[i]} for i, *_ in AUTOMATIONS],
-                                  "captured_at": now()})
-    meta_set(con, "automation_runs", history[-RUN_HISTORY:])
-    con.commit()
-    try:
-        notion_stages.start_worker(con)
-    except OSError as e:
-        print(f"Notion 상태 반영 작업 시작 실패: {e}", file=sys.stderr, flush=True)
-    try:
-        # every update.check_min: fetch the tags, keep the latest release for the dashboard's 업데이트 item
-        U.record_installed(con)
-        chk = U.check_latest(con)
-        con.commit()
-        if not docker():
-            from .server import start_update
-            U.auto_update(con, chk, start_update)
-        con.commit()
-    except Exception as e:  # noqa: BLE001
-        con.rollback()
-        print(f"update check: {e}", file=sys.stderr, flush=True)
-    try:
-        MU.collect(con)
-    except Exception as e:  # a missing or malformed transcript must not stop regular automation
-        con.rollback()
-        print(f"metrics: {e}", file=sys.stderr, flush=True)
-
-
-def run_loop(stop: threading.Event, spawn, every: float = 60.0):
-    """tp run's tick loop: spawn() a tick every `every` seconds, skipped while the last one still runs (launchd's
-    StartInterval and the systemd timer do the same). Once stop is set, waits for the running tick and returns."""
-    proc = None
-    while not stop.is_set():
-        if proc is None or proc.poll() is not None:
-            proc = spawn()
-        else:
-            print("tick: the last tick is still running, skipped", flush=True)
-        stop.wait(every)
-    if proc is not None and proc.poll() is None:
-        print("tp run: waiting for the running tick", flush=True)
-        proc.wait()
-
-
-def cmd_run(a):
-    """Docker's start command (TP-164): the dashboard and a tick every minute in one process. SIGTERM / SIGINT waits
-    for the running tick, then exits. Ticks and the agents they start run as before (own processes / sessions)."""
-    from . import server
-    srv = server.serve(block=False)  # refuses to start in Docker mode when nobody could log in
-    stop = threading.Event()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(sig, lambda *_: stop.set())
-    run_loop(stop, lambda: subprocess.Popen([sys.executable, "-m", "ticket_pilot.cli", "tick"], cwd=ROOT,
-                                            env={**os.environ, "PYTHONPATH": str(ROOT)}))
-    srv.shutdown()
-    print("tp run: stopped", flush=True)
+    count = precheck.cleanup_worktrees()
+    print(f"cleanup queue: {count}")
+    sys.exit(0 if count else 1)
 
 
 def _not_docker(fn):
@@ -405,11 +215,11 @@ def main(argv=None):
     na.set_defaults(fn=cmd_notion_app)
     notion_write.register(sp)
     ticket_write.register(sp)
-    sp.add_parser("sync").set_defaults(fn=_log_errors(lambda a: P.sync()))
+    sp.add_parser("sync").set_defaults(fn=_log_errors(lambda a: ticket_sync.sync()))
     d = sp.add_parser("dispatch")
     d.add_argument("--dry-run", action="store_true")
     d.add_argument("--only")
-    d.set_defaults(fn=_log_errors(lambda a: P.dispatch(dry_run=a.dry_run, only=a.only)))
+    d.set_defaults(fn=_log_errors(lambda a: dispatch.dispatch(dry_run=a.dry_run, only=a.only)))
     sp.add_parser("scan").set_defaults(fn=_log_errors(lambda a: P.scan()))
     sp.add_parser("track").set_defaults(fn=_log_errors(lambda a: T.track_deploys()))
     sp.add_parser("precheck-dispatch").set_defaults(fn=cmd_precheck_dispatch)
@@ -417,9 +227,9 @@ def main(argv=None):
     sp.add_parser("precheck-diff").set_defaults(fn=cmd_precheck_diff)
     sp.add_parser("precheck-cleanup").set_defaults(fn=cmd_precheck_cleanup)
     tk = sp.add_parser("tick", help="run the automations that are due (launchd, every minute)")
-    tk.add_argument("--only", nargs="+", choices=[x[0] for x in AUTOMATIONS], help="run just these, due or not")
+    tk.add_argument("--only", nargs="+", choices=[x[0] for x in automation.AUTOMATIONS], help="run just these, due or not")
     tk.add_argument("--force", action="store_true", help="run every automation now")
-    tk.set_defaults(fn=cmd_tick)
+    tk.set_defaults(fn=lambda a: tick.run_tick(only=a.only or (), force=a.force))
     ws = sp.add_parser("ws-set", help="agent completion signal from inside its worktree")
     ws.add_argument("--status", required=True, choices=["in-review", "todo"])
     ws.add_argument("--comment", required=True, help='"PR #<n> ready: ..." or "BLOCKED: <question for the owner>"')
@@ -540,7 +350,7 @@ def main(argv=None):
     sc.add_argument("--device", help='Playwright device, e.g. "iPhone 12" (default: desktop)')
     sc.add_argument("--repo", default=".", help="worktree; uses its Playwright if installed, else Orca's browser")
     sc.add_argument("--js", help="JS to run before capture, e.g. scroll")
-    sc.set_defaults(fn=lambda a: P.screenshot(a.url, a.out, a.wait_ms, a.device, a.js, a.repo))
+    sc.set_defaults(fn=lambda a: review.screenshot(a.url, a.out, a.wait_ms, a.device, a.js, a.repo))
 
     ap_ = sp.add_parser("approve", help="request a staging merge for an AI-approved #03 PR (same as the dashboard button)")
     ap_.add_argument("ticket")
@@ -630,7 +440,7 @@ def main(argv=None):
     sv.add_argument("--port", type=int)
     sv.set_defaults(fn=lambda a: __import__("ticket_pilot.server", fromlist=["serve"]).serve(a.port))
     sp.add_parser("run", help="dashboard + a tick every minute in one process (the Docker image's command)").set_defaults(
-        fn=cmd_run)
+        fn=lambda a: tick.run())
 
     a = ap.parse_args(argv)
     a.fn(a)

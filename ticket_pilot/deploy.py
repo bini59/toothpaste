@@ -30,7 +30,9 @@ from pathlib import Path
 
 from . import milestone as M
 from .core import db, event, gh_json, now, repo_rules, run
-from .pipeline import latest_run, restage, run_pr, slug
+from .briefs import slug
+from .pipeline import restage
+from .pr_tracking import latest_run, run_pr
 from .release import (_execution_for, _finish, _gh, _open_pr, _today, deploy_timeout_min, expire_stale_train,
                       request_approval, staged_by_repo, staging_branch, verify_deploy)
 from .release_checks import AwaitingTests, PUBLIC_REPOSITORY, merge_deployment_pr

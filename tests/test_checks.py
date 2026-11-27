@@ -8,7 +8,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from ticket_pilot import checks as K, core, pipeline as P, release as R
+from ticket_pilot import dispatch as D
+from ticket_pilot import checks as K, core, pipeline as P, release as R, review
 
 CFG = {"r": {"ci": False, "checks": [{"name": "lint", "cmd": "run lint"}, {"name": "test", "cmd": "run test"}]},
        "m": {"ci": True, "checks": []}}
@@ -31,15 +32,16 @@ class CheckGateTest(unittest.TestCase):
                                 VALUES (?,?,?,?,1,'OPEN','s0','staging','MERGEABLE')""", (f"u{gid}", rid, gid, repo))
         self.p = [mock.patch.object(K, "repo_checks", side_effect=lambda repo: CFG.get(repo)),
                   mock.patch.object(K, "db", lambda: self.con), mock.patch.object(P, "db", lambda: self.con),
-                  mock.patch.object(P, "github_token", return_value="tok"),
+                  mock.patch.object(D, "db", lambda: self.con),
+                  mock.patch.object(D, "github_token", return_value="tok"),
                   mock.patch.object(R, "db", lambda: self.con),
                   mock.patch.object(R, "staging_branch", return_value="staging"),
                   mock.patch.object(K, "LOG_DIR", self.tmp / "logs"),
                   mock.patch.object(K, "conf", return_value={"timeout_min": 0.05, "max_parallel": 2}),
                   mock.patch.object(P.R, "launch", return_value="1 /tmp/tp-test-agent.log"),
                   mock.patch.object(P.R, "running", return_value=False),
-                  mock.patch.object(P, "max_rework_rounds", return_value=3),
-                  mock.patch.object(P, "settings", return_value={"max_active_runs": 3, "agent": "codex"})]
+                  mock.patch.object(review, "max_rework_rounds", return_value=3),
+                  mock.patch.object(D, "settings", return_value={"max_active_runs": 3, "agent": "codex"})]
         for x in self.p:
             x.start()
             self.addCleanup(x.stop)  # also when setUp fails halfway: a leaked patch breaks later test modules
@@ -208,7 +210,7 @@ class CheckGateTest(unittest.TestCase):
         K.settle(self.con, self.con.execute("SELECT * FROM prs WHERE url='uA'").fetchone(), log=lambda *a: None)
         P.dispatch(log=lambda *a: None)
         pr = self.con.execute("SELECT * FROM prs WHERE url='uA'").fetchone()
-        self.assertEqual(P.rework_rounds(self.con, self.ticket(), pr), 1)  # within review.max_rework_rounds
+        self.assertEqual(review.rework_rounds(self.con, self.ticket(), pr), 1)  # within review.max_rework_rounds
         self.con.execute("UPDATE prs SET head_sha='s1' WHERE url='uA'")
         self.con.execute("UPDATE runs SET ws_status='in-review' WHERE ticket_gid='A'")
         self.checks(sha="s1", lint="pass", test="pass")
@@ -309,7 +311,7 @@ class CheckGateTest(unittest.TestCase):
         self.checks(lint="pass", test="fail")
         self.settle()
         self.con.execute("UPDATE reviews SET rework_at='2026-10-29T00:00:00+00:00'")
-        with mock.patch.object(P, "rework_rounds", return_value=3):
+        with mock.patch.object(review, "rework_rounds", return_value=3):
             self.assertTrue(P.escalate_rework(self.con, self.ticket(), 3, log=lambda *a: None))
         q = self.con.execute("SELECT ws_comment FROM runs WHERE ticket_gid='A'").fetchone()["ws_comment"]
         self.assertIn("tp 검사 실패", q)

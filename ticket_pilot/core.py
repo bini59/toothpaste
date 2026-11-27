@@ -1,4 +1,4 @@
-"""Shared plumbing: paths, settings, SQLite, Asana, gh helpers (and Orca for legacy runs)."""
+"""Shared plumbing: paths, settings, Asana, gh helpers (and Orca for legacy runs)."""
 from __future__ import annotations
 
 import fcntl
@@ -13,8 +13,13 @@ import threading
 import urllib.parse
 import urllib.request
 from contextlib import contextmanager
-from datetime import datetime, timezone
 from pathlib import Path
+
+from .storage import connection, migrations, settings_backup
+from .storage.connection import close_db
+from .storage.migrations import UNSORTED, norm_projects
+from .storage.records import current_actor, event, meta_get, meta_set, now, set_actor
+from .storage.schema import SCHEMA
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
@@ -32,10 +37,6 @@ def docker() -> bool:
 os.environ["PATH"] = ":".join(
     ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin", os.environ.get("PATH", "")]
 )
-
-
-def now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 # Settings live in SQLite (config_* tables, TP-49). Code holds the defaults: a key the DB does not have uses these.
@@ -74,10 +75,6 @@ DEFAULT_SETTINGS = {
     # and must be active members of org. Only a 127.0.0.1 request changes it (server.H._config)
     "lan_share": {"enabled": False, "org": ""},  # org: asked for when sharing is turned on
 }
-# TP-121 moved the two defaults above under ~/tp-work. An install from before that keeps these (pin_legacy_roots).
-LEGACY_ROOTS = {"worktree_root": "~/ticket-pilot/worktrees", "clone_root": "~/Desktop/07_Project"}
-# TP-184 changed the default tags from orca / orca-milestone; an install from before keeps them (pin_legacy_tags)
-LEGACY_TAGS = {"asana_tag": "orca", "milestone_tag": "orca-milestone"}
 DEFAULT_MAP = {"repos": {}, "projects": [], "hidden_projects": {}}
 CONFIG_TTL_S = 2.0  # long-running processes (dashboard) see a change made elsewhere within this many seconds
 _CFG_CACHE: dict = {}
@@ -184,38 +181,6 @@ def effective_config(stored: dict | None) -> dict:
 # virtual project UNSORTED (미분류) on the 프로젝트 page.
 PROJECT_SOURCES = ("asana", "github", "notion", "none")
 PROJECT_COLS = ("id", "name", "source", "asana_gid", "repos")
-UNSORTED = "unsorted"
-
-
-def project_slug(name, gid=None) -> str:
-    s = re.sub(r"[^a-z0-9]+", "-", str(name or "").lower()).strip("-")[:40].strip("-")
-    return s or (f"asana-{gid}" if gid else "project")
-
-
-def norm_projects(projects: list) -> list:
-    """Projects in the pre-TP-91 shape (asana_gid only: old exports, the migration) get a source and a unique id.
-    Deterministic, so the migration and an import of the same old export give the same ids."""
-    if all(isinstance(p, dict) and p.get("id") and p.get("source") for p in projects):
-        return projects
-    taken = {UNSORTED} | {str(p["id"]) for p in projects if isinstance(p, dict) and p.get("id")}
-    out = []
-    for p in projects:
-        if not isinstance(p, dict):
-            out.append(p)  # validate() reports it
-            continue
-        p = dict(p)
-        if p.get("asana_gid") is not None:
-            p["asana_gid"] = str(p["asana_gid"])
-        p.setdefault("source", "asana" if p.get("asana_gid") else "none")
-        if not p.get("id"):
-            base = i = project_slug(p.get("name"), p.get("asana_gid"))
-            n = 2
-            while i in taken:
-                i, n = f"{base}-{n}", n + 1
-            p["id"] = i
-            taken.add(i)
-        out.append(p)
-    return out
 
 
 def config_cache_clear():
@@ -228,10 +193,10 @@ def _config_con():
 
 def config() -> dict:
     """Effective settings ({"settings", "project_map"}), cached for CONFIG_TTL_S."""
-    import threading
     import time
     t = time.monotonic()
-    if _CFG_CACHE.get("db") == str(DB_PATH) and t - _CFG_CACHE.get("at", -1e9) < CONFIG_TTL_S:
+    db_key = (os.getpid(), str(DB_PATH))
+    if _CFG_CACHE.get("db") == db_key and t - _CFG_CACHE.get("at", -1e9) < CONFIG_TTL_S:
         return _CFG_CACHE["val"]
     con = _config_con()
     try:
@@ -239,7 +204,7 @@ def config() -> dict:
     finally:
         if threading.current_thread() is not threading.main_thread():
             con.close()  # db() opens a fresh connection per call outside the main thread
-    _CFG_CACHE.update(db=str(DB_PATH), at=t, val=val)
+    _CFG_CACHE.update(db=db_key, at=t, val=val)
     return val
 
 
@@ -290,467 +255,40 @@ def default_repo(project: dict) -> str | None:
     return next((r["repo"] for r in links if r.get("default")), links[0]["repo"] if links else None)
 
 
-def import_legacy_json(con) -> bool:
-    """First run after TP-49: copy config/settings.json + config/project_map.json into a DB that has no settings.
-    Runs at most once per DB (meta config_imported); JSON files are never read after that."""
-    if meta_get(con, "config_imported") or con.execute("SELECT 1 FROM config_global LIMIT 1").fetchone():
-        return False
-    files = {k: CONFIG / f"{k}.json" for k in ("settings", "project_map")}
-    if not any(f.is_file() for f in files.values()):
-        return False  # nothing to import yet: code defaults apply, and a file that shows up later is still imported
-    doc = {k: json.loads(f.read_text()) if f.is_file() else {} for k, f in files.items()}
-    write_config(con, doc)
-    meta_set(con, "config_imported", now())
-    event(con, "config", "설정을 config/settings.json + config/project_map.json에서 DB로 가져왔어요 (한 번만)")
-    con.commit()
-    try:
-        from . import config as _c
-        _c.backup(con)
-    except Exception:  # noqa: BLE001  a backup failure must not stop the first start
-        pass
-    return True
-
-
-def pin_legacy_roots(con) -> bool:
-    """TP-121: a DB that was in use before the defaults moved to ~/tp-work (it has stored settings or runs) but never
-    stored worktree_root / clone_root gets the old defaults written, so its worktrees and clones stay where they are.
-    Stored values are never touched. Once per DB (meta roots_pinned); a new DB only gets the mark.
-    Moving the files is a later `tp migrate`."""
-    return _pin_old_defaults(con, "roots_pinned", LEGACY_ROOTS, "기본 작업 위치가 ~/tp-work로 바뀌어서 지금 쓰던 값을 설정에 적어 뒀어요 (TP-121)")
-
-
-def pin_legacy_tags(con) -> bool:
-    """TP-184: the same for the Asana tags, so an install that used the orca / orca-milestone defaults keeps them."""
-    return _pin_old_defaults(con, "tags_pinned", LEGACY_TAGS, "기본 Asana 태그가 tp로 바뀌어서 지금 쓰던 태그를 설정에 적어 뒀어요 (TP-184)")
-
-
-def _pin_old_defaults(con, mark: str, old: dict, note: str) -> bool:
-    if meta_get(con, mark):
-        return False
-    used = (con.execute("SELECT 1 FROM config_global WHERE ns='settings' LIMIT 1").fetchone()
-            or con.execute("SELECT 1 FROM runs LIMIT 1").fetchone())
-    pinned = []
-    if used:
-        pos = con.execute("SELECT COALESCE(MAX(pos),-1) FROM config_global WHERE ns='settings'").fetchone()[0]
-        for k, v in old.items():
-            pos += 1
-            cur = con.execute("INSERT OR IGNORE INTO config_global(ns,k,v,pos) VALUES('settings',?,?,?)",
-                              (k, json.dumps(v), pos))
-            if cur.rowcount:
-                pinned.append(f"{k}={v}")
-    if pinned:
-        event(con, "config", f"{note}: " + ", ".join(pinned))
-        config_cache_clear()
-    meta_set(con, mark, now())
-    con.commit()
-    return bool(pinned)
-
-
-# ---------------------------------------------------------------- SQLite
-
-# TP-91 project tables (also what _migrate_projects recreates). project_map: derived from config_projects (load_map);
-# project_gid links tickets to repos: Asana gid or notion:<tp project id>, otherwise NULL.
-PROJECT_TABLES = """
-CREATE TABLE IF NOT EXISTS project_map (
-  project_gid TEXT, project_name TEXT, repo TEXT, role TEXT, is_default INTEGER,
-  confidence TEXT, note TEXT, project_id TEXT,
-  PRIMARY KEY (project_id, repo)
-);
-CREATE TABLE IF NOT EXISTS config_projects (
-  id TEXT PRIMARY KEY, pos INTEGER, name TEXT, source TEXT, asana_gid TEXT, extra TEXT
-);
-CREATE TABLE IF NOT EXISTS config_project_repos (
-  project_id TEXT, repo TEXT, pos INTEGER, role TEXT, is_default INTEGER, PRIMARY KEY (project_id, repo)
-);
-"""
-
-SCHEMA = PROJECT_TABLES + """
-CREATE TABLE IF NOT EXISTS notion_connections (
-  id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, workspace_name TEXT NOT NULL, user_id TEXT NOT NULL, user_name TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS notion_status_queue (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_gid TEXT UNIQUE NOT NULL, project_id TEXT NOT NULL,
-  data_source_id TEXT NOT NULL, stage TEXT NOT NULL, last_error TEXT, next_attempt_at REAL NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS tickets (
-  gid TEXT PRIMARY KEY,
-  key TEXT,                -- Asana "ID" custom field (CRSC-340) or AS-<gid>
-  name TEXT,
-  url TEXT,
-  project_gid TEXT,
-  project_name TEXT,
-  section TEXT,
-  parent_gid TEXT,
-  parent_name TEXT,
-  due_on TEXT,
-  notes TEXT,
-  tags TEXT,
-  has_tag INTEGER DEFAULT 0,
-  deps_json TEXT,          -- [{gid,name,completed}]
-  open_deps INTEGER DEFAULT 0,
-  completed INTEGER DEFAULT 0,
-  assigned INTEGER DEFAULT 1,
-  asana_modified_at TEXT,
-  first_seen TEXT,
-  last_seen TEXT,
-  stage TEXT,
-  repo_override TEXT,
-  skip INTEGER DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS repos (
-  name TEXT PRIMARY KEY, orca_repo_id TEXT, path TEXT, github TEXT, description TEXT
-);
--- settings (TP-49): the source of truth for what config/settings.json + config/project_map.json used to hold.
--- config_global: top-level keys; ns 'settings' (deploy without its repos) or 'project_map' (comments). v = JSON
-CREATE TABLE IF NOT EXISTS config_global (ns TEXT, k TEXT, v TEXT, pos INTEGER, PRIMARY KEY (ns, k));
--- one row per repo: map entry (info = orca_repo_id/path/github/description JSON; NULL = deploy rule only), checks
--- ([{name, cmd, dir?, off?, reason?}]; off = kept with a reason but not run), ci, review overrides, deploy rule JSON.
--- map_pos / deploy_pos keep the JSON order (deploy order = release train order)
-CREATE TABLE IF NOT EXISTS config_repos (
-  name TEXT PRIMARY KEY, map_pos INTEGER, info TEXT, checks TEXT, ci INTEGER, review TEXT,
-  deploy_pos INTEGER, deploy TEXT, updated_at TEXT
-);
-CREATE TABLE IF NOT EXISTS config_hidden (asana_gid TEXT PRIMARY KEY, pos INTEGER, name TEXT);
--- every settings change: actor dashboard | cli | import, scope global | <repo> | project:<id>, key = dotted path
-CREATE TABLE IF NOT EXISTS settings_history (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, actor TEXT, scope TEXT, key TEXT, old TEXT, new TEXT
-);
--- 설정 page "base 브랜치에서 시험 실행": detached `tp check --repo --ref --record <id>`
-CREATE TABLE IF NOT EXISTS config_check_runs (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT, ref TEXT, sha TEXT, status TEXT, results TEXT, log_path TEXT,
-  pid INTEGER, error TEXT, started_at TEXT, finished_at TEXT
-);
-CREATE TABLE IF NOT EXISTS runs (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  ticket_gid TEXT,
-  repo TEXT,
-  worktree_id TEXT,
-  worktree_name TEXT,
-  worktree_path TEXT,
-  branch TEXT,
-  terminal TEXT,
-  ws_status TEXT,
-  ws_comment TEXT,
-  state TEXT,              -- active | finished | abandoned
-  origin TEXT,             -- dispatch | adopt
-  created_at TEXT,
-  updated_at TEXT,
-  raw_json TEXT
-);
-CREATE TABLE IF NOT EXISTS prs (
-  url TEXT PRIMARY KEY,
-  run_id INTEGER,
-  ticket_gid TEXT,
-  repo TEXT,
-  github TEXT,
-  number INTEGER,
-  title TEXT,
-  state TEXT,
-  is_draft INTEGER,
-  head_sha TEXT,
-  created_at TEXT,
-  updated_at TEXT
-);
-CREATE TABLE IF NOT EXISTS reviews (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  pr_url TEXT,
-  ticket_gid TEXT,
-  head_sha TEXT,
-  verdict TEXT,            -- approve | changes | blocked
-  summary TEXT,
-  body TEXT,
-  comment_url TEXT,
-  posted INTEGER DEFAULT 0,
-  created_at TEXT,
-  rework_at TEXT           -- when a 'changes' verdict was sent back to the agent (tp dispatch)
-);
-CREATE TABLE IF NOT EXISTS events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  ts TEXT, kind TEXT, ticket_gid TEXT, message TEXT
-);
-CREATE TABLE IF NOT EXISTS metric_markers (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  at REAL NOT NULL, label TEXT NOT NULL, kind TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS metric_agent_runs (
-  log TEXT PRIMARY KEY, handle TEXT, kind TEXT NOT NULL, ticket_gid TEXT,
-  started_at REAL, finished_at REAL, has_ws_set INTEGER, exit_event INTEGER,
-  tool TEXT, tokens INTEGER, tool_calls INTEGER,
-  help_calls INTEGER, dev_calls INTEGER, wait_calls INTEGER
-);
-CREATE INDEX IF NOT EXISTS metric_agent_pending ON metric_agent_runs(finished_at,started_at DESC);
-CREATE TABLE IF NOT EXISTS metric_review_starts (
-  log TEXT NOT NULL, at REAL NOT NULL, ticket_gid TEXT NOT NULL,
-  PRIMARY KEY (log, at)
-);
-CREATE TABLE IF NOT EXISTS metric_review_tokens (
-  log TEXT NOT NULL, ticket_gid TEXT NOT NULL, started_at REAL NOT NULL, tokens INTEGER,
-  PRIMARY KEY (log, ticket_gid)
-);
--- TP-105 수신함 alerts the owner has to look at (events is the log): kind review | ms_ready; read_at NULL = unread
-CREATE TABLE IF NOT EXISTS notifications (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  ts TEXT, kind TEXT, ticket_gid TEXT, title TEXT, body TEXT, href TEXT, read_at TEXT
-);
-CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
--- TP-152 로컬망 공유 logins (lan.py): id_hash = sha256 of the cookie (the cookie itself is never stored), org = the
--- org checked at login, checked_at = last org membership check
-CREATE TABLE IF NOT EXISTS sessions (
-  id_hash TEXT PRIMARY KEY, login TEXT, org TEXT, created_at TEXT, last_seen TEXT, checked_at TEXT, ip TEXT
-);
-CREATE TABLE IF NOT EXISTS staging_diffs (
-  repo TEXT PRIMARY KEY,
-  github TEXT,
-  prod_branch TEXT,
-  staging_branch TEXT,
-  staging_head TEXT,
-  ahead INTEGER,
-  hotfixes INTEGER,          -- non-merge commits in prod that staging lacks (staging -> prod may conflict)
-  via_ahead INTEGER,         -- via repos: commits in main that production lacks
-  pipeline TEXT,             -- staging pipeline status for staging_head (Succeeded/InProgress/Failed/...) or NULL
-  verdict TEXT,              -- ready | building | broken | none | error
-  oldest_at TEXT,            -- committer date of the oldest commit not in prod
-  items_json TEXT,           -- [{kind: ticket|pr|commit|merge, ...}]
-  error TEXT,
-  checked_at TEXT,
-  note_md TEXT, note_level TEXT, note_head TEXT, note_at TEXT
-);
--- ^ diffs.py: production vs staging per repo (Orca automation "ticket-pilot: staging diff")
-CREATE TABLE IF NOT EXISTS cleanups (
-  path TEXT PRIMARY KEY,     -- ticket worktree path (runs.worktree_path)
-  ticket_gid TEXT, key TEXT, repo TEXT, branch TEXT,
-  heads TEXT,                -- sorted head shas of the merged PRs that were checked
-  prs_json TEXT,             -- [{number, url, merge_sha, head_sha, live: merge|cherry|patch|agent|null, signals}]
-  prod_sha TEXT, prod_note TEXT,
-  status TEXT,               -- waiting | ambiguous | kept | removing | removed | error
-  reason TEXT,
-  agent_verdict TEXT, agent_note TEXT, agent_sha TEXT,
-  checked_at TEXT, removed_at TEXT
-);
--- ^ cleanup.py: remove ticket worktrees once production has their change (Orca automation "ticket-pilot: worktree cleanup")
-CREATE TABLE IF NOT EXISTS checks (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  pr_url TEXT, ticket_gid TEXT, head_sha TEXT,
-  name TEXT,               -- project_map.json repos.<name>.checks[].name, or the GitHub check name for "ci" repos
-  cmd TEXT,
-  status TEXT,             -- running | pass | fail | flaky (failed, passed on the rerun) | timeout | error | ci_pending
-  exit_code INTEGER,
-  duration_s REAL,
-  log_path TEXT,           -- data/checks/<repo>-<n>-<sha7>-<name>.log, or the GitHub details URL
-  created_at TEXT,
-  finished_at TEXT,
-  attempt INTEGER DEFAULT 1,   -- 2 = rerun after tp could not run the checks (error)
-  UNIQUE (pr_url, head_sha, name)   -- also the lock: one run per PR head
-);
--- ^ checks.py: tp's own checks on the PR head (tp check); gate the review queue and the dashboard approval
-CREATE TABLE IF NOT EXISTS releases (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  day TEXT,                -- KST date of the release train
-  repo TEXT,               -- repos.name ('' for a "nothing to release" marker)
-  github TEXT,
-  status TEXT,             -- pending | deploying | done | aborted | failed | empty
-  reason TEXT,
-  prs_json TEXT,           -- [{url, number, key, title}]
-  release_pr_url TEXT,     -- the staging -> main PR
-  merge_sha TEXT,
-  started_at TEXT,
-  merged_at TEXT,
-  finished_at TEXT
-);
--- chat.py (프로젝트 page 채팅): the owner's conversations with a headless agent in a repo's checkout. session = the
--- conversation ID the next turn resumes; tool = the agent it belongs to (a tool change starts over).
--- project_id (TP-91, added by _migrate) = the project it belongs to; repo = the checkout its session runs in
-CREATE TABLE IF NOT EXISTS chat_conversations (
-  id TEXT PRIMARY KEY, repo TEXT, title TEXT, session TEXT, tool TEXT, created_at TEXT, updated_at TEXT
-);
--- one row per message or compaction. A NULL text marks a running process (handle = runner handle).
--- A finished compaction stores the handoff in text, which chat.messages displays as a divider.
-CREATE TABLE IF NOT EXISTS chat_messages (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id TEXT, role TEXT, text TEXT, ts TEXT,
-  handle TEXT, failed INTEGER DEFAULT 0, finished_at TEXT
-);
-CREATE INDEX IF NOT EXISTS chat_messages_conv ON chat_messages(conversation_id, id);
-"""
-
-
-_CON: sqlite3.Connection | None = None
-
-
 def db() -> sqlite3.Connection:
-    """One connection per process (the dashboard server opens its own per request thread)."""
-    global _CON
-    import threading
-    if _CON is not None and threading.current_thread() is threading.main_thread():
-        return _CON
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(DB_PATH, timeout=30)
-    con.row_factory = sqlite3.Row
-    # Every writer (automations, dashboard via launchd) must run on this Mac's kernel: SQLite locks do not cross
-    # a Docker Desktop bind mount, and two writers there corrupted the DB (TP-8). DELETE journal is enough at
-    # this load (busy_timeout waits) and keeps tp.db a single file that cp/backup/VACUUM INTO handle as-is.
-    con.execute("PRAGMA journal_mode=DELETE")
-    con.execute("PRAGMA busy_timeout=30000")
-    con.executescript(SCHEMA)
-    _migrate(con)
-    import_legacy_json(con)
-    pin_legacy_roots(con)
-    pin_legacy_tags(con)
-    if threading.current_thread() is threading.main_thread():
-        _CON = con
-    return con
-
-
-_COLUMNS = {
-    "notion_status_queue": {"next_attempt_at": "REAL NOT NULL DEFAULT 0"},
-    # source: NULL = AI review, 'check' = tp check failure sent back to the agent through the same rework flow
-    "reviews": {"rework_at": "TEXT", "source": "TEXT", "manual": "INTEGER", "agent_log": "TEXT"},
-    # attempt: checks.py reruns a head once when tp could not run its checks (error)
-    "checks": {"attempt": "INTEGER"},
-    # cleanup.py: when the ticket worktree was removed after its change was seen in production
-    "runs": {"removed_at": "TEXT"},
-    # reply: the owner's dashboard answer to a BLOCKED agent; tp dispatch relaunches the agent with it, then clears it
-    # check_override(_sha): the owner's reason for approving a head whose tp checks did not pass (only that head commit)
-    "tickets": {"approve_requested_at": "TEXT", "approve_error": "TEXT", "reply": "TEXT",
-                "check_override": "TEXT", "check_override_sha": "TEXT",
-                # review_override(_sha): the owner's reason for approving a head the AI review did not approve (TP-99)
-                "review_override": "TEXT", "review_override_sha": "TEXT",
-                # milestone.py: participation and the head the AI approval auto-merged once
-                "in_milestone": "INTEGER", "auto_approved_sha": "TEXT",
-                # A Notion milestone page lives outside the task DB. Keep its link or a per-task relation error.
-                "parent_url": "TEXT", "milestone_error": "TEXT",
-                # milestone tickets: when the owner pressed 마일스톤 작업 완료 (cleared again when a subtask comes in)
-                "ms_done_at": "TEXT",
-                # pipeline.restage: when the stage became done/closed (NULL again once reopened); the board hides old ones
-                "done_at": "TEXT"},
-    # mergeable: GitHub MERGEABLE | CONFLICTING | NULL (not computed yet; GitHub answers UNKNOWN lazily)
-    "prs": {"base": "TEXT", "merged_at": "TEXT", "merge_sha": "TEXT", "release_id": "INTEGER", "mergeable": "TEXT",
-            # track.py: production verification for merged PRs outside the release train
-            "prod_at": "TEXT", "prod_note": "TEXT", "track_sha": "TEXT",
-            # pipeline.conflict_rework: head commit the agent was relaunched on to resolve a base-branch conflict
-            "conflict_sha": "TEXT", "conflict_at": "TEXT"},
-    # chat.py: JSON list of {name, file, size, type} for user and assistant files in data/chat-uploads/<conv>/
-    "chat_messages": {"attachments": "TEXT", "input_tokens": "INTEGER", "cache_read_input_tokens": "INTEGER",
-                      "cache_creation_input_tokens": "INTEGER", "output_tokens": "INTEGER",
-                      "context_tokens": "INTEGER", "before_context_tokens": "INTEGER", "compaction_id": "INTEGER",
-                      "claude_session_id": "TEXT"},
-    # TP-152: who did it (dashboard request: GitHub login of a LAN user, owner_name on 127.0.0.1; NULL = tp itself)
-    "events": {"actor": "TEXT"},
-    # TP-91: conversations belong to a project (several repos), not a repo
-    # TP-103: read_id = the last assistant message the owner saw (unread = finished replies after it)
-    "chat_conversations": {"project_id": "TEXT", "read_id": "INTEGER"},
-    # deploy.py (배포 page): mode NULL = the weekday train. state_json = resumable step state, lock_until = tick claim
-    "releases": {"mode": "TEXT", "ticket_gid": "TEXT", "step": "TEXT", "state_json": "TEXT", "version": "TEXT",
-                 "requested_at": "TEXT", "lock_until": "TEXT"},
-}
-
-
-def _cols(con, table) -> set:
-    return {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
-
-
-def _migrate_projects(con) -> bool:
-    """TP-91: config_projects / config_project_repos keyed by asana_gid -> by the project's own id (norm_projects).
-    project_map is a derived copy: recreated with project_id and refilled from the new tables.
-    One write transaction (re-checked under the lock): a failure leaves the old tables, and a concurrent process
-    (tick vs dashboard right after a deploy) migrates once."""
-    if "id" in _cols(con, "config_projects"):
-        return False
-    con.commit()
-    con.execute("BEGIN IMMEDIATE")
-    try:
-        if "id" in _cols(con, "config_projects"):
-            con.rollback()
-            return False
-        _rebuild_projects(con)
-        con.commit()
-    except BaseException:
-        con.rollback()
-        raise
-    return True
-
-
-def _rebuild_projects(con):
-    old = [dict(r) for r in con.execute("SELECT * FROM config_projects ORDER BY pos")]
-    links = [dict(r) for r in con.execute("SELECT * FROM config_project_repos ORDER BY pos")]
-    projects = norm_projects([{"asana_gid": p["asana_gid"], "name": p["name"]} for p in old])
-    ids = {p["asana_gid"]: p["id"] for p in projects}
-    con.execute("DROP TABLE config_projects")
-    con.execute("DROP TABLE config_project_repos")
-    con.execute("DROP TABLE IF EXISTS project_map")
-    for ddl in PROJECT_TABLES.split(";"):  # not executescript: that commits, this must stay one transaction
-        if ddl.strip():
-            con.execute(ddl)
-    for p, o in zip(projects, old):
-        con.execute("INSERT INTO config_projects(id,pos,name,source,asana_gid,extra) VALUES(?,?,?,?,?,?)",
-                    (p["id"], o["pos"], o["name"], p["source"], o["asana_gid"], o["extra"]))
-    for r in links:
-        if r["asana_gid"] in ids:
-            con.execute("INSERT OR REPLACE INTO config_project_repos(project_id,repo,pos,role,is_default) VALUES(?,?,?,?,?)",
-                        (ids[r["asana_gid"]], r["repo"], r["pos"], r["role"], r["is_default"]))
-    stored = read_config(con)
-    if stored:
-        load_map(con, effective_config(stored)["project_map"])
-    if old:
-        event(con, "config", f"프로젝트 {len(old)}개에 id를 붙였어요 (TP-91): "
-              + ", ".join(f"{p['name']} → {p['id']}" for p in projects))
+    """Open the configured DB with ticket-pilot's settings migration hooks."""
+    return connection.open_db(DB_PATH, _migrate, _migrate_settings)
 
 
 def _migrate(con):
-    if "actor" not in _cols(con, "events"):  # first: _migrate_projects logs an event (TP-152)
-        con.execute("ALTER TABLE events ADD COLUMN actor TEXT")
-    changed = _migrate_projects(con)
-    backfill_done = backfill_conv = backfill_read = False
-    for table, cols in _COLUMNS.items():
-        have = _cols(con, table)
-        for col, typ in cols.items():
-            if col not in have:
-                con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
-                changed = True
-                backfill_done = backfill_done or (table, col) == ("tickets", "done_at")
-                backfill_conv = backfill_conv or (table, col) == ("chat_conversations", "project_id")
-                backfill_read = backfill_read or (table, col) == ("chat_conversations", "read_id")
-    if backfill_conv:
-        # a repo's conversations go to the first project (settings order) that has the repo, else 미분류
-        con.execute(f"""UPDATE chat_conversations SET project_id=COALESCE(
-                          (SELECT l.project_id FROM config_project_repos l JOIN config_projects p ON p.id=l.project_id
-                           WHERE l.repo=chat_conversations.repo ORDER BY p.pos LIMIT 1), '{UNSORTED}')""")
-    if backfill_read:
-        # existing conversations start read up to their last finished message (a turn running now still counts once done)
-        con.execute("""UPDATE chat_conversations SET read_id=COALESCE((SELECT MAX(id) FROM chat_messages
-                         WHERE conversation_id=chat_conversations.id AND text IS NOT NULL), 0)""")
-    if backfill_done:  # after the loop: prs.prod_at / merged_at may have just been added too
-        # finished tickets: their PR's production / merge time, else the Asana change, else the migration time
-        con.execute("""UPDATE tickets SET done_at=COALESCE(
-                         (SELECT MAX(COALESCE(prod_at, merged_at)) FROM prs WHERE ticket_gid=tickets.gid),
-                         asana_modified_at, ?) WHERE stage IN ('done','closed')""", (now(),))
-    if changed:
-        con.commit()
+    migrations.migrate_schema(con, _refresh_migrated_map)
 
 
-_ACTOR = threading.local()
+def _refresh_migrated_map(con):
+    stored = read_config(con)
+    if stored:
+        load_map(con, effective_config(stored)["project_map"])
 
 
-def set_actor(name: str | None):
-    """The dashboard sets this per request thread (server.H._gate); event() records it."""
-    _ACTOR.name = name
+def _migrate_settings(con):
+    migrations.migrate_settings(con, CONFIG, write_config=write_config,
+                                backup_config=_backup_legacy_config, clear_cache=config_cache_clear)
 
 
-def current_actor() -> str | None:
-    return getattr(_ACTOR, "name", None)
+def _backup_legacy_config(con):
+    settings_backup.write_backup(effective_config(read_config(con)), settings_backup.backup_dir(DB_PATH))
 
 
-def event(con, kind: str, message: str, ticket_gid: str | None = None):
-    con.execute("INSERT INTO events(ts,kind,ticket_gid,message,actor) VALUES(?,?,?,?,?)",
-                (now(), kind, ticket_gid, message, current_actor()))
-
-
-def meta_set(con, k: str, v):
-    con.execute("INSERT INTO meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, json.dumps(v)))
-
-
-def meta_get(con, k: str, default=None):
-    r = con.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone()
-    return json.loads(r["v"]) if r else default
+@contextmanager
+def dispatch_lock(con):
+    """Serialize dispatch and cleanup of failed starts without blocking ticket sync."""
+    db_path = con.execute("PRAGMA database_list").fetchone()[2]
+    if not db_path:
+        yield
+        return
+    with Path(db_path + ".dispatch.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
 
 
 def load_map(con, m: dict | None = None):
@@ -1048,6 +586,13 @@ def orca_json(args: list[str], timeout: int = 300) -> dict:
     if not j.get("ok", False):
         raise RuntimeError(f"orca {' '.join(args[:3])}: {json.dumps(j.get('error') or j)[:800]}")
     return j["result"]
+
+
+def gh_api(method: str, path: str, body: dict | None = None) -> dict:
+    cmd = ["gh", "api", "-X", method, path]
+    if body is not None:
+        cmd += ["--input", "-"]
+    return json.loads(run(cmd, timeout=120, input=json.dumps(body) if body is not None else None).stdout or "{}")
 
 
 def gh_json(args: list[str], cwd: str | None = None):

@@ -3,7 +3,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Card, cn } from "../ui";
 import { getJson } from "../api";
-import { md } from "./ProjectChat";
+import { md } from "../components/markdown";
 
 /** 도움말 (#help, TP-150): docs/guide.md from GET /api/guide, the same text `tp guide` prints */
 export function Help() {

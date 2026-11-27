@@ -4,22 +4,34 @@
 
 ## 진입점
 
-- **CLI** — [bin/tp](../bin/tp)가 [cli.py](../ticket_pilot/cli.py)의 `main()`을 실행한다. 여기서 명령을 등록하며, `tp tick`은 동기화·투입, 리뷰, 배포 관련 사전 점검과 자동화의 실행 주기를 관리한다.
-- **대시보드 서버** — `tp serve`와 Docker의 `tp run`은 [server.py](../ticket_pilot/server.py)의 `serve()`를 호출한다. HTTP 핸들러의 `do_GET()`과 `do_POST()`가 API를 처리하고, 서버는 빌드된 React 앱을 `web/dist`에서 제공한다.
-- **대시보드 화면** — [index.html](../web/index.html)에서 [main.tsx](../web/src/main.tsx)로 진입한다. [App.tsx](../web/src/App.tsx)가 주소의 해시로 화면을 선택하고, [api.ts](../web/src/api.ts)와 [types.ts](../web/src/types.ts)가 API 호출과 응답 타입을 공유한다.
-- **공용 저장소** — [core.py](../ticket_pilot/core.py)의 `db()`가 SQLite 연결과 스키마 초기화·마이그레이션을 담당한다.
+- **CLI** — [bin/tp](../bin/tp)와 `python3 -m ticket_pilot.cli`는 [cli.py](../ticket_pilot/cli.py)의 `main()`으로 들어간다. 여기서 argparse 명령을 등록하고 인자를 넘기며, `tp precheck-*`의 결과를 종료 코드와 출력으로 변환한다.
+- **대시보드 서버** — `tp serve`와 Docker의 `tp run`은 [server.py](../ticket_pilot/server.py)의 `serve()`를 호출한다. `tp run`은 [tick.py](../ticket_pilot/tick.py)의 `run_loop()`로 매분 tick 프로세스를 시작한다. 서버는 세션·Origin 검사, 요청 파싱, 공통 오류 응답과 요청 actor 정리를 처리하고 빌드된 React 앱을 `web/dist`에서 제공한다.
+- **대시보드 HTTP API** — [routes.py](../ticket_pilot/http_api/routes.py)에서 메서드별 URL, 쿼리 매칭, 공개·관리자 경로를 확인할 수 있다. 경로 표가 [채팅·첨부](../ticket_pilot/http_api/chat.py), [프로젝트·설정·Notion](../ticket_pilot/http_api/settings.py), [로그인·계정 연결](../ticket_pilot/http_api/connections.py), [티켓·리뷰·배포](../ticket_pilot/http_api/tickets.py), [운영·모니터링](../ticket_pilot/http_api/operations.py)의 핸들러를 지정한다. [test_http_api.py](../tests/test_http_api.py)는 임시 서버에 요청해 기능별 GET·POST, 다운로드, 정적 파일과 actor 정리를 검증한다. 로그인·권한은 [test_lan.py](../tests/test_lan.py), [test_docker.py](../tests/test_docker.py), OAuth 콜백은 [test_notion.py](../tests/test_notion.py)에서도 검증한다.
+- **대시보드 화면** — [index.html](../web/index.html)에서 [main.tsx](../web/src/main.tsx)로 진입해 로그인과 Notion 콜백을 처리한다. [App.tsx](../web/src/App.tsx)는 [탐색 훅](../web/src/app/useNavigation.ts)이 해석한 탭과 하위 경로로 화면을 렌더링하고 [공통 데이터 훅](../web/src/app/useDashboardData.ts)의 응답을 각 화면에 전달한다. [api.ts](../web/src/api.ts)와 [types.ts](../web/src/types.ts)가 API 호출과 응답 타입을 공유한다.
+- **공용 저장소** — [core.py](../ticket_pilot/core.py)의 `db()`는 `TP_DB` 경로와 설정 이관에 필요한 함수를 [storage/connection.py](../ticket_pilot/storage/connection.py)에 전달한다. 연결은 프로세스의 메인 스레드에서 재사용한다. 요청 스레드는 호출마다 연결을 열고 사용 후 닫는다. fork된 자식은 `db()`로 새 연결을 연다.
+- **SQLite 초기화** — [storage/schema.py](../ticket_pilot/storage/schema.py)의 기본 테이블을 만든 뒤 [storage/migrations.py](../ticket_pilot/storage/migrations.py)가 이벤트의 `actor` 열을 준비하고, 프로젝트 키를 이관한 다음, 누락된 열을 추가하고 기존 행의 값을 채운다. 열 추가와 값 보정은 함께 커밋하거나 롤백한다. 이후 레거시 JSON, 작업 경로, Asana 태그 순으로 처리하며 `meta`의 `config_imported`, `roots_pinned`, `tags_pinned`로 완료 여부를 확인한다. [test_storage.py](../tests/test_storage.py)와 [test_config.py](../tests/test_config.py)가 연결과 이관을 검증한다.
+
+## 자동화 tick과 사전 점검
+
+- **실행** — launchd와 systemd의 `tp tick`, Docker의 tick 프로세스는 [tick.py](../ticket_pilot/tick.py)의 `run_tick()`으로 들어간다. 여기서 `data/tick.lock`과 Docker 유지보수 상태를 확인하고, `precheck-*` 프로세스 실행과 AI 러너 호출, `automations`와 `automation_runs` 메타데이터 저장을 담당한다.
+- **스케줄과 상태** — [automation.py](../ticket_pilot/automation.py)의 `advance()`가 시계, 러너 상태, 사전 점검 종료 코드를 받아 자동화별 실행 주기와 타임아웃을 적용하고, 대시보드 스냅샷과 실행 이력을 계산한다.
+- **사전 점검** — [precheck.py](../ticket_pilot/precheck.py)가 투입, 리뷰, 스테이징 차이, 워크트리 정리의 사전 점검을 실행한다. 투입과 리뷰 점검은 마일스톤, 승인, 대시보드 배포, 정기 배포를 순서대로 진행한다.
+- **테스트** — [test_tick.py](../tests/test_tick.py), [test_agent_roles.py](../tests/test_agent_roles.py), [test_docker.py](../tests/test_docker.py)
 
 ## 티켓 동기화와 투입
 
 - **화면·API** — [Board.tsx](../web/src/views/Board.tsx)와 [Tickets.tsx](../web/src/views/Tickets.tsx)는 `GET /api/state`에서 티켓과 단계를 읽는다. `POST /api/refresh`는 동기화와 작업 상태 스캔을 실행하며, `POST /api/assign`은 투입할 저장소를 지정한다.
-- **처리** — `tp sync`와 투입 사전 점검이 [pipeline.py](../ticket_pilot/pipeline.py)의 `sync()`를 호출한다. Asana와 GitHub 이슈는 `_sync_asana()`와 `sync_issues()`에서, Notion 티켓은 [notion_tickets.py](../ticket_pilot/notion_tickets.py)에서 동기화한다. `compute_stage()`가 단계를 계산하고, `dispatch()`가 대상 티켓과 저장소를 골라 [runner.py](../ticket_pilot/runner.py)로 워크트리와 에이전트를 시작한다.
-- **테스트** — [test_issues.py](../tests/test_issues.py), [test_notion.py](../tests/test_notion.py), [test_deps.py](../tests/test_deps.py)
+- **동기화** — `tp sync`, 투입 사전 점검과 `POST /api/refresh`는 [ticket_sync.py](../ticket_pilot/ticket_sync.py)의 `sync()`를 호출한다. 이 모듈의 Asana와 GitHub 이슈 처리기, [notion_tickets.py](../ticket_pilot/notion_tickets.py)의 Notion 처리기가 각 소스의 필터, 부모 관계와 완료 상태를 적용한다.
+- **단계와 투입** — [pipeline.py](../ticket_pilot/pipeline.py)의 `compute_stage()`와 `restage()`는 동기화, 투입, PR 추적이 공유한다. `tp dispatch`와 투입 사전 점검은 [dispatch.py](../ticket_pilot/dispatch.py)에서 단계, 의존성, 남은 슬롯과 저장소를 확인한다. 마일스톤 기준 브랜치는 [milestone.py](../ticket_pilot/milestone.py)에 맡기고 작업 브리프를 작성해 [runner.py](../ticket_pilot/runner.py)로 워크트리와 에이전트를 시작한다. 시작에 실패하면 Git 워크트리 등록에 기록한 식별자와 기준·작업 브랜치를 확인해 같은 체크아웃에서 재시도한다. 이름이 겹치면 `compute_stage()`로 예약 소유자의 현재 대기 여부를 확인한다. 소유자가 해당 워크트리에서 재시도할 수 없으면 예약을 보존하고 새 티켓에 빈 이름을 할당한다. 새 워크트리를 만들 때는 `runner.local_branches()`로 조회한 로컬 브랜치와 워크트리 경로를 확인한다. [cleanup.py](../ticket_pilot/cleanup.py)는 건너뛴 티켓의 실패 예약도 체크아웃 식별자와 작업 브랜치를 확인한 뒤 정리한다. `--dry-run`은 브리프와 투입 계획을 출력한다.
+- **테스트** — [test_issues.py](../tests/test_issues.py), [test_notion.py](../tests/test_notion.py), [test_deps.py](../tests/test_deps.py), [test_dispatch.py](../tests/test_dispatch.py), [test_milestone.py](../tests/test_milestone.py)
 
 ## PR 검사와 리뷰
 
 - **화면·API** — [Reviews.tsx](../web/src/views/Reviews.tsx)는 `GET /api/reviews`를 읽는다. 보드의 승인과 검사 예외 요청은 `POST /api/approve`, `POST /api/check-override`를 사용한다.
-- **처리** — [cli.py](../ticket_pilot/cli.py)의 `cmd_precheck_review()`가 PR을 스캔하고 [checks.py](../ticket_pilot/checks.py)에서 검사 상태를 확인한다. [pipeline.py](../ticket_pilot/pipeline.py)의 `review_queue()`와 `review_save()`가 AI 리뷰 대상과 결과를 관리한다. 리뷰 에이전트는 [automation_review.md](../prompts/automation_review.md)를 따르며, 수정 요청 후 재작업은 `pipeline.rework()`에서 처리한다.
-- **테스트** — [test_checks.py](../tests/test_checks.py), [test_rework_cap.py](../tests/test_rework_cap.py)
+- **추적** — `tp scan`, `tp ws-set`, 리뷰 사전 점검과 대시보드 새로고침은 [pipeline.py](../ticket_pilot/pipeline.py)를 거쳐 [pr_tracking.py](../ticket_pilot/pr_tracking.py)에서 워크트리, 에이전트 종료, GitHub PR 상태를 읽고 기록한다. 추적 모듈은 [milestone.py](../ticket_pilot/milestone.py)의 규칙에 따라 열린 PR의 base를 재지정하고, 작업 중 머지와 base 브랜치 직접 push를 감시한다.
+- **검사·리뷰** — [precheck.py](../ticket_pilot/precheck.py)의 `review()`는 스캔 후 [checks.py](../ticket_pilot/checks.py)에서 PR HEAD의 검사 상태를 확인한다. [review.py](../ticket_pilot/review.py)의 `review_queue()`와 `review_save()`가 HEAD별 리뷰 대상과 결과를 관리한다. 리뷰 에이전트는 [automation_review.md](../prompts/automation_review.md)를 따르며, `dispatch()`는 재작업과 충돌·답변 후 재시도를 리뷰 모듈에 위임한다. 티켓 단계 갱신은 `pipeline.restage()`가 수행한다.
+- **브리프** — [briefs.py](../ticket_pilot/briefs.py)는 투입·마일스톤·재작업·충돌 브리프를 티켓 고유 ID별로 저장한다. 리뷰 대기열, 재작업, 답변 후 재시도는 같은 ID로 원래 브리프를 찾는다. 기존 파일은 티켓 키와 소스 링크가 일치할 때 사용한다.
+- **테스트** — [test_pr_tracking.py](../tests/test_pr_tracking.py), [test_checks.py](../tests/test_checks.py), [test_rework_cap.py](../tests/test_rework_cap.py), [test_milestone.py](../tests/test_milestone.py)
 
 ## 마일스톤과 배포
 
@@ -30,15 +42,18 @@
 
 ## 프로젝트와 저장소 설정
 
-- **화면·API** — [Projects.tsx](../web/src/views/Projects.tsx)가 프로젝트별 탭을 구성한다. [Onboard.tsx](../web/src/views/Onboard.tsx)는 프로젝트·저장소 추가, [Settings.tsx](../web/src/views/Settings.tsx)는 프로젝트·저장소·전역 설정 편집, [NotionSource.tsx](../web/src/views/NotionSource.tsx)는 Notion 소스 설정을 담당한다. 관련 API는 `GET /api/projects`, `GET /api/config`, `POST /api/config`, `/api/onboard/*`, `/api/notion/*`이다.
-- **처리** — [config.py](../ticket_pilot/config.py)가 `tp config`와 대시보드의 설정 검증, 저장, 변경 이력을 공유한다. [core.py](../ticket_pilot/core.py)가 DB에서 설정을 읽고 기본값과 합치며, [onboard.py](../ticket_pilot/onboard.py)가 저장소 탐색과 복제를 처리한다.
+- **화면** — [Settings.tsx](../web/src/views/Settings.tsx)는 [전역 편집기](../web/src/views/settings/GlobalSettings.tsx)로 연결한다. [Projects.tsx](../web/src/views/Projects.tsx)는 프로젝트별 탭에서 [프로젝트 편집기](../web/src/views/settings/ProjectSettings.tsx)와 [저장소 편집기](../web/src/views/settings/RepoSettings.tsx)를 연다. [Onboard.tsx](../web/src/views/Onboard.tsx)는 프로젝트·저장소 추가를 맡는다. [NotionSource.tsx](../web/src/views/NotionSource.tsx)는 프로젝트 편집기와 온보딩에 Notion 출처 설정과 티켓 미리보기를 제공한다.
+- **조회와 저장** — 프로젝트 목록은 `GET /api/projects`에서 읽는다. 세 편집기는 [useConfig.tsx](../web/src/views/settings/useConfig.tsx)에서 `GET /api/config` 응답과 편집 초안을 관리한다. 검사 시험 실행 중에는 이 훅이 설정 응답을 주기적으로 갱신한다. 각 편집기가 `POST /api/config`에 보낼 범위와 값을 정하고 [SaveBar.tsx](../web/src/views/settings/SaveBar.tsx)가 검증 요청, 변경 확인, 저장과 오류 표시를 처리한다. 레포 추가는 `/api/onboard/*`, Notion 계정·출처 설정과 미리보기는 `/api/notion/*`를 사용한다.
+- **공용 UI** — [Form.tsx](../web/src/views/settings/Form.tsx)는 설정 폼의 행과 섹션을 제공한다. [Start.tsx](../web/src/views/Start.tsx)와 전역 편집기는 [GitHub 연결](../web/src/views/settings/GitHubConnect.tsx), [Asana 연결](../web/src/views/settings/AsanaConnect.tsx), [에이전트 계정](../web/src/views/settings/Accounts.tsx) 카드를 공유한다.
+- **처리** — [config.py](../ticket_pilot/config.py)가 `tp config`와 대시보드의 설정 검증, 저장, 변경 이력을 공유한다. [core.py](../ticket_pilot/core.py)가 DB에서 설정을 읽고 기본값과 합친다. 설정 저장과 레거시 설정 이관은 [storage/settings_backup.py](../ticket_pilot/storage/settings_backup.py)로 같은 형식의 백업을 남긴다. [onboard.py](../ticket_pilot/onboard.py)가 저장소 탐색과 복제를 처리한다.
 - **테스트** — [test_config.py](../tests/test_config.py), [test_onboard.py](../tests/test_onboard.py), [test_notion.py](../tests/test_notion.py), [settings.check.mjs](../web/src/views/settings.check.mjs)
 
 ## 프로젝트 채팅과 압축
 
-- **화면·API** — [ProjectChat.tsx](../web/src/views/ProjectChat.tsx)가 `GET /api/chat/conversations`, `GET /api/chat/messages`로 대화와 메시지를 읽고 `POST /api/chat/new`, `POST /api/chat/send`로 대화를 시작하거나 이어간다. 모니터링 → 지표의 채팅 압축 탭은 [ChatCompactions.tsx](../web/src/views/ChatCompactions.tsx)에서 `GET /api/chat/compactions`를 읽는다.
+- **화면·API** — [ProjectChat.tsx](../web/src/views/ProjectChat.tsx)가 해시에서 선택한 대화에 맞춰 [ConversationList.tsx](../web/src/views/chat/ConversationList.tsx)와 [ChatThread.tsx](../web/src/views/chat/ChatThread.tsx)를 배치한다. [Composer.tsx](../web/src/views/chat/Composer.tsx)는 입력·첨부·미리보기를, [Messages.tsx](../web/src/views/chat/Messages.tsx)는 메시지 렌더링과 스크롤을 담당한다. 채팅·도움말·배포 화면은 [markdown.tsx](../web/src/components/markdown.tsx)의 렌더링 규칙을 공유한다. 모니터링 → 지표의 채팅 압축 탭은 [ChatCompactions.tsx](../web/src/views/ChatCompactions.tsx)에서 `GET /api/chat/compactions`를 읽는다.
+- **채팅 상태** — [useChat.ts](../web/src/views/chat/useChat.ts)가 대화 목록과 메시지를 [pollChat.ts](../web/src/views/chat/pollChat.ts)로 갱신하고, 화면에 표시된 대화의 읽음 처리와 전송 상태를 관리한다. [api.ts](../web/src/views/chat/api.ts)와 [types.ts](../web/src/views/chat/types.ts)에 `/api/chat/conversations`, `/api/chat/messages`, `/api/chat/read`, 새 대화와 전송 등 프로젝트 채팅의 요청과 응답을 모아 둔다.
 - **처리** — [chat.py](../ticket_pilot/chat.py)가 대화, 첨부, 에이전트 세션과 응답을 관리한다. `tp tick`에서 호출되는 `compact_idle()`은 압축 대상을 고르고, `_finalize_compaction()`은 요약을 다음 세션에 전달할 수 있게 저장한다. [chat_usage.py](../ticket_pilot/chat_usage.py)가 사용량을 집계하고, `chat.compaction_report()`가 압축 이력을 제공한다.
-- **테스트** — [test_chat_attach.py](../tests/test_chat_attach.py)에서 첨부와 압축 후 세션 인계를, [test_chat_unread.py](../tests/test_chat_unread.py)에서 읽음 상태를, [test_chat_usage.py](../tests/test_chat_usage.py)에서 사용량을 확인한다.
+- **테스트** — [test_chat_attach.py](../tests/test_chat_attach.py)에서 첨부와 압축 후 세션 인계를, [test_chat_unread.py](../tests/test_chat_unread.py)에서 읽음 상태를, [test_chat_usage.py](../tests/test_chat_usage.py)에서 사용량을, [pollChat.check.mjs](../web/src/views/chat/pollChat.check.mjs)에서 폴링 주기와 요청·타이머 정리를 확인한다.
 
 ## 지표
 
@@ -48,9 +63,17 @@
 
 ## 대시보드 탐색과 모니터링
 
-- [App.tsx](../web/src/App.tsx)의 `TABS`가 해시 주소, 검색 항목, 모니터링 목록을 정의한다. [Sidebar.tsx](../web/src/ui/Sidebar.tsx)는 데스크톱 메뉴와 모바일 메뉴에 모니터링 링크를 표시하고, [UsageCard.tsx](../web/src/components/UsageCard.tsx)는 하단에 에이전트 사용량과 한도 초기화 시각을 표시한다.
+- [navigation.ts](../web/src/app/navigation.ts)가 탭·검색·모니터링 목록과 프로젝트 하위 탭 주소를 정의한다. 기존 채팅 압축, 저장소 이름 기반 프로젝트, 설정 이력 링크도 여기서 해석한다. [useNavigation.ts](../web/src/app/useNavigation.ts)는 해시 변경과 스크롤 위치, `POST /api/view`, Cmd/Ctrl+K를 처리한다. [Sidebar.tsx](../web/src/ui/Sidebar.tsx)는 데스크톱 메뉴와 모바일 메뉴에 모니터링 링크를 표시한다.
+- [useDashboardData.ts](../web/src/app/useDashboardData.ts)는 `GET /api/state`를 60초마다(작업실은 15초) 읽고 `POST /api/refresh` 뒤 다시 조회한다. `GET /api/projects`와 읽지 않은 브라우저 알림은 15초마다 확인하고, [UsageCard.tsx](../web/src/components/UsageCard.tsx)의 사용량은 60초마다 또는 창에 포커스가 돌아올 때 갱신한다. [usePolling.ts](../web/src/app/usePolling.ts)는 조회에 30초 제한을 두고 갱신 타이머와 진행 중인 요청을 정리한다.
 - `#monitoring`의 [Monitoring.tsx](../web/src/views/Monitoring.tsx)에서 각 상세 화면의 기존 해시 주소로 이동한다. [useMonitoringData.ts](../web/src/views/useMonitoringData.ts)는 자동화 로그와 리뷰 화면에서 사용하는 `GET /api/events`와 `GET /api/reviews` 응답을 개별적으로 불러온다.
 - `npm run check`는 [monitoring.check.mjs](../web/src/monitoring.check.mjs)의 탐색 검사와 [usage-card.check.mjs](../web/src/components/usage-card.check.mjs)의 한도 초기화 시각 검사를 실행한다.
+
+## 호스트 서비스 설치와 업데이트
+
+- **호출 경로** — `tp setup`의 [setup.py](../ticket_pilot/setup.py), `tp update`의 [update.py](../ticket_pilot/update.py), `POST /api/lan/share`의 [connections.py](../ticket_pilot/http_api/connections.py), `tp mode host`의 [mode.py](../ticket_pilot/mode.py), `tp migrate`의 [migrate.py](../ticket_pilot/migrate.py)가 [launchd/install.sh](../launchd/install.sh)를 실행한다. Linux에서는 이 스크립트가 [systemd/install.sh](../systemd/install.sh)로 넘긴다.
+- **처리** — 각 설치 스크립트가 Python과 서비스 경로를 선택하고 사용자 서비스를 등록·재시작한다. 두 스크립트가 읽는 [service-install.sh](../scripts/service-install.sh)는 [core.py](../ticket_pilot/core.py)의 `settings()`로 `dashboard_port`와 `lan_share`를 읽고, 각 플랫폼의 템플릿을 렌더링하고, 루프백 주소의 `/api/state` 응답을 기다린다.
+- **운영** — 공개 저장소의 [release.yml](../.github/workflows/release.yml)이 GitHub Release와 웹 자산, Docker 이미지를 발행한다. 호스트는 `tp update`로 릴리스를 적용한다. 별도의 레거시 설치 저장소에서 쓰는 `deploy.yml`은 호스트의 `tp update --to <sha>`를 호출한다. Docker에서는 [compose.yaml](../docker/compose.yaml)의 `tp run`이 `tp-data` 볼륨의 DB를 쓰고, 호스트의 [docker_update_manager.py](../ticket_pilot/docker_update_manager.py)가 배포 이미지를 교체한다.
+- **테스트** — [test_install.py](../tests/test_install.py), [test_setup.py](../tests/test_setup.py), [test_update.py](../tests/test_update.py), [test_mode.py](../tests/test_mode.py), [test_lan.py](../tests/test_lan.py)
 
 ## PR에서 코드 지도 갱신
 

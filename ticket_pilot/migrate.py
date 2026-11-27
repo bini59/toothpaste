@@ -406,8 +406,7 @@ def migrate(to: str, apply: bool = False, confirm=input):
         if again:
             raise RuntimeError("그 사이에 시작된 작업이 있어요: " + ", ".join(again))
         step("backup", "DB 백업", backup)
-        con.close()
-        core._CON = None  # never core.db() after the move: it would create an empty data/tp.db at the old path
+        core.close_db(con)  # never core.db() after the move: it would create an empty data/tp.db at the old path
         for o, n in moves:
             if o in j["copied"]:
                 shutil.rmtree(o, ignore_errors=True)  # the copy is complete; finish deleting the original
@@ -439,12 +438,12 @@ def migrate(to: str, apply: bool = False, confirm=input):
 
     new_root = j["root"][1]
     print(f"\n끝났어요. 이제 {new_root}/bin/tp 를 쓰세요. 남은 수작업:")
-    todo = [f"저장소 변수 TP_DIR을 새 경로로 (deploy.yml이 이 값으로 checkout을 찾아요):\n"
-            f"     gh variable set TP_DIR --repo <owner>/32_Ticket_pilot --body {new_root}"]
+    todo = [f"이 checkout을 찾는 외부 deploy.yml을 사용한다면 해당 저장소의 TP_DIR을 새 경로로:\n"
+            f"     gh variable set TP_DIR --repo <owner>/<repo> --body {new_root}"]
     if not j["launchd"]:
         todo.append(f"dashboard / tick을 launchd로 돌린다면 {new_root}/launchd/install.sh")
     if to != os.path.realpath(os.path.expanduser("~/tp-work")) and not os.environ.get("TP_LOG_DIR"):
-        todo.append(f"저장소 변수 TP_LOG_DIR={to}/logs (없으면 다음 배포가 로그를 ~/tp-work/logs로 되돌려요)")
+        todo.append(f"로그를 {to}/logs에 계속 두려면 재설치 시 TP_LOG_DIR을 지정하세요. 외부 deploy.yml을 쓰면 해당 저장소에도 설정하세요")
     if j["old_logs"] and j["old_logs"] != (os.environ.get("TP_LOG_DIR") or f"{to}/logs"):
         todo.append(f"예전 로그 폴더 정리: {j['old_logs']}")
     todo += ["worktree 안 Python 가상환경(.venv)은 절대경로를 담고 있어서 안 돌면 다시 설치하세요",

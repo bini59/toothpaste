@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from ticket_pilot import accounts, cli, config as G, core, runner
+from ticket_pilot import accounts, automation, config as G, core, runner
 
 
 def st(**kw):
@@ -39,24 +39,19 @@ class ResolveTest(unittest.TestCase):
 
     def test_each_automation_runs_its_roles_tool(self):
         s = st(agent="codex", agents={"review": {"tool": "claude"}, "check": {"tool": "claude", "model": "haiku"}})
-        self.assertEqual({a[0] for a in cli.AUTOMATIONS}, set(runner.AUTOMATION_ROLES))
+        self.assertEqual({a[0] for a in automation.AUTOMATIONS}, set(runner.AUTOMATION_ROLES))
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(runner, "settings", lambda: s), \
                 mock.patch.object(runner, "LOGS", Path(tmp)), mock.patch.object(runner, "gh_env", lambda e, required: e), \
                 mock.patch.object(runner, "asana_rules", lambda: ""), mock.patch.object(accounts, "agent_env", lambda t: {}), \
                 mock.patch.object(runner.subprocess, "Popen") as po:
             po.return_value.pid = 1
             got = {}
-            for aid, _name, prompt, _every in cli.AUTOMATIONS:
+            for aid, _name, _prompt, _every in automation.AUTOMATIONS:
                 h = runner.launch(tmp, "p", f"auto-{aid}", role=runner.AUTOMATION_ROLES[aid])
                 meta = json.loads(Path(h.split(" ", 1)[1] + ".json").read_text())
                 got[aid] = (meta["agent"], meta["model"])
         self.assertEqual(got, {"dispatch": ("claude", "haiku"), "review": ("claude", None),
                                "diff": ("claude", "haiku"), "cleanup": ("claude", "haiku")})
-
-    def test_tick_passes_the_role(self):
-        # cmd_tick hands each automation's role to runner.launch
-        src = Path(cli.__file__).read_text()
-        self.assertIn("role=runner.AUTOMATION_ROLES[aid]", src)
 
 
 class ValidateTest(unittest.TestCase):

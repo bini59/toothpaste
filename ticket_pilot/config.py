@@ -22,12 +22,13 @@ import subprocess
 import sys
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import antigravity, core, notion, notion_stages, notion_tickets
 from .core import ROOT, db, event, now
+from .storage import settings_backup
+from .storage.settings_backup import BACKUP_KEEP
 
 MODES = ("staging", "direct", "promote", "all")
 MERGES = ("merge", "squash")
@@ -76,7 +77,7 @@ def agent_models() -> dict:
 # need a dashboard restart: shown read-only on the 설정 page (the CLI can still change them)
 READ_ONLY = ("dashboard_port", "asana_keychain_service")
 # setup: shell script run in each new ticket worktree before the agent (runner.launch); worktree_base: branch new
-# ticket worktrees start from when the repo has no feature base (pipeline.worktree_base)
+# ticket worktrees start from when the repo has no feature base (runner.worktree_base)
 # agent: {tool, model, effort, ultracode} for this repo's ticket agents (runner.resolve); empty = global agent / CLI config
 # auto_setup: false turns off the automatic worktree prep (.env copy + pnpm/yarn/npm install) for this repo
 # dev: {cmd, port} for the 마일스톤 page's dev server (devserver.py); empty = package.json script / framework default
@@ -88,7 +89,6 @@ DEPLOY_KEYS = {"modes", "merge", "train", "staging", "prod", "via", "version", "
                "retarget_since", "_note", "_comment"}
 CHECK_KEYS = {"name", "cmd", "dir", "off", "reason"}
 PROJECT_ID = r"[a-z0-9][a-z0-9-]{0,39}"
-BACKUP_KEEP = 50
 
 
 class ConfigError(SystemExit):
@@ -111,7 +111,7 @@ def _db():
 
 
 def backup_dir() -> Path:
-    return core.DB_PATH.parent / "backups"
+    return settings_backup.backup_dir(core.DB_PATH)
 
 
 def current(con) -> dict:
@@ -621,15 +621,7 @@ def save(con, new: dict, actor: str, note: str | None = None, *, old=None) -> li
 
 def backup(con) -> Path:
     """data/backups/config-<UTC time>.json (export shape); keeps the newest BACKUP_KEEP."""
-    doc = current(con)
-    d = backup_dir()
-    d.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    f = d / f"config-{stamp}.json"
-    f.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n")
-    for old in sorted(d.glob("config-*.json"))[:-BACKUP_KEEP]:
-        old.unlink(missing_ok=True)
-    return f
+    return settings_backup.write_backup(current(con), backup_dir(), BACKUP_KEEP)
 
 
 # ---------------------------------------------------------------- CLI-style operations (also used by the API)

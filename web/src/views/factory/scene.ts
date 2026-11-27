@@ -19,7 +19,7 @@ function light(rows: CheckRow[]): Light {
   return "pass";
 }
 
-/** `tp tick`'s last result for an automation (cli.cmd_tick lastRunStatus) */
+/** `tp tick`'s last result for an automation (usageSummary.lastRunStatus) */
 function crewOf(snap: AutomationsResponse | null, key: CrewKey, name: string): Crew {
   const a = snap?.automations?.find((x) => x.id === key);
   const st = snap?.items?.find((x) => x.automationId === key)?.usageSummary?.lastRunStatus ?? "";

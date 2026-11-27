@@ -128,7 +128,7 @@ def _github_parent(ref, gh, for_milestone):
     if parent_repo.split("/")[0].lower() != gh.split("/")[0].lower():
         raise CreateError("invalid_argument", "GitHub 하위 이슈는 부모와 같은 소유자의 레포에 만들어야 해요")
     try:
-        issue = pipeline.gh_api("GET", f"repos/{parent_repo}/issues/{number}")
+        issue = core.gh_api("GET", f"repos/{parent_repo}/issues/{number}")
     except RuntimeError as e:
         if "(HTTP 404)" in str(e):
             raise CreateError("parent_not_found", f"GitHub 부모 이슈를 찾을 수 없어요: {ref}") from e
@@ -149,8 +149,8 @@ def _github_create(con, project, args, parent, is_milestone, actor):
     if parent:
         body["parent_issue_id"] = _github_parent(parent, gh, args.milestone)
     if args.assignee:
-        body["assignees"] = [pipeline.gh_api("GET", "user")["login"]]
-    issue = pipeline.gh_api("POST", f"repos/{gh}/issues", body)
+        body["assignees"] = [core.gh_api("GET", "user")["login"]]
+    issue = core.gh_api("POST", f"repos/{gh}/issues", body)
     number = issue["number"]
     result = {"key": f"{prefix}-{number}", "gid": f"gh:{gh}#{number}", "url": issue["html_url"]}
     try:
