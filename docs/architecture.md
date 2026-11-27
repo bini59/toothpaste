@@ -4,10 +4,17 @@
 
 ## 진입점
 
-- **CLI** — [bin/tp](../bin/tp)가 [cli.py](../ticket_pilot/cli.py)의 `main()`을 실행한다. 여기서 명령을 등록하며, `tp tick`은 동기화·투입, 리뷰, 배포 관련 사전 점검과 자동화의 실행 주기를 관리한다.
-- **대시보드 서버** — `tp serve`와 Docker의 `tp run`은 [server.py](../ticket_pilot/server.py)의 `serve()`를 호출한다. HTTP 핸들러의 `do_GET()`과 `do_POST()`가 API를 처리하고, 서버는 빌드된 React 앱을 `web/dist`에서 제공한다.
+- **CLI** — [bin/tp](../bin/tp)와 `python3 -m ticket_pilot.cli`는 [cli.py](../ticket_pilot/cli.py)의 `main()`으로 들어간다. 여기서 argparse 명령을 등록하고 인자를 넘기며, `tp precheck-*`의 결과를 종료 코드와 출력으로 변환한다.
+- **대시보드 서버** — `tp serve`와 Docker의 `tp run`은 [server.py](../ticket_pilot/server.py)의 `serve()`를 호출한다. `tp run`은 [tick.py](../ticket_pilot/tick.py)의 `run_loop()`로 매분 tick 프로세스를 시작한다. HTTP 핸들러의 `do_GET()`과 `do_POST()`가 API를 처리하고, 서버는 빌드된 React 앱을 `web/dist`에서 제공한다.
 - **대시보드 화면** — [index.html](../web/index.html)에서 [main.tsx](../web/src/main.tsx)로 진입한다. [App.tsx](../web/src/App.tsx)가 주소의 해시로 화면을 선택하고, [api.ts](../web/src/api.ts)와 [types.ts](../web/src/types.ts)가 API 호출과 응답 타입을 공유한다.
 - **공용 저장소** — [core.py](../ticket_pilot/core.py)의 `db()`가 SQLite 연결과 스키마 초기화·마이그레이션을 담당한다.
+
+## 자동화 tick과 사전 점검
+
+- **실행** — launchd와 systemd의 `tp tick`, Docker의 tick 프로세스는 [tick.py](../ticket_pilot/tick.py)의 `run_tick()`으로 들어간다. 여기서 `data/tick.lock`과 Docker 유지보수 상태를 확인하고, `precheck-*` 프로세스 실행과 AI 러너 호출, `automations`와 `automation_runs` 메타데이터 저장을 담당한다.
+- **스케줄과 상태** — [automation.py](../ticket_pilot/automation.py)의 `advance()`가 시계, 러너 상태, 사전 점검 종료 코드를 받아 자동화별 실행 주기와 타임아웃을 적용하고, 대시보드 스냅샷과 실행 이력을 계산한다.
+- **사전 점검** — [precheck.py](../ticket_pilot/precheck.py)가 투입, 리뷰, 스테이징 차이, 워크트리 정리의 사전 점검을 실행한다. 투입과 리뷰 점검은 마일스톤, 승인, 대시보드 배포, 정기 배포를 순서대로 진행한다.
+- **테스트** — [test_tick.py](../tests/test_tick.py), [test_agent_roles.py](../tests/test_agent_roles.py), [test_docker.py](../tests/test_docker.py)
 
 ## 티켓 동기화와 투입
 
@@ -18,7 +25,7 @@
 ## PR 검사와 리뷰
 
 - **화면·API** — [Reviews.tsx](../web/src/views/Reviews.tsx)는 `GET /api/reviews`를 읽는다. 보드의 승인과 검사 예외 요청은 `POST /api/approve`, `POST /api/check-override`를 사용한다.
-- **처리** — [cli.py](../ticket_pilot/cli.py)의 `cmd_precheck_review()`가 PR을 스캔하고 [checks.py](../ticket_pilot/checks.py)에서 검사 상태를 확인한다. [pipeline.py](../ticket_pilot/pipeline.py)의 `review_queue()`와 `review_save()`가 AI 리뷰 대상과 결과를 관리한다. 리뷰 에이전트는 [automation_review.md](../prompts/automation_review.md)를 따르며, 수정 요청 후 재작업은 `pipeline.rework()`에서 처리한다.
+- **처리** — [precheck.py](../ticket_pilot/precheck.py)의 `review()`가 PR을 스캔하고 [checks.py](../ticket_pilot/checks.py)에서 검사 상태를 확인한다. [pipeline.py](../ticket_pilot/pipeline.py)의 `review_queue()`와 `review_save()`가 AI 리뷰 대상과 결과를 관리한다. 리뷰 에이전트는 [automation_review.md](../prompts/automation_review.md)를 따르며, 수정 요청 후 재작업은 `pipeline.rework()`에서 처리한다.
 - **테스트** — [test_checks.py](../tests/test_checks.py), [test_rework_cap.py](../tests/test_rework_cap.py)
 
 ## 마일스톤과 배포

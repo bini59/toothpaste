@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from unittest import mock
 
 from test_notion import DOCS_DB, MEMBER, OWNER, TEAM_DB, NotionDashboard, uid
-from ticket_pilot import chat, cli, core, migrate, notion, notion_stages, notion_tickets, pipeline, release, track
+from ticket_pilot import chat, cli, core, migrate, notion, notion_stages, notion_tickets, pipeline, precheck, release, track
 
 
 class NotionWrites(NotionDashboard):
@@ -322,7 +322,7 @@ class NotionWrites(NotionDashboard):
                 self.assertTrue(reading.wait(10))
                 self.assertIsNone(notion_stages.start_worker(self.con))
                 self.assertIn("Notion 상태 반영", migrate.busy(self.con))
-                with self.fake_agent() as launch, mock.patch.object(cli, "_release_steps"), \
+                with self.fake_agent() as launch, mock.patch.object(precheck, "_release_steps"), \
                         mock.patch.object(pipeline, "issue_repos", return_value={"app": ("GH", None)}), \
                         mock.patch.object(pipeline, "_open_issues", return_value=[issue]), \
                         mock.patch.object(pipeline, "_gh_issue_json", return_value={"comments": []}), \
