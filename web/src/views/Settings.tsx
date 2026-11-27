@@ -1461,23 +1461,6 @@ function ProjectEditor({ id, c, onReload, onSaved, onDeleted }: {
         <Row label="id" desc={id ? "주소(#projects/<id>)에 쓰여요. 만든 뒤에는 바꿀 수 없어요" : idErr ? <span className="text-danger-700">{idErr}</span> : "주소(#projects/<id>)에 쓰여요"}>
           <Input className={cn(inputCls, "font-mono")} value={pid} disabled={!!id} onChange={(e) => setNewId(e.target.value)} />
         </Row>
-        <Row label="티켓 출처">
-          <Select className={selectCls} value={d.source} onChange={(e) => set((x) => {
-            x.source = e.target.value as ProjectSource;
-            if (x.source !== "asana") x.asana_gid = null;
-            if (x.source !== "notion") delete x.notion;
-          })}>
-            {Object.entries(SOURCE_LABEL).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
-          </Select>
-        </Row>
-        {d.source === "asana" && (
-          <Row label="Asana 프로젝트">
-            <Select className={selectCls} value={d.asana_gid ?? ""} onChange={(e) => set((x) => void (x.asana_gid = e.target.value || null))}>
-              <option value="">고르세요…</option>
-              {Object.entries(c.projects).filter(([g]) => g === d.asana_gid || !usedGids.has(g)).map(([g, n]) => <option key={g} value={g}>{n} ({g})</option>)}
-            </Select>
-          </Row>
-        )}
         {id && (
           <Row group label="프로젝트 삭제" desc="레포와 레포별 설정, 티켓은 그대로예요. 다른 프로젝트에 없는 레포는 미분류로 가요.">
             {delErr && <div className="mb-2"><Errors errors={[delErr]} /></div>}
@@ -1488,10 +1471,6 @@ function ProjectEditor({ id, c, onReload, onSaved, onDeleted }: {
           </Row>
         )}
       </Section>
-      {d.source === "notion" && <Section title="Notion 티켓 설정">
-        <NotionSource projectId={pid} value={d.notion ?? emptyNotion} repos={d.repos.map((r) => r.repo)}
-          workTag={c.config.global.asana_tag} onChange={(v) => set((x) => { x.notion = v; })} />
-      </Section>}
       <Section title="레포" desc="한 레포를 여러 프로젝트에 넣을 수 있어요. GitHub에서 새 레포를 받아 등록하려면 위의 새 레포 등록을 눌러요.">
         <Block>
           {d.repos.length ? (
@@ -1530,6 +1509,30 @@ function ProjectEditor({ id, c, onReload, onSaved, onDeleted }: {
             </Button>
           </div>
         </Row>
+      </Section>
+      <Section title="티켓 설정">
+        <Row label="티켓 출처">
+          <Select className={selectCls} value={d.source} onChange={(e) => set((x) => {
+            x.source = e.target.value as ProjectSource;
+            if (x.source !== "asana") x.asana_gid = null;
+            if (x.source !== "notion") delete x.notion;
+          })}>
+            {Object.entries(SOURCE_LABEL).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+          </Select>
+        </Row>
+        {d.source === "asana" && (
+          <Row label="Asana 프로젝트">
+            <Select className={selectCls} value={d.asana_gid ?? ""} onChange={(e) => set((x) => void (x.asana_gid = e.target.value || null))}>
+              <option value="">고르세요…</option>
+              {Object.entries(c.projects).filter(([g]) => g === d.asana_gid || !usedGids.has(g)).map(([g, n]) => <option key={g} value={g}>{n} ({g})</option>)}
+            </Select>
+          </Row>
+        )}
+        {d.source === "github" && <Block>
+          <p className="text-sm text-text-muted">위에서 연결한 레포의 열린 이슈 중 <Key k="tp" /> 라벨이 붙은 이슈를 가져와요.</p>
+        </Block>}
+        {d.source === "notion" && <NotionSource projectId={pid} value={d.notion ?? emptyNotion} repos={d.repos.map((r) => r.repo)}
+          workTag={c.config.global.asana_tag} onChange={(v) => set((x) => { x.notion = v; })} />}
       </Section>
       {id && (
         <Section title="이력">
