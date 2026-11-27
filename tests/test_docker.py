@@ -3,6 +3,7 @@ host install steps off, and tp run's tick loop. GitHub is faked. Run: python3 -m
 import contextlib
 import io
 import os
+import subprocess
 import threading
 import unittest
 import urllib.error
@@ -10,7 +11,7 @@ from unittest import mock
 
 import test_lan  # module import: its LanTest must not be collected twice
 
-from ticket_pilot import cli, core, lan as L, server as S, sysjobs as SJ, tick
+from ticket_pilot import cli, core, lan as L, server as S, sysjobs as SJ, tick, update
 
 LOCAL = "127.0.0.1"
 
@@ -31,7 +32,11 @@ class DockerAuthTest(unittest.TestCase):
 
     def test_localhost_needs_a_login(self):
         self.assertEqual(self.call("GET", "/api/state", ip=LOCAL)[0], 401)
+        self.assertEqual(self.call("GET", "/api/state?unused=1", ip=LOCAL)[0], 401)
         self.assertEqual(self.call("POST", "/api/view", {"tab": "x"}, ip=LOCAL)[0], 401)
+        self.assertEqual(self.call("GET", "/api/lan/me?unused=1", ip=LOCAL)[0], 404)
+        self.assertEqual(self.call("GET", "/api/lan/login", ip=LOCAL)[0], 404)
+        self.assertEqual(self.call("POST", "/api/lan/me", {}, ip=LOCAL)[0], 404)
         code, me, _ = self.call("GET", "/api/lan/me", ip=LOCAL)
         self.assertEqual((code, me), (200, {"local": False, "login": None, "actor": None, "docker": True, "admin": False,
                                        "public_url": None}))
@@ -77,12 +82,12 @@ class DockerAuthTest(unittest.TestCase):
         sid = self.session("admin1")
         code, out, _ = self.call("POST", "/api/lan/share", {"enabled": True, "org": "x"}, ip=LOCAL, cookie=sid)
         self.assertEqual((code, out["error"]), (400, core.DOCKER_OFF))
-        with mock.patch.object(S.subprocess, "Popen") as popen:
+        with mock.patch.object(subprocess, "Popen") as popen:
             code, out, _ = self.call("POST", "/api/update", {}, ip=LOCAL, cookie=sid)
         popen.assert_not_called()
         self.assertEqual(code, 400)
         self.assertIn("docker_update_manager install", out["error"])
-        with mock.patch.object(S.UP, "current", return_value="v1.0.0"), mock.patch.object(S.UP, "blocked", return_value=None):
+        with mock.patch.object(update, "current", return_value="v1.0.0"), mock.patch.object(update, "blocked", return_value=None):
             info = self.call("GET", "/api/update", ip=LOCAL, cookie=sid)[1]
         self.assertEqual(info["command"], S.DOCKER_UPDATE)
         self.assertEqual(SJ.collect()["jobs"], [])
