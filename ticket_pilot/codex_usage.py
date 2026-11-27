@@ -147,14 +147,14 @@ def collect(timeout=10, command=None):
         selector.close()
         try:
             os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):  # macOS: EPERM once the group is only zombies
             pass
         try:
             process.wait(timeout=1)
         except subprocess.TimeoutExpired:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
+            except (ProcessLookupError, PermissionError):
                 pass
             process.wait()
         try:
