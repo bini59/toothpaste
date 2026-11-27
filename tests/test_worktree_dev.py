@@ -187,8 +187,7 @@ if (args.includes('build')) {
                 foreign.listen()
                 self.port = foreign.getsockname()[1]
                 requested = free_port() if explicit else None
-                with mock.patch.object(dev, "READY_TIMEOUT", 10):
-                    server = dev.start(self.con, self.wt, requested)
+                server = dev.start(self.con, self.wt, requested)
                 self.assertNotEqual(server["port"], self.port)
                 if explicit:
                     self.assertEqual(server["port"], requested)
@@ -215,13 +214,13 @@ if (args.includes('build')) {
         (self.wt / "package.json").write_text(json.dumps({"scripts": {"predev": "touch prepared", "dev": command}}))
         (self.wt / "package-lock.json").touch()
         (self.wt / "serve.py").write_text(
-            "import http.server, os, pathlib, sys\n"
+            "import http.server, os, pathlib, socketserver, sys\n"
             "assert pathlib.Path('prepared').exists()\n"
             "assert sys.argv[1:] == ['--port', os.environ['PORT']]\n"
-            "http.server.HTTPServer(('127.0.0.1', int(sys.argv[2])), http.server.SimpleHTTPRequestHandler)"
+            "socketserver.TCPServer(('127.0.0.1', int(sys.argv[2])), http.server.SimpleHTTPRequestHandler)"
             ".serve_forever()\n")
         self.cmd = "npm run dev"
-        with socket.socket() as foreign, mock.patch.object(dev, "READY_TIMEOUT", 10):
+        with socket.socket() as foreign:
             foreign.bind(("127.0.0.1", self.port))
             foreign.listen()
             server = dev.start(self.con, self.wt)
