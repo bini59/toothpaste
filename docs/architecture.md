@@ -45,6 +45,12 @@
 - **처리** — [metrics_usage.py](../ticket_pilot/metrics_usage.py)가 작업·리뷰 실행을 기록하고 `tp tick`에서 에이전트 로그의 사용량을 수집한다. [metrics.py](../ticket_pilot/metrics.py)의 `report()`가 DB의 티켓, PR, 작업 기록을 기간별로 집계한다.
 - **테스트** — [test_metrics.py](../tests/test_metrics.py)
 
+## 대시보드 탐색과 모니터링
+
+- [App.tsx](../web/src/App.tsx)의 `TABS`가 해시 주소, 검색 항목, 모니터링 목록을 정의한다. [Sidebar.tsx](../web/src/ui/Sidebar.tsx)는 데스크톱 메뉴와 모바일 메뉴에 모니터링 링크를 표시하고, [UsageCard.tsx](../web/src/components/UsageCard.tsx)는 하단에 에이전트 사용량과 한도 초기화 시각을 표시한다.
+- `#monitoring`의 [Monitoring.tsx](../web/src/views/Monitoring.tsx)에서 각 상세 화면의 기존 해시 주소로 이동한다. [useMonitoringData.ts](../web/src/views/useMonitoringData.ts)는 자동화 로그와 리뷰 화면에서 사용하는 `GET /api/events`와 `GET /api/reviews` 응답을 개별적으로 불러온다.
+- `npm run check`는 [monitoring.check.mjs](../web/src/monitoring.check.mjs)의 탐색 검사와 [usage-card.check.mjs](../web/src/components/usage-card.check.mjs)의 한도 초기화 시각 검사를 실행한다.
+
 ## PR에서 코드 지도 갱신
 
 코드 경로가 바뀌면 같은 PR에서 이 지도 파일을 추가하거나 내용을 수정한다. 경로, 호출 관계 또는 담당 범위가 바뀐 부분을 지도에 반영한다. 지도 삭제나 다른 경로로의 이동은 갱신으로 인정하지 않는다. 코드 변경이 없는 PR은 지도 변경 여부와 관계없이 통과한다.
