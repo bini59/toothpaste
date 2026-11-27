@@ -28,21 +28,25 @@ class CreateParser(argparse.ArgumentParser):
         CreateError("invalid_argument", message).exit()
 
 
-def _parent_gid(con, ref, *, for_milestone):
+def _parent_gid(con, ref, source, *, for_milestone):
     """Board keys (including ms: tickets) and native IDs both work before the next sync."""
     rows = con.execute("SELECT gid FROM tickets WHERE gid=? OR key=? COLLATE NOCASE", (ref, ref)).fetchall()
-    if len(rows) > 1:
+    matches = set()
+    for gid, in rows or [(ref,)]:
+        if for_milestone and milestone.is_ms(gid) and ":" in gid[3:]:
+            gid, _ = milestone.parse(gid)
+        if ((source == "asana" and gid.isdigit()) or (source == "github" and gid.startswith("gh:"))
+                or (source == "notion" and gid.startswith("notion:"))):
+            matches.add(gid)
+    if len(matches) > 1:
         raise CreateError("parent_not_found", f"티켓 키가 여러 개 일치해요. 부모 gid를 지정하세요: {ref}")
-    gid = rows[0][0] if rows else ref
-    if for_milestone and milestone.is_ms(gid) and ":" in gid[3:]:
-        gid, _ = milestone.parse(gid)
-    return gid
+    return next(iter(matches), ref)
 
 
 def _asana_create(con, project, args, parent, is_milestone):
     st = core.settings()
     pg = project.get("asana_gid")
-    if not pg or not st.get("asana_enabled"):
+    if not pg or not st.get("asana_enabled", True):
         raise CreateError("source_unsupported", "프로젝트의 Asana 연결을 확인하세요")
     tags, assignee = list(args.tag or []), args.assignee
     if parent:
@@ -81,21 +85,45 @@ def _notion_create(project, args, parent, is_milestone):
     cfg = project.get("notion") or {}
     if not cfg.get("data_source_id") or not cfg.get("connection_id"):
         raise CreateError("source_unsupported", "프로젝트에 Notion 작업 DB를 연결하세요")
+    if args.parent and not cfg.get("parent_property"):
+        raise CreateError("invalid_argument", "프로젝트 설정에서 상위 항목 관계 열을 먼저 골라 주세요")
     if parent:
         try:
             parent = str(uuid.UUID(parent[3:] if parent[:3].upper() == "NT-" else parent.removeprefix("notion:")))
         except ValueError:
             raise CreateError("parent_not_found", f"Notion 부모 티켓을 찾을 수 없어요: {parent}") from None
-    assignee, tags, status = args.assignee, args.tag, None
+    assignee, status = args.assignee, None
     if args.milestone:
-        if not assignee and cfg.get("assignee", "me") != "all":
+        if not assignee and cfg.get("people_property") and cfg.get("assignee", "me") != "all":
             assignee = cfg.get("assignee", "me")
-        if not tags and cfg.get("tag_property"):
-            tags = [cfg.get("tag_option") or core.settings()["asana_tag"]]
         status = cfg.get("status_option") or None
     values = argparse.Namespace(op="create", project=project["id"], title=args.title, body=args.body, assignee=assignee,
-                                tag=tags, status=status, due=None, parent=parent if args.parent else None)
+                                tag=args.tag, status=status, due=None, parent=parent if args.parent else None)
     return notion_write.run(values, milestone=parent if args.milestone else None, milestone_parent=is_milestone)
+
+
+def _github_parent(ref, gh, for_milestone):
+    if match := re.fullmatch(r"gh:([\w.-]+/[\w.-]+)#([1-9]\d*)", ref):
+        parent_repo, number = match.groups()
+    else:
+        prefix, _, number = ref.upper().rpartition("-")
+        repos = core.project_map()["repos"]
+        targets = {repos[r]["github"] for r, (p, _) in pipeline.issue_repos().items()
+                   if p.upper() == prefix and repos.get(r, {}).get("github")}
+        if len(targets) != 1 or not re.fullmatch(r"[1-9]\d*", number):
+            raise CreateError("parent_not_found", f"GitHub 부모 이슈를 특정할 수 없어요. 이슈 gid를 지정하세요: {ref}")
+        parent_repo, = targets
+    if parent_repo.split("/")[0].lower() != gh.split("/")[0].lower():
+        raise CreateError("invalid_argument", "GitHub 하위 이슈는 부모와 같은 소유자의 레포에 만들어야 해요")
+    try:
+        issue = pipeline.gh_api("GET", f"repos/{parent_repo}/issues/{number}")
+    except RuntimeError as e:
+        if "(HTTP 404)" in str(e):
+            raise CreateError("parent_not_found", f"GitHub 부모 이슈를 찾을 수 없어요: {ref}") from e
+        raise
+    if "pull_request" in issue or (for_milestone and not milestone.has_tag([lb["name"] for lb in issue["labels"]])):
+        raise CreateError("parent_not_found", f"요청한 GitHub 부모 이슈를 찾을 수 없어요: {ref}")
+    return issue["id"]
 
 
 def _github_create(con, project, args, parent, is_milestone, actor):
@@ -107,31 +135,17 @@ def _github_create(con, project, args, parent, is_milestone, actor):
     tags = [core.settings()["milestone_tag"]] if is_milestone else [pipeline.ISSUE_LABEL, *(args.tag or [])]
     body = {"title": args.title, "body": args.body or "", "labels": list(dict.fromkeys(tags))}
     if parent:
-        match = re.fullmatch(r"gh:([\w.-]+/[\w.-]+)#([1-9]\d*)", parent)
-        if match:
-            parent_repo, number = match.groups()
-        elif match := re.fullmatch(re.escape(prefix) + r"-([1-9]\d*)", parent, re.I):
-            parent_repo, number = gh, match[1]  # a key returned just before sync
-        else:
-            raise CreateError("parent_not_found", f"GitHub 부모 이슈를 찾을 수 없어요: {parent}")
-        if parent_repo.split("/")[0].lower() != gh.split("/")[0].lower():
-            raise CreateError("invalid_argument", "GitHub 하위 이슈는 부모와 같은 소유자의 레포에 만들어야 해요")
-        try:
-            issue = pipeline.gh_api("GET", f"repos/{parent_repo}/issues/{number}")
-        except RuntimeError as e:
-            if "(HTTP 404)" in str(e):
-                raise CreateError("parent_not_found", f"GitHub 부모 이슈를 찾을 수 없어요: {parent}") from e
-            raise
-        if "pull_request" in issue or (args.milestone and not milestone.has_tag([lb["name"] for lb in issue["labels"]])):
-            raise CreateError("parent_not_found", f"요청한 GitHub 부모 이슈를 찾을 수 없어요: {parent}")
-        body["parent_issue_id"] = issue["id"]  # GitHub sets the sub-issue relationship in the create request
+        body["parent_issue_id"] = _github_parent(parent, gh, args.milestone)
     if args.assignee:
         body["assignees"] = [pipeline.gh_api("GET", "user")["login"]]
     issue = pipeline.gh_api("POST", f"repos/{gh}/issues", body)
     number = issue["number"]
     result = {"key": f"{prefix}-{number}", "gid": f"gh:{gh}#{number}", "url": issue["html_url"]}
-    with con:
-        core.event(con, "ticket_write", f"{actor} · {project['id']} · {result['key']} · create", result["gid"])
+    try:
+        with con:
+            core.event(con, "ticket_write", f"{actor} · {project['id']} · {result['key']} · create", result["gid"])
+    except sqlite3.Error as e:
+        raise CreateError("upstream_error", "이슈는 생성됐어요. 로컬 DB에 이벤트를 기록할 수 없어요", created=result) from e
     # GitHub can silently drop labels or assignees when the caller has insufficient repository permissions.
     if (not {t.lower() for t in tags} <= {lb["name"].lower() for lb in issue["labels"]}
             or not set(body.get("assignees", [])) <= {u["login"] for u in issue.get("assignees", [])}):
@@ -155,7 +169,7 @@ def create(project, args, *, is_milestone=False):
     if source not in ("asana", "notion", "github"):
         raise CreateError("source_unsupported", "이 프로젝트에 티켓 출처를 설정하세요")
     con = core.db()
-    parent = _parent_gid(con, ref, for_milestone=bool(args.milestone)) if ref else None
+    parent = _parent_gid(con, ref, source, for_milestone=bool(args.milestone)) if ref else None
     try:
         if source == "asana":
             return _asana_create(con, project, args, parent, is_milestone)
@@ -170,7 +184,7 @@ def create(project, args, *, is_milestone=False):
         raise CreateError("write_disabled", str(e)) from e
     except SystemExit as e:
         raise CreateError("invalid_argument", str(e)) from e
-    except (OSError, RuntimeError, http.client.HTTPException, subprocess.SubprocessError, sqlite3.Error, KeyError, ValueError) as e:
+    except (OSError, RuntimeError, http.client.HTTPException, subprocess.SubprocessError, sqlite3.Error, KeyError, TypeError, ValueError) as e:
         raise CreateError("upstream_error", str(e)) from e
 
 

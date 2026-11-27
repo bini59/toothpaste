@@ -42,7 +42,7 @@ def _option(column, value, *, new_tag=False, by_id=False):
     if new_tag and value.strip():
         return {"name": value}
     names = ", ".join(o["name"] for o in column["options"])
-    raise notion.NotionError(f"{column['name']} 열에 해당 선택지가 없어요. 현재 선택지: {names}")
+    raise InvalidFields(f"{column['name']} 열에 해당 선택지가 없어요. 현재 선택지: {names}")
 
 
 class ProjectPages:
@@ -140,9 +140,17 @@ class ProjectPages:
         if args.status is not None:
             col = self.column("status")
             props[col["id"]] = {col["type"]: _option(col, args.status)}
-        if args.tag:
+        if args.tag or (milestone and self.cfg.get("tag_property")):
             col = self.column("tag")
-            tags = [_option(col, tag, new_tag=True) for tag in dict.fromkeys(args.tag)]
+            tags = []
+            if milestone:
+                if option := self.cfg.get("tag_option"):
+                    tags.append(_option(col, option, by_id=True))
+            names = [core.settings()["asana_tag"]] if milestone else []
+            for name in [*names, *(args.tag or [])]:
+                choice = _option(col, name, new_tag=True)
+                if choice not in tags:
+                    tags.append(choice)
             if col["type"] == "select" and len(tags) != 1:
                 raise InvalidFields("단일 선택 열에는 태그를 하나만 지정하세요")
             value = {col["type"]: tags if col["type"] == "multi_select" else tags[0]}

@@ -159,7 +159,7 @@ export const MS_FINISHED = ["milestone", "done", "closed", "skipped", "staged", 
 export const busySubtasks = (m: Milestone, I: Index) =>
   m.subtasks.filter((t) => {
     const run = I.runBy[t.gid]?.at(-1);
-    const tracked = (t.has_tag && t.assigned) || (t.gid.startsWith("notion:") && run && run.state !== "abandoned");
+    const tracked = (t.has_tag && t.assigned) || ((t.gid.startsWith("notion:") || t.gid.startsWith("gh:")) && run && run.state !== "abandoned");
     return tracked && !t.completed && !MS_FINISHED.includes(t.stage);
   });
 export interface Milestone {
@@ -187,7 +187,7 @@ export function milestones(s: State): Milestone[] {
       name: parent?.name ?? linked?.parent_name ?? kids[0]?.parent_name ?? gid,
       url: parent?.url ?? linked?.parent_url ?? kids.find((k) => isMs(k.gid))?.url ?? null,
       project: parent?.project_name ?? kids[0]?.project_name ?? null,
-      subtasks: kids.filter((k) => !isMs(k.gid)),
+      subtasks: kids.filter((k) => !isMs(k.gid) && (!k.gid.startsWith("gh:") || k.in_milestone)),
       ms: kids.filter((k) => isMs(k.gid)).sort((a, b) => a.gid.localeCompare(b.gid)),
     };
   });

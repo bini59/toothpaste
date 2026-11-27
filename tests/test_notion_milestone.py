@@ -74,6 +74,7 @@ class NotionMilestones(NotionDashboard):
 
     def test_project_commands_create_related_pages_then_sync(self):
         self.cfg["parent_property"] = "parent-rel"
+        self.cfg["tag_option"] = "docs-id"
         self.fixture.props["부모"] = {"id": "parent-rel", "type": "relation", "relation": {"data_source_id": TEAM_DB}}
         self.save_project()
         task = command("ticket", "create", "--project", "example", "--title", "Task", "--body", "Notes",
@@ -98,6 +99,19 @@ class NotionMilestones(NotionDashboard):
             self.assertEqual((row["name"], row["stage"], row["parent_gid"], row["in_milestone"]),
                              ("ab"[i], "queued", result["gid"], 1))
             self.assertEqual(milestone.base_for(row, "app"), "milestone/" + parent["id"])
+        another = command("ticket", "create", "--project", "example", "--title", "c", "--milestone", result["gid"], "--tag", "버그")
+        pipeline.sync()
+        row = pipeline.find_ticket(self.con, another["key"])
+        self.assertEqual((row["stage"], row["in_milestone"], set(json.loads(row["tags"]))), ("queued", 1, {"tp", "문서", "버그"}))
+
+    def test_create_subtask_without_a_people_column(self):
+        del self.cfg["people_property"]
+        self.cfg["assignee"] = "all"
+        del self.fixture.props["개발 담당"]
+        self.save_project()
+        result = command("milestone", "create", "--project", "example", "--title", "Release", "--subtask", "a")
+        self.assertEqual(len(result["subtasks"]), 1)
+        self.assertEqual(self.fixture.pages[TEAM_DB][-1]["properties"]["출시"], relation(result["gid"].removeprefix("notion:")))
 
     def test_create_same_db_milestone_sets_its_discriminator(self):
         self.use_task_db("multi_select")

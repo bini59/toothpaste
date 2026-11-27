@@ -61,7 +61,8 @@ function RepoBadges({ m }: { m: Milestone }) {
  * (same test as 전체 티켓) */
 export function List({ s, I, project }: { s: State; I?: Index; project?: Project }) {
   const list = milestones(s)
-    .filter((m) => !project || !I || [...m.ms, ...m.subtasks].some((t) => inProject(s, I, t, project)))
+    .filter((m) => !project || !I || [...m.ms, ...m.subtasks].some((t) => inProject(s, I, t, project))
+      || s.tickets.some((t) => t.gid === m.gid && inProject(s, I, t, project)))
     .sort((a, b) => Number(finished(a)) - Number(finished(b)) || a.name.localeCompare(b.name));
   if (!list.length)
     return (

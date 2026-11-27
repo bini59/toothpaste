@@ -93,7 +93,7 @@ def _state(con) -> dict:
                       review_override,review_override_sha,done_at,asana_modified_at
                       FROM tickets WHERE (completed=0 AND assigned=1) OR gid IN (SELECT ticket_gid FROM runs)
                       OR gid IN ({','.join('?' for _ in staged_gids)})""", *staged_gids)
-    landed = {r["ticket_gid"]: r for r in con.execute(MS.LANDED_NOTION)}
+    landed = MS.landed_parents(con)
     for t in tickets:
         if t["stage"] == "needs_staging" and (repo := P.chosen_repo(con, t)):
             t["staging_config_error"] = MS.staging_config_error(t, repo["repo"])
@@ -102,7 +102,7 @@ def _state(con) -> dict:
                 t["milestone_kind_blocked"] = notion_tickets.uses_milestone_kind(con, t)
             else:
                 t["staging_config_error"] = P.resume_staging_error(con, t)
-        if (ms := landed.get(t["gid"])) and t["parent_gid"] != ms["parent_gid"]:
+        if (ms := landed.get(t["gid"])) and (t["parent_gid"] != ms["parent_gid"] or not t["in_milestone"]):
             t.update(parent_gid=ms["parent_gid"], parent_name=ms["parent_name"], parent_url=ms["url"], in_milestone=1)
         if t["open_deps"]:  # deps merged into the feature base no longer block (TP-20)
             deps = P.deps_status(con, t)

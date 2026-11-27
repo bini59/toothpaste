@@ -245,15 +245,16 @@ def _open_issues(gh: str) -> list:
     # Finish every page before marking missing issues closed.
     owner, name = gh.split("/")
     query = """query($owner:String!, $name:String!, $endCursor:String) {
-      repository(owner:$owner, name:$name) { issues(states:OPEN, first:100, after:$endCursor) {
+      repository(owner:$owner, name:$name) { issues(states:OPEN, first:100, after:$endCursor,
+                                                    orderBy:{field:CREATED_AT, direction:DESC}) {
         pageInfo { hasNextPage endCursor }
         nodes { number title body url updatedAt labels(first:100) { nodes { name } }
                 parent { number title url repository { nameWithOwner } labels(first:100) { nodes { name } } } }
       } }
     }"""
-    pages = _gh_issue_json(["api", "graphql", "--paginate", "--slurp", "-f", f"owner={owner}", "-f", f"name={name}",
-                            "-f", f"query={query}"])
-    issues = [issue for page in pages for issue in page["data"]["repository"]["issues"]["nodes"]]
+    data = run(["gh", "api", "graphql", "--paginate", "-f", f"owner={owner}", "-f", f"name={name}", "-f", f"query={query}",
+                "--jq", ".data.repository.issues.nodes[] | @json"], timeout=120)
+    issues = [json.loads(line) for line in data.stdout.splitlines()]
     for issue in issues:
         issue["labels"] = issue["labels"]["nodes"]
         if parent := issue.get("parent"):
@@ -311,6 +312,9 @@ def sync_issues(con, ts: str, new_tagged: list) -> None:
             if parent:
                 owner_repo = parent["repository"]["nameWithOwner"]
                 parent_gid = f"gh:{repo_names.get(owner_repo.lower(), owner_repo)}#{parent['number']}"
+            in_ms = M.has_tag([lb["name"] for lb in parent.get("labels") or []])
+            if in_ms:
+                M.refresh_parent(con, parent_gid, parent["title"], parent["url"])
             if not is_parent and not con.execute(
                     "SELECT 1 FROM tickets WHERE gid=? AND completed=0 AND assigned=1 AND has_tag=1", (gid,)).fetchone():
                 new_tagged.append(key)
@@ -324,7 +328,7 @@ def sync_issues(con, ts: str, new_tagged: list) -> None:
                 parent_url=excluded.parent_url,in_milestone=excluded.in_milestone
             """, (gid, key, i["title"], i["url"], f"GitHub {gh}", i.get("body") or "",
                   json.dumps(labels), int(not is_parent), i.get("updatedAt"), ts, ts, repo, parent_gid,
-                  parent.get("title"), parent.get("url"), int(M.has_tag([lb["name"] for lb in parent.get("labels") or []]))))
+                  parent.get("title"), parent.get("url"), int(in_ms)))
         for row in con.execute("SELECT gid FROM tickets WHERE completed=0 AND gid GLOB ?", (f"gh:{gh}#*",)).fetchall():
             if row["gid"] not in seen:
                 col = "assigned=0" if row["gid"] in still_open else "completed=1"
@@ -437,6 +441,9 @@ def sync(log=print) -> dict:
 # ---------------------------------------------------------------- dispatch
 
 def slug(s: str) -> str:
+    if s.startswith("ms:gh:"):
+        _, repo = M.parse(s)
+        return f"ms-{slug(repo)[:14]}-{hashlib.sha256(s.encode()).hexdigest()[:16]}"
     if match := re.fullmatch(r"NT-[0-9a-f]{32}-([a-zA-Z0-9_.-]+)", s):
         # Notion milestone keys share a 35-character parent prefix. Keep repo briefs distinct at the 40-char limit.
         return f"ms-{match[1][:14].lower()}-{hashlib.sha256(s.encode()).hexdigest()[:16]}"
@@ -450,7 +457,7 @@ def _agent_brief(template, ticket):
     if not pid and "{{PROJECT_ID}}" in template:
         repo = ticket["repo_override"] if "repo_override" in ticket.keys() else None
         projects = [p["id"] for p in project_map()["projects"] if (gid and p.get("asana_gid") == gid)
-                    or (repo and p["source"] == "github" and any(r["repo"] == repo for r in p.get("repos") or []))]
+                    or (not gid and repo and p["source"] == "github" and any(r["repo"] == repo for r in p.get("repos") or []))]
         pid = projects[0] if len(projects) == 1 else None
     return (template.replace("{{PROJECT_ID}}", pid or "PROJECT_ID").replace("{{ASANA}}", R.asana_rules())
             .replace("{{TP}}", TP_BIN).replace("{{OWNER}}", settings().get("owner_name", "the user")))

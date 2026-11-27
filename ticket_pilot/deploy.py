@@ -262,7 +262,7 @@ def _save(con, rel_id, status=None, step=None, **cols):
 
 
 def _check_milestone_deploy(con, rel, *, source_base=None):
-    if rel["mode"] not in ("direct", "preview") or not (rel["ticket_gid"] or "").startswith(("notion:", "ms:notion:")):
+    if rel["mode"] not in ("direct", "preview") or not (rel["ticket_gid"] or "").startswith(("notion:", "ms:notion:", "gh:", "ms:gh:")):
         return
     # A running direct deploy may be merging a cherry-picked release PR. Check the original ticket PR.
     source, = json.loads(rel["prs_json"])

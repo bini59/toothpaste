@@ -2,6 +2,7 @@
 import io
 import json
 import os
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -65,6 +66,13 @@ class TicketWriteTest(unittest.TestCase):
             self.assertEqual(self.create("ticket", "--milestone", "123", status=4)["code"], "milestone_unsupported")
         self.project("none")
         self.assertEqual(self.create(status=4)["code"], "source_unsupported")
+        rule = self.doc["settings"]["deploy"]["repos"]["app"]
+        rule["modes"] = ["direct"]  # a feature base alone cannot merge an approved milestone PR
+        for source, cfg in (("asana", {"asana_gid": "77"}), ("github", {})):
+            self.project(source, **cfg)
+            self.assertEqual(self.create("milestone", status=4)["code"], "milestone_unsupported")
+            self.assertEqual(self.create("ticket", "--milestone", "123", status=4)["code"], "milestone_unsupported")
+        rule["modes"] = ["staging"]
         self.project("github")
         for args in (("--parent", "1", "--milestone", "1"), ("--tag", " "), ("--assignee", "nobody"),
                      ("--unknown",), ("--parent", "")):
@@ -186,6 +194,23 @@ class TicketWriteTest(unittest.TestCase):
         self.assertEqual(result["subtasks"], [{"key": "APP-14", "url": "url/14"}])
         self.assertEqual([(e["title"], e["code"]) for e in result["failed"]],
                          [("unavailable", "upstream_error"), ("", "invalid_argument")])
+
+    def test_cross_repo_key_before_sync(self):
+        self.doc["settings"]["github_issues"] = {"other": "tools"}
+        self.project("github")
+        self.gh.side_effect = [{"id": 77, "labels": [{"name": "Ship"}]},
+                               {"number": 13, "html_url": "u13", "labels": [{"name": "tp"}]}]
+        self.assertEqual(self.create("ticket", "--milestone", "tools-12")["key"], "APP-13")
+        self.assertEqual(self.gh.call_args_list[0], mock.call("GET", "repos/example/tools/issues/12"))
+        self.assertEqual(self.gh.call_args.args[2]["parent_issue_id"], 77)
+
+    def test_github_event_failure_reports_the_created_issue(self):
+        self.project("github")
+        self.gh.return_value = {"number": 12, "html_url": "url/12", "labels": [{"name": "tp"}]}
+        with mock.patch.object(core, "event", side_effect=sqlite3.OperationalError("disk full")):
+            result = self.create(status=5)
+        self.assertEqual(result["code"], "upstream_error")
+        self.assertEqual(result["created"], {"key": "APP-12", "gid": "gh:example/app#12", "url": "url/12"})
 
     def test_bin_tp_asana_fixture_and_unsupported_project(self):
         self.project("asana", asana_gid="77")
