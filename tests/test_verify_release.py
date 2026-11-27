@@ -35,7 +35,7 @@ class ReleaseFixture(unittest.TestCase):
         self.comparison = {"status": "ahead"}
         self.refs = {"main": {"object": {"sha": BASE}}, "staging": {"object": {"sha": HEAD}}}
         self.responses = {
-            "pulls/54": dict(self.pr, state="open", merge_commit_sha=TESTED, draft=False, mergeable=True),
+            "pulls/54": dict(self.pr, state="open", merged=False, merge_commit_sha=TESTED, draft=False, mergeable=True),
             f"actions/workflows/test.yml/runs?event=pull_request&branch=staging&head_sha={HEAD}&per_page=100":
                 [{"workflow_runs": self.runs}],
             "actions/runs/701/jobs?filter=all&per_page=100": [{"jobs": self.jobs}],
@@ -196,9 +196,9 @@ class HostMergeTest(ReleaseFixture):
         with self.assertRaisesRegex(AwaitingTests, "current base and head"):
             merge_deployment_pr(REPO, 54, base="main", method="merge")
 
-    def dashboard_merge(self):
+    def dashboard_merge(self, **pr_fields):
         info = {"state": "OPEN", "baseRefName": "main", "number": 54, "mergeable": "MERGEABLE",
-                "isDraft": False, "statusCheckRollup": []}
+                "isDraft": False, "statusCheckRollup": [], **pr_fields}
         rel = {"id": 1, "github": REPO, "repo": "toothpaste", "reason": None, "ticket_gid": None}
         state = {"pr": PR_URL, "into": "main", "method": "merge", "since": "2099-01-01T00:00:00+00:00"}
         save = Mock()
@@ -223,11 +223,13 @@ class HostMergeTest(ReleaseFixture):
             {"sha": HEAD}, {"commits": [{"sha": HEAD}]}, {"commits": [{"oid": HEAD}]},
             [{"url": PR_URL}],
         ])
-        with patch.multiple(release, gh_json=github, repo_rules=Mock(return_value=rules), _gh=Mock(), event=Mock()):
+        finish = Mock()
+        with patch.multiple(release, gh_json=github, repo_rules=Mock(return_value=rules), _gh=Mock(), event=Mock(),
+                            _finish=finish):
             result = release._start(con, rel, Mock())
             github.assert_any_call(["api", f"repos/{REPO}/compare/main...{HEAD}"])
             release._gh.assert_not_called()
-        return result, con
+        return result, con, finish
 
     def test_dashboard_waits_if_github_has_not_listed_test_jobs(self):
         self.runs.clear()
@@ -238,6 +240,51 @@ class HostMergeTest(ReleaseFixture):
         with patch("ticket_pilot.core.run") as mutation:
             self.assertEqual(self.train_merge()[0], "waiting for staging recheck")
         mutation.assert_not_called()
+
+    def test_host_paths_stop_if_pr_closes_or_is_retargeted_after_tests(self):
+        original_pr = self.responses["pulls/54"]
+        for changes, message in (
+            ({"state": "closed"}, "no longer open"),
+            ({"base": dict(original_pr["base"], ref="other")}, "no longer the same-repository"),
+        ):
+            def change_pr_after_tests(endpoint, **kwargs):
+                response = self.mock_api(endpoint, **kwargs)
+                if endpoint.endswith(f"/git/commits/{TESTED}"):
+                    self.responses["pulls/54"] = dict(original_pr, **changes)
+                return response
+
+            with self.subTest(changes=changes), patch("ticket_pilot.release_checks.gh_api", side_effect=change_pr_after_tests):
+                self.responses["pulls/54"] = original_pr
+                with self.assertRaisesRegex(ValueError, message):
+                    self.dashboard_merge()
+                self.responses["pulls/54"] = original_pr
+                result, con, finish = self.train_merge()
+                self.assertEqual(result, "failed")
+                self.assertIn(message, finish.call_args.args[-1])
+                self.assertFalse(any("status='deploying'" in call.args[0] for call in con.execute.call_args_list))
+                self.assertEqual(self.refs["main"]["object"]["sha"], BASE)
+                self.assertEqual(self.refs["staging"]["object"]["sha"], HEAD)
+
+    def test_dashboard_rejects_pr_already_merged_into_another_branch(self):
+        with self.assertRaisesRegex(RuntimeError, "base가 other"):
+            self.dashboard_merge(state="MERGED", baseRefName="other", mergeCommit={"oid": MERGED})
+
+    def test_host_only_recovers_a_failed_response_for_a_confirmed_pr_merge(self):
+        original_pr = self.responses["pulls/54"]
+        self.refs["main"]["object"]["sha"] = TESTED
+        for changes, confirmed in (({"state": "closed"}, False),
+                                   ({"state": "closed", "merged": True}, True)):
+            def lose_response(command, **kwargs):
+                self.responses["pulls/54"] = dict(original_pr, **changes)
+                return CompletedProcess(command, 1, "", "gh: connection lost")
+
+            with self.subTest(changes=changes), patch("ticket_pilot.core.run", side_effect=lose_response):
+                self.responses["pulls/54"] = original_pr
+                if confirmed:
+                    self.assertEqual(merge_deployment_pr(REPO, 54, base="main", method="merge"), TESTED)
+                else:
+                    with self.assertRaisesRegex(ValueError, "not confirmed merged"):
+                        merge_deployment_pr(REPO, 54, base="main", method="merge")
 
     def test_host_paths_wait_if_main_advances_after_validation(self):
         def advance_main(*args, **kwargs):
@@ -270,6 +317,6 @@ class HostMergeTest(ReleaseFixture):
             self.assertEqual(result, "deploying")
             self.assertEqual(save.call_args.kwargs["merge_sha"], TESTED)
             self.refs["main"]["object"]["sha"] = BASE
-            result, con = self.train_merge()
+            result, con, _ = self.train_merge()
             self.assertEqual(result, "deploying")
             self.assertEqual(con.execute.call_args.args[1][:2], (PR_URL, TESTED))

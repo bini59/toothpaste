@@ -412,13 +412,13 @@ def _merge(con, rel, rr, st, log) -> str:
     t0 = time.time()
     while True:
         info = gh_json(["pr", "view", url, "--json", fields])
+        if info["baseRefName"] != into:
+            raise RuntimeError(f"PR #{info['number']} base가 {info['baseRefName']}로 바뀌었어요 ({into}여야 해요)")
         if info["state"] == "MERGED":
             sha = info["mergeCommit"]["oid"]
             break
         if info["state"] == "CLOSED":
             raise RuntimeError(f"PR #{info['number']}이 닫혔어요")
-        if info["baseRefName"] != into:
-            raise RuntimeError(f"PR #{info['number']} base가 {info['baseRefName']}로 바뀌었어요 ({into}여야 해요)")
         _ready_for_merge(con, rel, url, info)
         if info["mergeable"] == "CONFLICTING":
             raise RuntimeError(f"PR #{info['number']}이 {into}와 충돌해요")

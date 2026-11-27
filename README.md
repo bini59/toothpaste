@@ -486,8 +486,10 @@ A version is a git tag `vX.Y.Z` with a GitHub Release (`web/package.json`'s `ver
 opens, reopens, receives a new commit, or is retargeted to `main`. Title and description edits leave the test run alone.
 The lightweight architecture map check runs on all PRs, including milestone subtasks.
 
-The dashboard and release train wait for a passing result and use one GitHub ref transaction to confirm both branch tips
-and land the tested merge commit. If either branch advances before that transaction, the host waits and checks again.
+The dashboard and release train wait for a passing result, then check again that the PR is open and still targets `main`.
+If that check passes, one GitHub ref transaction confirms both branch tips and lands the tested merge commit.
+If either branch advances before that transaction, the host waits and checks again. A PR edit between the final check
+and the ref transaction can still race with the transaction.
 When GitHub marks the PR merged,
 `.github/workflows/release.yml` verifies that the latest `test` run for that PR's final head passed before the merge and
 that the tested file tree matches the merged one. It uses the actual `main` merge commit

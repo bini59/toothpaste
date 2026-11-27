@@ -113,8 +113,19 @@ def merge_deployment_pr(repository, number, *, base, method, approved_head=None)
     if [parent["sha"] for parent in tested["parents"]] != [base_sha, head_sha]:
         raise AwaitingTests(f"PR #{number} is waiting for a test of its current base and head.")
 
+    current = api_get(f"{api}/pulls/{number}")
+    if current["state"] != "open":
+        raise ValueError(f"PR #{number} is no longer open.")
+    if not is_deployment_pr(current, repository):
+        raise ValueError(f"PR #{number} is no longer the same-repository staging -> main PR.")
+    if current["head"]["sha"] != head_sha:
+        raise StagingAdvanced("staging advanced; rechecking the deployment PR")
+    if (current["draft"] or current["mergeable"] is not True
+            or current["base"]["sha"] != base_sha or current["merge_commit_sha"] != tested_sha):
+        raise AwaitingTests(f"PR #{number} is waiting for a mergeable, tested candidate.")
+
     # The PR merge API only pins the head. Require both branch tips in a single
-    # fast-forward transaction. GitHub marks the PR merged when its head lands.
+    # fast-forward transaction. updateRefs cannot enforce the PR state or target.
     ref_updates = [
         {"name": "refs/heads/staging", "beforeOid": head_sha, "afterOid": head_sha, "force": False},
         {"name": "refs/heads/main", "beforeOid": base_sha, "afterOid": tested_sha, "force": False},
@@ -136,7 +147,11 @@ def merge_deployment_pr(repository, number, *, base, method, approved_head=None)
     # distinguish contention, a lost response after success, and other failures.
     live_base = api_get(f"{api}/git/ref/heads/main")["object"]["sha"]
     if live_base == tested_sha:
-        return tested_sha
+        current = api_get(f"{api}/pulls/{number}")
+        if (is_deployment_pr(current, repository) and current["merged"] is True
+                and current["merge_commit_sha"] == tested_sha):
+            return tested_sha
+        raise ValueError(f"PR #{number} is not confirmed merged into main at {tested_sha}.")
     if live_base != base_sha:
         raise AwaitingTests(f"PR #{number}: main advanced before the merge. Waiting for new tests.")
     if api_get(f"{api}/git/ref/heads/staging")["object"]["sha"] != head_sha:
