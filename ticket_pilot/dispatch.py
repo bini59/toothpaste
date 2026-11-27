@@ -1,6 +1,7 @@
 """Select queued work and start or resume its agent."""
 from __future__ import annotations
 
+import os
 from http.client import HTTPException
 from itertools import count
 from pathlib import Path
@@ -144,9 +145,7 @@ def _worktree_for(con, t, repo, name, base, existing):
             if pending["ticket_gid"] == t["gid"] and pending["base"] == base:
                 return n, wt, pending["checkout_id"]
     clash = matches.get(name)
-    if not clash:
-        return name, None, None
-    if not reservations[name]:
+    if clash and not reservations[name]:
         return name, clash, None  # adopt the existing worktree as usual
     if (pending := owned.get(name)) and pending["ticket_gid"] != t["gid"]:
         owner = con.execute("SELECT * FROM tickets WHERE gid=?", (pending["ticket_gid"],)).fetchone()
@@ -154,9 +153,17 @@ def _worktree_for(con, t, repo, name, base, existing):
             owner_base = M.base_for(owner, repo["repo"]) or R.worktree_base(repo["repo"])
             if pending["base"] == owner_base:
                 raise RuntimeError("다른 작업이 이 워크트리에서 시작을 재시도할 예정이에요")
-    # Keep the previous checkout and its local work. A later retry can reuse the new reservation.
-    replacement = next(n for i in count(1) if (n := f"{retry_prefix}{i}") not in matches)
-    return replacement, None, None
+    # A local branch can outlive its worktree. Also skip directories in the ref namespace (e.g. tp/a/topic blocks tp/a).
+    prefix = R.branch_prefix()
+    occupied = set(matches)
+    occupied.update(branch.removeprefix(prefix).partition("/")[0] for branch in R.local_branches(repo["path"])
+                    if branch.startswith(prefix))
+    parent = R.root() / repo["repo"]
+    candidate = name
+    for i in count(1):
+        if candidate not in occupied and not os.path.lexists(parent / candidate):
+            return candidate, None, None
+        candidate = f"{retry_prefix}{i}"
 
 
 def _dispatch(con, dry_run, log, only):

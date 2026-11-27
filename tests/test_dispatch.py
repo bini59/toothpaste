@@ -9,7 +9,7 @@ from unittest import mock
 from ticket_pilot import briefs, cleanup, core, dispatch as D, milestone, pipeline as P, review, runner
 
 
-class DispatchTest(unittest.TestCase):
+class DispatchFixture(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.enterContext(mock.patch.object(core, "DB_PATH", self.root / "tp.db"))
@@ -18,9 +18,10 @@ class DispatchTest(unittest.TestCase):
         self.con = core.db()
         self.addCleanup(self.con.close)
         self.con.execute("INSERT INTO repos(name, path, github) VALUES ('app', ?, 'owner/app')", (str(self.root),))
-        core.write_config(self.con, {"settings": {"max_active_runs": 1, "deploy": {"repos": {
+        settings = {"max_active_runs": 1, "worktree_root": str(self.root / "worktrees"), "deploy": {"repos": {
             "app": {"train": True, "modes": ["staging"], "staging": {"branch": "dev"}, "prod": {"branch": "main"}},
-        }}}, "project_map": {}})
+        }}}
+        core.write_config(self.con, {"settings": settings, "project_map": {}})
         (self.root / "prompts").symlink_to(core.ROOT / "prompts")
         self.enterContext(mock.patch.object(D, "ROOT", self.root))
         self.enterContext(mock.patch.object(review, "ROOT", self.root))
@@ -28,10 +29,28 @@ class DispatchTest(unittest.TestCase):
         self.enterContext(mock.patch.object(D, "asana_comments", return_value=[]))
         self.enterContext(mock.patch.object(D, "gh_json", return_value={"comments": []}))
         self.enterContext(mock.patch.object(P, "prepare_worktree", return_value=(None, "")))
+        self.launch = self.enterContext(mock.patch.object(runner, "launch", return_value="fixture"))
+
+    def ticket(self, key, *, gid=None, deps=(), parent=None, due=None):
+        deps = [{"gid": d, "name": d, "completed": False} for d in deps]
+        self.con.execute("""
+            INSERT INTO tickets(gid,key,name,repo_override,assigned,has_tag,open_deps,deps_json,parent_gid,in_milestone,due_on)
+            VALUES(?,?,?,'app',1,1,?,?,?,?,?)
+        """, (gid or key, key, key, len(deps), json.dumps(deps), parent, bool(parent), due))
+        P.restage(self.con)
+        self.con.commit()
+
+    def run_dispatch(self, **kwargs):
+        return P.dispatch(log=lambda *_: None, **kwargs)
+
+
+class DispatchTest(DispatchFixture):
+    def setUp(self):
+        super().setUp()
         self.existing = []
         self.enterContext(mock.patch.object(runner, "worktrees", side_effect=lambda _: self.existing.copy()))
+        self.enterContext(mock.patch.object(runner, "local_branches", return_value=[]))
         self.create = self.enterContext(mock.patch.object(runner, "create", side_effect=self.make_worktree))
-        self.launch = self.enterContext(mock.patch.object(runner, "launch", return_value="fixture"))
         self.enterContext(mock.patch.object(runner, "mark_checkout", side_effect=lambda path: self.checkout_at(path)["checkout_id"]))
         self.enterContext(mock.patch.object(runner, "owns_checkout", side_effect=self.owns_checkout))
 
@@ -48,18 +67,6 @@ class DispatchTest(unittest.TestCase):
         worktree = {"repo": repo, "path": str(self.root / name), "branch": f"tp/{name}", "checkout_id": name}
         self.existing.append(worktree)
         return worktree
-
-    def ticket(self, key, *, gid=None, deps=(), parent=None, due=None):
-        deps = [{"gid": d, "name": d, "completed": False} for d in deps]
-        self.con.execute("""
-            INSERT INTO tickets(gid,key,name,repo_override,assigned,has_tag,open_deps,deps_json,parent_gid,in_milestone,due_on)
-            VALUES(?,?,?,'app',1,1,?,?,?,?,?)
-        """, (gid or key, key, key, len(deps), json.dumps(deps), parent, bool(parent), due))
-        P.restage(self.con)
-        self.con.commit()
-
-    def run_dispatch(self, **kwargs):
-        return P.dispatch(log=lambda *_: None, **kwargs)
 
     def test_slots_dependencies_and_dry_run(self):
         self.ticket("A", due="2026-01-01")
@@ -350,6 +357,58 @@ class DispatchTest(unittest.TestCase):
         self.assertEqual(briefs.find_brief(self.root, "first", "A-B", url), legacy)
         self.assertIsNone(briefs.find_brief(self.root, "second", "A B", url))
         self.assertIsNone(briefs.find_brief(self.root, "second", "A-B", "https://example.com/ticket/2"))
+
+
+class DispatchGitTest(DispatchFixture):
+    def test_dispatch_uses_a_free_branch_after_partial_cleanup(self):
+        origin, repo = self.root / "origin", self.root / "repo"
+        origin.mkdir()
+        repo.mkdir()
+
+        def git(*args, cwd=repo):
+            return subprocess.run(["git", "-C", cwd, *args], check=True, capture_output=True, text=True).stdout.strip()
+
+        def commit(message, cwd):
+            git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+                "commit", "-qm", message, "--allow-empty", cwd=cwd)
+
+        git("init", "-qb", "dev", cwd=origin)
+        commit("base", origin)
+        git("clone", "-q", str(origin), ".")
+        self.con.execute("UPDATE repos SET path=? WHERE name='app'", (str(repo),))
+        config = core.read_config(self.con)
+        config["settings"]["branch_prefix"] = "work/"
+        core.write_config(self.con, config)
+
+        self.ticket("A-B")
+        self.launch.side_effect = [OSError("start failed"), "fixture"]
+        self.assertEqual(self.run_dispatch(only="A-B"), [])
+        path = self.launch.call_args.args[0]
+        commit("preserved local work", path)
+        leftover_head = git("rev-parse", "refs/heads/work/a-b")
+        reserved = f"dispatch_pending:{path}"
+        self.assertIsNotNone(core.meta_get(self.con, reserved))
+        P.set_skip("A-B", True)
+        with mock.patch.object(cleanup, "_ps_entries", return_value={}), \
+                mock.patch.object(cleanup, "_listening_in", return_value=[]), \
+                mock.patch.object(cleanup, "docker_prune"):
+            with mock.patch.object(cleanup, "_drop_branch", side_effect=OSError("branch deletion failed")):
+                cleanup.cleanup_scan(log=lambda *_: None)
+            self.assertFalse(Path(path).exists())
+            self.assertIsNotNone(core.meta_get(self.con, reserved))
+            cleanup.cleanup_scan(log=lambda *_: None)
+        self.assertIsNone(core.meta_get(self.con, reserved))
+
+        git("branch", "work/a-b--retry-1")
+        self.ticket("A B")
+        self.assertEqual(self.run_dispatch(only="A B"), ["A B"])
+        run = P.latest_run(self.con, "A B")
+        self.assertEqual(run["worktree_name"], "a-b--retry-2")
+        self.assertEqual(run["branch"], "work/a-b--retry-2")
+        self.assertEqual(git("symbolic-ref", "--short", "HEAD", cwd=run["worktree_path"]), run["branch"])
+        self.assertEqual(git("rev-parse", "refs/heads/work/a-b--retry-2"), git("rev-parse", "origin/dev"))
+        self.assertEqual(git("rev-parse", "refs/heads/work/a-b"), leftover_head)
+        self.assertEqual(git("rev-parse", "refs/heads/work/a-b--retry-1"), git("rev-parse", "origin/dev"))
 
 
 class CheckoutIdentityTest(unittest.TestCase):

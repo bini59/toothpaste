@@ -159,7 +159,9 @@ class NotionWrites(NotionDashboard):
     def fake_agent(self):
         (self.root / "prompts").symlink_to(core.ROOT / "prompts", target_is_directory=True)
         with mock.patch.object(dispatch, "ROOT", self.root), mock.patch.object(dispatch, "github_token", return_value="fixture"), \
-                mock.patch.object(pipeline.R, "worktrees", return_value=[]), mock.patch.object(pipeline.R, "create", return_value={
+                mock.patch.object(pipeline.R, "worktrees", return_value=[]), \
+                mock.patch.object(pipeline.R, "local_branches", return_value=[]), \
+                mock.patch.object(pipeline.R, "create", return_value={
                     "path": str(self.root / "worktree"), "branch": "tp/example"}), \
                 mock.patch.object(pipeline.R, "mark_checkout", return_value="fixture"), \
                 mock.patch.object(pipeline, "prepare_worktree", return_value=(None, None)), \
