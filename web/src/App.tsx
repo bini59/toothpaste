@@ -355,14 +355,14 @@ export default function App({ me }: { me: LanMe }) {
               {/* above the log: the log ends with the automations table, which loads late and would push this down (TP-174) */}
               <section className="mb-8">
                 <h2 className="mb-3 text-base font-bold text-text-main sm:text-lg">리뷰 결과</h2>
-                <Reviews s={s} />
+                <Reviews s={s} syncing={syncing} />
               </section>
-              <Log s={s} role="reviews" />
+              <Log s={s} role="reviews" syncing={syncing} />
             </>
           ) : tab === "dispatch" || tab === "deploy" || tab === "cleanup" ? (
-            <Log s={s} role={tab} />
+            <Log s={s} role={tab} syncing={syncing} />
           ) : (
-            <Log s={s} />
+            <Log s={s} syncing={syncing} />
           )}
         </main>
       </div>

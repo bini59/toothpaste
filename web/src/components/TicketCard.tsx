@@ -40,7 +40,7 @@ export function TicketCard({ t, s, I, onAssign, onSkip, onApprove, onOverride, o
   const pr = [...(I.prBy[t.gid] || [])].sort((a, b) => b.number - a.number)[0];
   // the AI review of the current head, same as the host check (release.approval_target); tp check failures
   // (source 'check') show as the check badges
-  const rv = pr && (I.revBy[pr.url] || []).find((v) => v.head_sha === pr.head_sha && !v.source);
+  const verdict = pr?.head_ai_verdict;
   const rule = pr ? s.meta.rules?.[pr.repo] : undefined;
   // a milestone subtask merges into its milestone branch (automatically once the AI approves; milestone.py)
   const msBase = pr?.base?.startsWith("milestone/") ? pr.base : null;
@@ -48,7 +48,7 @@ export function TicketCard({ t, s, I, onAssign, onSkip, onApprove, onOverride, o
   const stg = rule?.staging && rule.modes.includes("staging") ? (msBase ?? rule.staging.branch) : null;
   const milestoneOf = t.parent_gid && (t.in_milestone || isMs(t.gid)) ? t.parent_gid : null;
   const milestoneError = t.milestone_error || t.staging_config_error || pr?.staging_deploy_error;
-  const okReview = !milestoneError && t.stage === "reviewed" && pr?.state === "OPEN" && rv?.verdict === "approve" && rv.head_sha === pr.head_sha;
+  const okReview = !milestoneError && t.stage === "reviewed" && pr?.state === "OPEN" && verdict === "approve";
   const approvable = !!stg && okReview;
   const baseOk = pr?.base === stg;
   const conflict = pr?.state === "OPEN" && pr.mergeable === "CONFLICTING";
@@ -62,7 +62,7 @@ export function TicketCard({ t, s, I, onAssign, onSkip, onApprove, onOverride, o
     !milestoneError && !!stg && pr?.state === "OPEN" && baseOk && !conflict && !gate &&
     // blocked: escalate_rework handed the fix loop to the owner; a rule violation (pipeline.VIOLATION) is not approvable
     (t.stage === "reviewed" || t.stage === "rework" || (t.stage === "blocked" && !run?.ws_comment?.startsWith("BLOCKED: 규칙 위반"))) &&
-    (rv?.verdict === "blocked" || rv?.verdict === "changes");
+    (verdict === "blocked" || verdict === "changes");
   // failed (or uncheckable) head: the owner can send it to the AI review anyway; the approval itself comes after
   const canIgnore =
     !!gate && pr?.state === "OPEN" && !approvalShown && t.stage !== "approving" &&
@@ -133,16 +133,16 @@ export function TicketCard({ t, s, I, onAssign, onSkip, onApprove, onOverride, o
           </a>
           <Badge status={pr.state === "MERGED" ? "success" : pr.state === "OPEN" ? "info" : "draft"}>{pr.state.toLowerCase()}</Badge>
           {!!pr.is_draft && <Badge>draft</Badge>}
-          {rv && <Badge status={VERDICT[rv.verdict][1]}>{VERDICT[rv.verdict][0]}</Badge>}
+          {verdict && <Badge status={VERDICT[verdict][1]}>{VERDICT[verdict][0]}</Badge>}
           {conflict && <Badge status="danger">{pr.base ?? "base"} 충돌</Badge>}
           <CheckBadges checks={pr.checks} />
         </div>
       )}
       {overridden && <p className="mt-1.5 text-xs font-medium text-warning-700">검사 무시: {t.check_override}</p>}
       {reviewOverridden && <p className="mt-1.5 text-xs font-medium text-warning-700">AI 판정 무시: {t.review_override}</p>}
-      {canOverrideReview && rv && (
+      {canOverrideReview && (
         <OverrideForm
-          gate={`AI 판정: ${VERDICT[rv.verdict][0]}`}
+          gate={`AI 판정: ${VERDICT[verdict][0]}`}
           label="사유 적고 승인…"
           confirmLabel="예외 승인"
           placeholder="AI 판정과 달리 승인하는 사유…"

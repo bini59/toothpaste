@@ -32,7 +32,6 @@ function TicketInfo({ s, gid, checks }: { s: State; gid: string; checks?: boolea
   if (!t) return null;
   const r = s.runs.filter((x) => x.ticket_gid === gid).at(-1);
   const pr = latestPr(s, gid);
-  const review = pr && s.reviews.filter((v) => v.pr_url === pr.url).sort((a, b) => (a.created_at > b.created_at ? 1 : -1)).at(-1);
   return (
     <div className="flex flex-col gap-1.5 border-b border-border py-2.5 last:border-b-0">
       <div className="flex flex-wrap items-center gap-1.5 text-xs font-medium text-text-muted">
@@ -43,7 +42,7 @@ function TicketInfo({ s, gid, checks }: { s: State; gid: string; checks?: boolea
       </div>
       <div className="text-sm font-semibold leading-snug text-text-main">{t.name}</div>
       {r?.ws_comment && <p className={cn("text-xs", t.stage === "blocked" ? "font-semibold text-danger-700" : "text-text-muted")}>{r.ws_comment}</p>}
-      {review && <p className="text-xs text-text-muted">리뷰: {review.summary}</p>}
+      {pr?.latest_review_summary != null && <p className="text-xs text-text-muted">리뷰: {pr.latest_review_summary}</p>}
       {checks && pr && <div className="flex flex-wrap items-center gap-1"><CheckBadges checks={pr.checks} /></div>}
       {r && (
         <div className="truncate text-xs text-text-muted" title={r.worktree_path || undefined}>

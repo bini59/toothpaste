@@ -76,6 +76,31 @@ class ReleaseCandidatesTest(unittest.TestCase):
         self.assertEqual(state["staged_pr_urls"], {"api": [first, second]})
         self.assertEqual([t["gid"] for t in state["tickets"]], ["T-1"])
 
+    def test_state_keeps_only_review_fields_needed_by_the_board_deploy_and_office(self):
+        url = self.pr(1, state="OPEN", stage="reviewed")
+        unreviewed = self.pr(2, state="OPEN")
+        self.con.executemany("""INSERT INTO reviews(pr_url,head_sha,verdict,source,created_at,summary,body,rework_at)
+                                VALUES (?,?,?,?,?,?,'full review body',?)""", [
+            (url, "head1", "blocked", None, "2026-11-20", "Earlier AI", None),
+            (url, "head1", "approve", None, "2026-11-20", "Current AI", None),
+            (url, "head1", "changes", "check", "2026-11-21", "Check failed", "2026-11-21"),
+            (url, "old", "changes", None, "2026-11-22", "Earlier head", "2026-11-22"),
+            (url, "old", "blocked", None, "2026-11-22", "Latest by timestamp and ID", None),
+            (url, "old", "approve", None, "2026-11-19", "Late import", None),
+            (unreviewed, "old", "approve", None, "2026-11-19", "Stale approval", None),
+        ])
+
+        state = server._state(self.con)
+        self.assertNotIn("reviews", state)
+        self.assertNotIn("events", state)
+        self.assertNotIn("full review body", json.dumps(state))
+        prs = {p["url"]: p for p in state["prs"]}
+        pr = prs[url]
+        self.assertEqual((pr["head_ai_verdict"], pr["head_verdict"]), ("approve", "changes"))
+        self.assertEqual((pr["latest_review_summary"], pr["rework_count"]), ("Latest by timestamp and ID", 2))
+        self.assertIsNone(prs[unreviewed]["head_ai_verdict"])
+        self.assertIsNone(prs[unreviewed]["head_verdict"])
+
     def test_promote_records_selected_older_pr_when_latest_run_has_an_open_pr(self):
         first = self.pr(1, stage="reviewed")
         second = self.pr(9, gid="T-1")

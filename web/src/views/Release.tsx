@@ -127,7 +127,7 @@ export function Release({ s, onHold, onDeploy, onCancelDeploy }: Props) {
     if (t.completed || t.milestone_error || t.stage !== "reviewed") return [];
     const pr = latestPr(s, t.gid);
     const approved = pr?.state === "OPEN" && (rules[pr.repo] || pr.staging_deploy_error)
-      && s.reviews.find((v) => v.pr_url === pr.url && v.head_sha === pr.head_sha)?.verdict === "approve";
+      && pr.head_verdict === "approve";
     return approved ? [{ t, pr, staged: false }] : [];
   });
   const staged = Object.values(s.staged_pr_urls).flat().flatMap((url) => {
