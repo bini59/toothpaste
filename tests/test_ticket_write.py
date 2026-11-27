@@ -125,6 +125,37 @@ class TicketWriteTest(unittest.TestCase):
             self.assertEqual((row["parent_gid"], row["parent_name"], row["in_milestone"], row["stage"]),
                              (parent["gid"], "Parent", 1, "needs_repo"))
 
+    def test_asana_event_failure_reports_a_created_task(self):
+        self.project("asana", asana_gid="77")
+        self.asana.return_value = {"data": {"gid": "100"}}
+        with self.con:
+            self.con.execute("""CREATE TRIGGER reject_event BEFORE INSERT ON events
+                                WHEN NEW.kind='asana_write' BEGIN SELECT RAISE(FAIL,'fixture'); END""")
+        result = self.create(status=5)
+        self.assertEqual(result["code"], "upstream_error")
+        self.assertEqual(result["created"], {"key": "AS-100", "gid": "100", "url": "https://app.asana.com/0/77/100"})
+        self.asana.assert_called_once()
+
+    def test_asana_ticket_key_failure_reports_a_created_subtask(self):
+        self.project("asana", asana_gid="77")
+        parent = {"gid": "100", "tags": [{"name": "Ship"}]}
+        child = {"gid": "101", "permalink_url": "url/101",
+                 "custom_fields": [{"name": "ID", "display_value": "TASK-101"}]}
+        self.read_asana.return_value = {"data": parent}
+        self.asana.side_effect = [{"data": [{"gid": "1", "name": "Ship"}]}, {"data": parent},
+                                  {"data": [{"gid": "2", "name": "work"}]}, {"data": child}]
+        with self.con:
+            self.con.execute("""CREATE TRIGGER reject_ticket BEFORE INSERT ON tickets
+                                WHEN NEW.gid='101' BEGIN SELECT RAISE(FAIL,'fixture'); END""")
+        result = self.create("milestone", "--subtask", "created", status=5)
+        self.assertEqual(result["code"], "upstream_error")
+        self.assertEqual(result["subtasks"], [{"key": "TASK-101", "url": "url/101"}])
+        self.assertEqual(result["failed"], [])
+        self.assertEqual([(e["title"], e["created"]) for e in result["warnings"]],
+                         [("created", {"key": "TASK-101", "gid": "101", "url": "url/101"})])
+        self.assertEqual(self.asana.call_args.args[-1]["parent"], parent["gid"])
+        self.assertEqual(self.con.execute("SELECT count(*) FROM events WHERE ticket_gid='101'").fetchone()[0], 2)
+
     def test_github_subissues_sync_dispatch_base_and_verified_closure(self):
         self.project("github")
         issues = {}
@@ -188,12 +219,16 @@ class TicketWriteTest(unittest.TestCase):
         self.project("github")
         issue = {"id": 99, "number": 12, "html_url": "url/12", "labels": [{"name": "Ship"}]}
         child = {"number": 14, "html_url": "url/14", "labels": [{"name": "tp"}]}
-        self.gh.side_effect = [issue, issue, RuntimeError("HTTP 503"), issue, child]
-        result = self.create("milestone", "--subtask", "unavailable", "--subtask", "ok", "--subtask", "", status=5)
+        unlabeled = {"number": 15, "html_url": "url/15", "labels": []}
+        self.gh.side_effect = [issue, issue, RuntimeError("HTTP 503"), issue, child, issue, unlabeled]
+        result = self.create("milestone", "--subtask", "unavailable", "--subtask", "ok", "--subtask", "unlabeled",
+                             "--subtask", "", status=5)
         self.assertEqual((result["ok"], result["code"], result["gid"]), (False, "upstream_error", "gh:example/app#12"))
-        self.assertEqual(result["subtasks"], [{"key": "APP-14", "url": "url/14"}])
+        self.assertEqual(result["subtasks"], [{"key": "APP-14", "url": "url/14"}, {"key": "APP-15", "url": "url/15"}])
         self.assertEqual([(e["title"], e["code"]) for e in result["failed"]],
                          [("unavailable", "upstream_error"), ("", "invalid_argument")])
+        self.assertEqual([(e["title"], e["created"]) for e in result["warnings"]],
+                         [("unlabeled", {"key": "APP-15", "gid": "gh:example/app#15", "url": "url/15"})])
 
     def test_cross_repo_key_before_sync(self):
         self.doc["settings"]["github_issues"] = {"other": "tools"}

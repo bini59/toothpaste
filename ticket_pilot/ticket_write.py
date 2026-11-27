@@ -43,6 +43,12 @@ def _parent_gid(con, ref, source, *, for_milestone):
     return next(iter(matches), ref)
 
 
+def _asana_result(task, project_gid):
+    gid = task["gid"]
+    return {"key": pipeline.field(task, "ID") or f"AS-{gid}", "gid": gid,
+            "url": task.get("permalink_url") or f"https://app.asana.com/0/{project_gid}/{gid}"}
+
+
 def _asana_create(con, project, args, parent, is_milestone):
     st = core.settings()
     pg = project.get("asana_gid")
@@ -68,17 +74,23 @@ def _asana_create(con, project, args, parent, is_milestone):
         assignee = assignee or "me"
     if tags and not st.get("asana_workspace_gid"):
         raise CreateError("invalid_argument", core.NO_WORKSPACE)
-    task = asana_write.create(pg, args.title, args.body, assignee, tags, parent, log=None)
-    gid = task["gid"]
-    key = pipeline.field(task, "ID") or f"AS-{gid}"
-    url = task.get("permalink_url") or f"https://app.asana.com/0/{pg}/{gid}"
+    try:
+        task = asana_write.create(pg, args.title, args.body, assignee, tags, parent, log=None)
+    except asana_write.CreateRecordError as e:
+        raise CreateError("upstream_error", str(e), created=_asana_result(e.task, pg)) from e
+    result = _asana_result(task, pg)
+    key, gid, url = result["key"], result["gid"], result["url"]
     # A custom Asana key cannot be decoded. Keep it resolvable for a second create before sync.
     if key != f"AS-{gid}":
         ts = core.now()
-        with con:
-            con.execute("""INSERT INTO tickets(gid,key,name,url,project_gid,assigned,first_seen,last_seen)
-                           VALUES(?,?,?,?,?,0,?,?) ON CONFLICT(gid) DO NOTHING""", (gid, key, args.title, url, pg, ts, ts))
-    return {"key": key, "gid": gid, "url": url}
+        try:
+            with con:
+                con.execute("""INSERT INTO tickets(gid,key,name,url,project_gid,assigned,first_seen,last_seen)
+                               VALUES(?,?,?,?,?,0,?,?) ON CONFLICT(gid) DO NOTHING""", (gid, key, args.title, url, pg, ts, ts))
+        except sqlite3.Error as e:
+            raise CreateError("upstream_error", "Asana 태스크는 생성됐어요. 로컬 DB에 티켓 키를 저장할 수 없어요",
+                              created=result) from e
+    return result
 
 
 def _notion_create(project, args, parent, is_milestone):
@@ -92,13 +104,12 @@ def _notion_create(project, args, parent, is_milestone):
             parent = str(uuid.UUID(parent[3:] if parent[:3].upper() == "NT-" else parent.removeprefix("notion:")))
         except ValueError:
             raise CreateError("parent_not_found", f"Notion 부모 티켓을 찾을 수 없어요: {parent}") from None
-    assignee, status = args.assignee, None
+    assignee = args.assignee
     if args.milestone:
         if not assignee and cfg.get("people_property") and cfg.get("assignee", "me") != "all":
             assignee = cfg.get("assignee", "me")
-        status = cfg.get("status_option") or None
     values = argparse.Namespace(op="create", project=project["id"], title=args.title, body=args.body, assignee=assignee,
-                                tag=args.tag, status=status, due=None, parent=parent if args.parent else None)
+                                tag=args.tag, status=None, due=None, parent=parent if args.parent else None)
     return notion_write.run(values, milestone=parent if args.milestone else None, milestone_parent=is_milestone)
 
 
@@ -156,21 +167,18 @@ def _github_create(con, project, args, parent, is_milestone, actor):
 def create(project, args, *, is_milestone=False):
     try:
         actor = asana_write.write_actor(agents_only=False)
-    except asana_write.WriteDisabled as e:
-        raise CreateError("write_disabled", str(e)) from e
-    if is_milestone or args.milestone is not None:
-        supported, reason = milestone.supported(project)
-        if not supported:
-            raise CreateError("milestone_unsupported", reason)
-    ref = args.parent if args.parent is not None else args.milestone
-    if not args.title.strip() or any(not t.strip() for t in args.tag or []) or (ref is not None and not ref.strip()):
-        raise CreateError("invalid_argument", "제목, 태그와 부모 티켓 값은 비워 둘 수 없어요")
-    source = project["source"]
-    if source not in ("asana", "notion", "github"):
-        raise CreateError("source_unsupported", "이 프로젝트에 티켓 출처를 설정하세요")
-    con = core.db()
-    parent = _parent_gid(con, ref, source, for_milestone=bool(args.milestone)) if ref else None
-    try:
+        if is_milestone or args.milestone is not None:
+            supported, reason = milestone.supported(project)
+            if not supported:
+                raise CreateError("milestone_unsupported", reason)
+        ref = args.parent if args.parent is not None else args.milestone
+        if not args.title.strip() or any(not t.strip() for t in args.tag or []) or (ref is not None and not ref.strip()):
+            raise CreateError("invalid_argument", "제목, 태그와 부모 티켓 값은 비워 둘 수 없어요")
+        source = project["source"]
+        if source not in ("asana", "notion", "github"):
+            raise CreateError("source_unsupported", "이 프로젝트에 티켓 출처를 설정하세요")
+        con = core.db()
+        parent = _parent_gid(con, ref, source, for_milestone=bool(args.milestone)) if ref else None
         if source == "asana":
             return _asana_create(con, project, args, parent, is_milestone)
         if source == "notion":
@@ -178,6 +186,10 @@ def create(project, args, *, is_milestone=False):
         return _github_create(con, project, args, parent, is_milestone, actor)
     except notion.PageNotFound as e:
         raise CreateError("parent_not_found", str(e)) from e
+    except notion_write.MilestoneUnsupported as e:
+        raise CreateError("milestone_unsupported", str(e)) from e
+    except notion_write.CreateRecordError as e:
+        raise CreateError("upstream_error", str(e), created=e.created) from e
     except notion_write.InvalidFields as e:
         raise CreateError("invalid_argument", str(e)) from e
     except asana_write.WriteDisabled as e:
@@ -196,17 +208,25 @@ def run(args):
     result = {"source": project["source"], **create(project, args, is_milestone=is_milestone)}
     if is_milestone:
         result["subtasks"] = []
-        failed = []
+        failed, warnings = [], []
         for title in args.subtask or []:
             child = argparse.Namespace(**{**vars(args), "title": title, "body": None, "assignee": None, "milestone": result["gid"]})
             try:
                 created = create(project, child)
-                result["subtasks"].append({"key": created["key"], "url": created["url"]})
             except CreateError as e:
-                failed.append({"title": title, **e.result})
-        if failed:
-            code = next((e["code"] for e in failed if e["code"] == "upstream_error"), failed[0]["code"])
-            raise CreateError(code, f"마일스톤을 만들었고 하위 티켓 {len(failed)}개가 실패했어요", **result, failed=failed)
+                detail = {"title": title, **e.result}
+                created = e.result.get("created")
+                if created is None:
+                    failed.append(detail)
+                    continue
+                warnings.append(detail)
+            result["subtasks"].append({"key": created["key"], "url": created["url"]})
+        if failed or warnings:
+            code = "upstream_error" if warnings or any(e["code"] == "upstream_error" for e in failed) else failed[0]["code"]
+            if warnings:
+                result["warnings"] = warnings
+            message = f"하위 티켓 {len(failed)}개 생성 실패, 생성 후 오류 {len(warnings)}개"
+            raise CreateError(code, message, **result, failed=failed)
     return {"ok": True, **result}
 
 

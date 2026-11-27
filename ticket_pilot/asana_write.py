@@ -9,8 +9,15 @@ their prompts.
 from __future__ import annotations
 
 import os
+import sqlite3
 
 from .core import NO_WORKSPACE, asana, db, event, settings
+
+
+class CreateRecordError(RuntimeError):
+    def __init__(self, task):
+        super().__init__(f"Asana 태스크는 생성됐어요 ({task.get('permalink_url') or task['gid']}). 로컬 DB에 이벤트를 기록할 수 없어요")
+        self.task = task
 
 # runner.launch fills {{ASANA}} in every agent prompt with one of these (on / off)
 RULES_ON = """- Edit existing Asana tasks only through `{{TP}} asana` (it holds the token; never look for or use an Asana token yourself),
@@ -136,14 +143,21 @@ def create(project: str, title: str, notes: str | None = None, assignee: str | N
     if resolved:
         body["tags"] = list(dict.fromkeys(gid for gid, _ in resolved.values()))
     d = asana("POST", "/tasks", {"opt_fields": "name,permalink_url,custom_fields.name,custom_fields.display_value"}, body)["data"]
-    _log(con, actor, f"created task {d['gid']} '{title.strip()[:60]}' in project {pg}"
-                     + (f" under {pgid}" if pgid else "")
-                     + (f", assignee {assignee}" if _assignee(assignee) else "") + (" with notes" if notes else ""),
-         d["gid"], log)
+    created_note = (f"created task {d['gid']} '{title.strip()[:60]}' in project {pg}"
+                    + (f" under {pgid}" if pgid else "")
+                    + (f", assignee {assignee}" if _assignee(assignee) else "") + (" with notes" if notes else ""))
+    try:
+        with con:
+            tag_notes = [_tag_note(name, d["gid"], created) for name, (_, created) in resolved.items()]
+            for note in [created_note, *tag_notes]:
+                event(con, "asana_write", f"{actor}: {note}", d["gid"])
+    except sqlite3.Error as e:
+        raise CreateRecordError(d) from e
     if log:
+        log(created_note)
         log(d.get("permalink_url") or d["gid"])
-    for name, (_, created) in resolved.items():
-        _log(con, actor, _tag_note(name, d["gid"], created), d["gid"], log)
+        for note in tag_notes:
+            log(note)
     return d
 
 

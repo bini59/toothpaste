@@ -17,6 +17,16 @@ class InvalidFields(notion.NotionError):
     """The requested values cannot be written to the configured columns."""
 
 
+class MilestoneUnsupported(notion.NotionError):
+    """The configured import and dispatch values cannot be written to a milestone task."""
+
+
+class CreateRecordError(notion.NotionError):
+    def __init__(self, message, created):
+        super().__init__(message)
+        self.created = created
+
+
 @contextmanager
 def page_lock(page_id):
     """Serialize tp's read/modify/write of a page across dashboard, tick and CLI processes."""
@@ -119,6 +129,7 @@ class ProjectPages:
 
     def create(self, args, *, milestone=None, milestone_parent=False):
         props = self.fields(args.title, args.assignee, args.due)
+        filters = self.milestone_task_filters(args.tag) if milestone else self.create_filters(args.status, args.tag)
         if args.parent is not None or milestone:
             role = "milestone" if milestone else "parent"
             col = notion_membership.relation_column(self.schema, self.cfg, role)
@@ -137,30 +148,52 @@ class ProjectPages:
             notion_tickets.milestone_tag_filters(self.schema, {(prop, option)})
             kind = self.schema[prop]["type"]
             props[prop] = {kind: [{"id": option}] if kind == "multi_select" else {"id": option}}
-        if args.status is not None:
+        body = {"parent": {"type": "data_source_id", "data_source_id": self.source}, "properties": {**props, **filters}}
+        if args.body:
+            body["markdown"] = args.body
+        return self.client.write("POST", "/pages", body, "콘텐츠 추가")
+
+    def create_filters(self, status, names, *, milestone=False):
+        props = {}
+        if status is not None:
             col = self.column("status")
-            props[col["id"]] = {col["type"]: _option(col, args.status)}
-        if args.tag or (milestone and self.cfg.get("tag_property")):
+            props[col["id"]] = {col["type"]: _option(col, status)}
+        if names or milestone:
             col = self.column("tag")
             tags = []
             if milestone:
                 if option := self.cfg.get("tag_option"):
                     tags.append(_option(col, option, by_id=True))
-            names = [core.settings()["asana_tag"]] if milestone else []
-            for name in [*names, *(args.tag or [])]:
+                work_tag = core.settings()["asana_tag"]
+                work_option = next((o for o in col["options"] if o["name"].casefold() == work_tag.casefold()), None)
+                choice = {"id": work_option["id"]} if work_option else {"name": work_tag}
+                if choice not in tags:
+                    tags.append(choice)
+                if col["type"] == "select" and len(tags) > 1:
+                    raise InvalidFields("가져오기 태그와 작업 태그가 다르면 Notion 태그 열을 다중 선택으로 설정하세요")
+            for name in names or []:
                 choice = _option(col, name, new_tag=True)
                 if choice not in tags:
                     tags.append(choice)
             if col["type"] == "select" and len(tags) != 1:
                 raise InvalidFields("단일 선택 열에는 태그를 하나만 지정하세요")
+            if milestone:
+                markers = notion_tickets.saved_milestone_kinds(self.con, self.source)
+                if any((col["id"], choice.get("id")) in markers for choice in tags):
+                    raise InvalidFields("마일스톤 판별 태그를 하위 티켓에 쓸 수 없어요. 가져오기 태그와 작업 태그를 확인하세요")
             value = {col["type"]: tags if col["type"] == "multi_select" else tags[0]}
             if col["id"] in props and props[col["id"]] != value:
                 raise InvalidFields("상태와 태그가 같은 열이에요. 한 가지 값만 지정하세요")
             props[col["id"]] = value
-        body = {"parent": {"type": "data_source_id", "data_source_id": self.source}, "properties": props}
-        if args.body:
-            body["markdown"] = args.body
-        return self.client.write("POST", "/pages", body, "콘텐츠 추가")
+        return props
+
+    def milestone_task_filters(self, names=None):
+        status = self.cfg.get("status_option") or None
+        try:
+            filters = self.create_filters(status, None, milestone=True)
+        except InvalidFields as e:
+            raise MilestoneUnsupported(str(e)) from e
+        return self.create_filters(status, names, milestone=True) if names else filters
 
     def _remember(self, page_id, page):
         try:
@@ -271,7 +304,11 @@ def run(args, *, milestone=None, milestone_parent=False):
     cfg = notion_tickets.project_config(con, pid)
     if not cfg:
         raise notion.NotionError(f"프로젝트 {pid}에 연결된 Notion 데이터베이스가 없어요")
-    pages = ProjectPages(con, cfg, source=cfg["milestone_data_source_id"] if milestone_parent else None)
+    pages = ProjectPages(con, cfg)
+    if milestone_parent:
+        pages.milestone_task_filters()
+        if cfg["milestone_data_source_id"] != pages.source:
+            pages = ProjectPages(con, cfg, source=cfg["milestone_data_source_id"])
     if args.op == "create":
         page = pages.create(args, milestone=milestone, milestone_parent=milestone_parent)
         page_id = page.get("id")
@@ -294,6 +331,7 @@ def run(args, *, milestone=None, milestone_parent=False):
                 pages.apply_properties(page, pages.status_change(page, args.value))
             else:
                 pages.comment(page_id, args.text)
+    result = {"key": key, "gid": gid, "url": url}
     actor = os.environ.get("TP_AGENT") or "cli"
     try:
         with con:
@@ -307,8 +345,11 @@ def run(args, *, milestone=None, milestone_parent=False):
                     notion_tickets.page_edited(con, gid, page, pages.source, pages.schema)
             core.event(con, "notion_write", f"{actor} · {pid} · {key} · {args.op}", gid)
     except sqlite3.Error as e:
-        raise notion.NotionError(f"Notion 요청은 처리됐어요 ({key} {url}). 로컬 DB 기록을 저장할 수 없어요") from e
-    return {"key": key, "gid": gid, "url": url}
+        message = f"Notion 요청은 처리됐어요 ({key} {url}). 로컬 DB 기록을 저장할 수 없어요"
+        if args.op == "create":
+            raise CreateRecordError(message, result) from e
+        raise notion.NotionError(message) from e
+    return result
 
 
 def command(args):

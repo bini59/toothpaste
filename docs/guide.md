@@ -96,7 +96,7 @@ tp ticket create --project app --title "모바일 수정" --milestone APP-24
 
 프로젝트의 출처에 따라 Asana 태스크, Notion 작업 DB 페이지 또는 GitHub 이슈가 생깁니다. GitHub는 기본 레포에 만들고 기본 레포를 지정하지 않았으면 설정 순서상 첫 레포를 사용해요. 이슈에는 `tp` 라벨이 붙습니다. `--tag`는 여러 번 줄 수 있고, 하위 티켓에는 `--parent`와 `--milestone` 중 하나를 사용하세요.
 
-성공하면 표준 출력에 `ok`, `source`, `key`, `gid`, `url`을 담은 JSON 한 줄이 나옵니다. 실패하면 표준 오류의 JSON에서 `code`와 `message`를 확인하세요. 종료 코드 4는 요청이나 설정을 고쳐야 한다는 뜻이에요. 예를 들어 `parent_not_found`면 부모 키를, `milestone_unsupported`면 마일스톤 연결과 staging 머지 설정을 확인하세요. `global.agent_asana_write`가 꺼져 있거나 자동화 단계에서 호출하면 `write_disabled`입니다. 외부 API 오류는 종료 코드 5와 `upstream_error`로 표시돼요.
+성공하면 표준 출력에 `ok`, `source`, `key`, `gid`, `url`을 담은 JSON 한 줄이 나옵니다. 실패하면 표준 오류의 JSON에서 `code`와 `message`를 확인하세요. 종료 코드 4는 요청이나 설정을 고쳐야 한다는 뜻이에요. 예를 들어 `parent_not_found`면 부모 키를, `milestone_unsupported`면 마일스톤 연결과 staging 머지 설정을 확인하세요. `global.agent_asana_write`가 꺼져 있거나 자동화 단계에서 호출하면 `write_disabled`입니다. 외부 API나 로컬 저장 오류는 종료 코드 5와 `upstream_error`로 표시돼요. 오류 JSON에 `created`가 있으면 이미 생성된 티켓의 `key`, `gid`, `url`을 사용하세요.
 
 **출처**
 - Asana: 설정에서 사용을 끄면 동기화와 Asana 작업을 중지하며 기존 연결 정보와 티켓은 보존합니다. 다시 켜면 다음 동기화부터 재개합니다. Asana 연결에 오류가 나도 GitHub 이슈는 동기화합니다. 나에게 배정된 미완료 태스크에 설정 `asana_tag`의 태그(새 설치 기본 **`tp`**)를 붙이면 티켓이 됩니다. 태스크의 프로젝트가 설정에서 레포와 연결돼 있어야 해요.
@@ -189,9 +189,9 @@ Notion 하위 티켓을 만들 때는 같은 작업 DB의 부모 키(`NT-…`)�
 tp milestone create --project app --title "모바일 로그인" --subtask "화면 수정" --subtask "회귀 테스트"
 ```
 
-부모를 먼저 만들고 각 제목을 하위 티켓으로 연결해요. 나중에 추가하려면 `tp ticket create --project app --title "추가 검증" --milestone <부모 gid>`를 사용하세요. Asana 하위 티켓에는 작업 태그와 담당자 `me`를 적용해요. Notion에서는 담당자와 상태를 가져오기 조건에 맞추고, 태그 열에 가져오기 태그와 작업 태그를 함께 넣습니다. 두 태그가 다르면 다중 선택 열이 필요해요. 동기화 후 첫 하위 티켓이 투입되면 브랜치가 생겨요.
+부모를 먼저 만들고 각 제목을 하위 티켓으로 연결해요. 나중에 추가하려면 `tp ticket create --project app --title "추가 검증" --milestone <부모 gid>`를 사용하세요. Asana 하위 티켓에는 작업 태그와 담당자 `me`를 적용해요. Notion에서는 담당자와 상태를 가져오기 조건에 맞추고, 태그 열에 가져오기 태그와 작업 태그를 함께 넣습니다. 태그 열을 골라야 하며 두 태그가 다르면 다중 선택 열이 필요해요. 마일스톤 판별 태그는 하위 티켓의 태그와 구분하세요. 이 조건을 충족하지 않으면 페이지를 만들기 전에 `milestone_unsupported`를 반환합니다. 동기화 후 첫 하위 티켓이 투입되면 브랜치가 생겨요.
 
-성공 결과의 `subtasks`에 생성한 하위 티켓의 키와 링크가 나옵니다. 일부만 실패해도 부모와 성공한 티켓은 유지돼요. 오류 JSON의 `failed`에서 실패한 제목과 사유를 확인하고 해당 하위 티켓만 추가하세요.
+결과의 `subtasks`에 생성이 확인된 하위 티켓의 키와 링크가 나옵니다. 하위 티켓 생성 후 로컬 저장 등에 문제가 생기면 오류 JSON의 `warnings`에 사유와 `created` 정보가 나와요. `failed` 항목은 사유와 원격 생성 여부를 확인한 뒤 필요한 하위 티켓만 추가하세요. 부모의 생성 직후 오류가 발생하면 `created`에 부모 정보가 나와요. 오류 사유를 확인한 뒤 그 `gid`로 하위 티켓을 추가하세요.
 
 GitHub에서는 `milestone_tag` 라벨을 붙인 부모 이슈와 `tp` 라벨을 붙인 하위 이슈를 만듭니다. 다른 레포의 부모는 `--milestone 'gh:example/api#12'`처럼 지정할 수 있어요. 부모와 자식 레포의 소유자가 같아야 합니다. 하위 PR이 머지된 뒤 이슈의 부모가 바뀌어도 실제 머지된 브랜치의 배포를 추적해요. 프로덕션 반영이 확인되면 하위 이슈를 닫고, 모든 레포의 반영과 하위 이슈 종료를 확인하면 부모 이슈를 닫습니다. GitHub 오류로 닫기에 실패한 이슈는 다음 tick에서 재시도해요.
 

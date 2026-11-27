@@ -111,6 +111,8 @@ def supported(project: dict) -> tuple[bool, str]:
         cfg = project.get("notion") or {}
         if not all(cfg.get(k) for k in ("connection_id", "data_source_id", "milestone_data_source_id", "milestone_property")):
             return False, "프로젝트에 Notion 마일스톤 DB와 관계 열을 설정하세요"
+        if not cfg.get("tag_property"):
+            return False, "Notion 하위 티켓에 작업 태그를 넣을 태그 열을 설정하세요"
         if cfg["milestone_data_source_id"] == cfg["data_source_id"] and not all(
                 cfg.get(k) for k in notion_tickets.MILESTONE_KIND_FIELDS):
             return False, "같은 Notion DB에서 사용할 마일스톤 판별 열과 태그를 설정하세요"
