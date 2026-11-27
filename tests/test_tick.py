@@ -130,10 +130,10 @@ class CliTest(unittest.TestCase):
     def test_dispatch_and_review_keep_deterministic_step_order(self):
         con = self.db()
         calls = mock.Mock()
-        for module, name in ((precheck.pipeline, "sync"), (precheck.pipeline, "scan"),
+        for module, name in ((precheck.ticket_sync, "sync"), (precheck.pipeline, "scan"),
                              (precheck.milestone, "tick"), (precheck.release, "process_approvals"),
                              (precheck.deploy, "deploy_tick"), (precheck.release, "release_tick"),
-                             (precheck.pipeline, "dispatch"), (precheck.pipeline, "triage_list"),
+                             (precheck, "dispatch_tickets"), (precheck.pipeline, "triage_list"),
                              (precheck.track, "track_deploys"), (precheck.checks, "tick"),
                              (precheck.pipeline, "review_queue")):
             label = f"{module.__name__.split('.')[-1]}_{name}"
@@ -147,7 +147,7 @@ class CliTest(unittest.TestCase):
         code, _, err = self.precheck_exit("dispatch")
         self.assertEqual(code, 1)
         self.assertIn("RuntimeError: milestone failed", err)
-        self.assertEqual(calls.mock_calls, [mock.call.pipeline_sync(), *steps, mock.call.pipeline_dispatch(),
+        self.assertEqual(calls.mock_calls, [mock.call.ticket_sync_sync(), *steps, mock.call.precheck_dispatch_tickets(),
                                            mock.call.pipeline_triage_list(mark=False)])
         calls.reset_mock()
         code, _, err = self.precheck_exit("review")

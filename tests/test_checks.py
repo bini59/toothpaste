@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from ticket_pilot import dispatch as D
 from ticket_pilot import checks as K, core, pipeline as P, release as R, review
 
 CFG = {"r": {"ci": False, "checks": [{"name": "lint", "cmd": "run lint"}, {"name": "test", "cmd": "run test"}]},
@@ -31,15 +32,16 @@ class CheckGateTest(unittest.TestCase):
                                 VALUES (?,?,?,?,1,'OPEN','s0','staging','MERGEABLE')""", (f"u{gid}", rid, gid, repo))
         self.p = [mock.patch.object(K, "repo_checks", side_effect=lambda repo: CFG.get(repo)),
                   mock.patch.object(K, "db", lambda: self.con), mock.patch.object(P, "db", lambda: self.con),
-                  mock.patch.object(P, "github_token", return_value="tok"),
+                  mock.patch.object(D, "db", lambda: self.con),
+                  mock.patch.object(D, "github_token", return_value="tok"),
                   mock.patch.object(R, "db", lambda: self.con),
                   mock.patch.object(R, "staging_branch", return_value="staging"),
                   mock.patch.object(K, "LOG_DIR", self.tmp / "logs"),
                   mock.patch.object(K, "conf", return_value={"timeout_min": 0.05, "max_parallel": 2}),
                   mock.patch.object(P.R, "launch", return_value="1 /tmp/tp-test-agent.log"),
                   mock.patch.object(P.R, "running", return_value=False),
-                  mock.patch.object(P, "max_rework_rounds", return_value=3),
-                  mock.patch.object(P, "settings", return_value={"max_active_runs": 3, "agent": "codex"})]
+                  mock.patch.object(review, "max_rework_rounds", return_value=3),
+                  mock.patch.object(D, "settings", return_value={"max_active_runs": 3, "agent": "codex"})]
         for x in self.p:
             x.start()
             self.addCleanup(x.stop)  # also when setUp fails halfway: a leaked patch breaks later test modules

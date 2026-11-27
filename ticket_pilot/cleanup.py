@@ -1,7 +1,7 @@
 """Remove ticket worktrees once their change is live in production (2026-10-19).
 
-Scope: only worktrees ticket-pilot knows (`runs.worktree_path`, dispatched or adopted). Manually created worktrees
-(Orca or git) are never touched. Production is the only criterion: a merge into staging/dev is not enough.
+Scope: only worktrees ticket-pilot knows from its runs or failed-start reservations. Manually created worktrees
+(Orca or git) are never touched unless adopted. A merge into staging/dev is not enough to count as live.
 
 For every ticket worktree whose PRs are all merged (none open), each merged PR is checked against the sha production
 runs now (`track.deployed_sha`: prod CodePipeline / deploy workflow, ECS rollout) in this order:
@@ -18,7 +18,8 @@ remote branch and the PR stay.
 
 Skipped tickets (건너뜀, e.g. dropped with 그만두기; 2026-10-23) need no production check: their worktree is
 removed as soon as no agent or unmanaged dev server runs in it, uncommitted/unpushed work included. A server
-started with tp dev is stopped on removal. Remote branch and PR stay.
+started with tp dev is stopped on removal. This also covers worktrees reserved by dispatch after a failed start.
+Remote branch and PR stay.
 
 Kept (reason stored, checked again next tick) when: uncommitted changes, local commits that are in neither the PR heads
 nor production, an open PR from the branch, a ticket agent still running (runner handle; Orca agent state for legacy
@@ -37,7 +38,7 @@ import time
 
 from . import runner as R
 from . import devserver, worktree_dev
-from .core import db, event, gh_json, now, orca_json, run
+from .core import db, dispatch_lock, event, gh_json, now, orca_json, run
 from .track import deployed_sha, track_config
 
 WORKSPACES = os.path.expanduser("~/orca/workspaces") + "/"  # legacy: worktrees Orca made before the local runner
@@ -251,13 +252,16 @@ def _drop_branch(repo_path: str, branch: str) -> str:
     return f"로컬 브랜치 {branch} 삭제"
 
 
-def remove(con, path: str, repo_path: str, branch: str, wait_s: int = 120, force: bool = False) -> str | None:
+def remove(con, path: str, repo_path: str, branch: str, wait_s: int = 120, force: bool = False, *,
+           checkout_id: str | None = None) -> str | None:
     """git worktree remove (force: a skipped ticket's local changes go too), then delete the local branch.
     Legacy Orca worktrees: orca worktree rm, then wait for it (Orca answers before the checkout is gone).
     Returns a note, or None while an Orca removal is still in progress (finished on a later tick)."""
     # Both scan paths commit "removing" before this call, so new tp dev starts stay out during removal.
     worktree_dev.stop(con, path)
-    if not _legacy(path):
+    if checkout_id and not R.owns_checkout(path, branch, checkout_id):
+        raise RuntimeError("삭제를 준비하는 동안 워크트리가 바뀌었어요")
+    if checkout_id or not _legacy(path):
         R.remove(repo_path, path, force=force)
         return "워크트리 삭제, " + _drop_branch(repo_path, branch)
     orca_json(["worktree", "rm", "--worktree", f"path:{path}", *(["--force"] if force else [])], timeout=300)
@@ -271,8 +275,11 @@ def remove(con, path: str, repo_path: str, branch: str, wait_s: int = 120, force
 def _finish(con, path: str, runs: list, base: dict, note: str, label: str, methods: str, how: str, key: str, gid: str,
             skipped: bool = False):
     ids = [r["id"] for r in runs]
-    con.execute(f"UPDATE runs SET removed_at=?, state=CASE WHEN state='active' THEN 'finished' ELSE state END, "
-                f"updated_at=? WHERE id IN ({','.join('?' * len(ids))})", (now(), now(), *ids))
+    if ids:
+        con.execute(f"UPDATE runs SET removed_at=?, state=CASE WHEN state='active' THEN 'finished' ELSE state END, "
+                    f"updated_at=? WHERE id IN ({','.join('?' * len(ids))})", (now(), now(), *ids))
+    else:
+        con.execute("DELETE FROM meta WHERE k=?", (f"dispatch_pending:{path}",))
     _upsert(con, path, status="removed", reason=note, removed_at=now(), **base)
     why = "건너뜀 티켓" if skipped else f"프로덕션 반영 확인 ({methods}; {how})"
     event(con, "cleanup", f"{key}: {why} → {label} {note}", gid)
@@ -298,20 +305,21 @@ def _candidates(con):
     return by_path
 
 
-def _clean_skipped(con, path: str, runs: list, wt: dict, ps: dict, dry_run: bool, stats: dict, log) -> None:
+def _clean_skipped(con, path: str, runs: list, wt: dict, ps: dict, dry_run: bool, stats: dict, log, *, reservation=None) -> None:
     """Remove the worktree of a skipped ticket (no production check, see module doc)."""
-    last = runs[-1]
+    last = reservation if reservation is not None else runs[-1]
     branch = (wt.get("branch") or "").replace("refs/heads/", "") or last["branch"] or ""
     base = dict(ticket_gid=last["ticket_gid"], key=last["key"], repo=last["repo"], branch=branch, checked_at=now())
     stats["checked"] += 1
     prev = con.execute("SELECT status, reason FROM cleanups WHERE path=?", (path,)).fetchone()
     why = safety(con, path, last["repo_path"], last["github"], branch, None, wt, ps)
     if why:
-        _upsert(con, path, status="kept", reason=why, **base)
-        if not prev or prev["status"] != "kept" or prev["reason"] != why:
-            event(con, "cleanup", f"{last['key']}: 건너뜀 티켓, 워크트리 유지: {why}", last["ticket_gid"])
+        if not dry_run:
+            _upsert(con, path, status="kept", reason=why, **base)
+            if not prev or prev["status"] != "kept" or prev["reason"] != why:
+                event(con, "cleanup", f"{last['key']}: 건너뜀 티켓, 워크트리 유지: {why}", last["ticket_gid"])
+            con.commit()
         stats["kept"] += 1
-        con.commit()
         log(f"cleanup {last['key']}: skipped, kept ({why})")
         return
     if dry_run:
@@ -320,7 +328,8 @@ def _clean_skipped(con, path: str, runs: list, wt: dict, ps: dict, dry_run: bool
         return
     _upsert(con, path, status="removing", reason="worktree 삭제 중", **base)
     con.commit()
-    note = remove(con, path, last["repo_path"], branch, force=True)
+    ownership = {"checkout_id": reservation["checkout_id"]} if reservation is not None else {}
+    note = remove(con, path, last["repo_path"], branch, force=True, **ownership)
     if note is None:
         log(f"cleanup {last['key']}: orca worktree rm still running, finishing next tick")
         return
@@ -330,13 +339,53 @@ def _clean_skipped(con, path: str, runs: list, wt: dict, ps: dict, dry_run: bool
     log(f"cleanup {last['key']}: removed {path} (skipped ticket); {note}")
 
 
+def _clean_pending_skipped(con, wts, repos, ps, dry_run, stats, log):
+    """Failed starts have a dispatch reservation in place of a run."""
+    reservations = con.execute("SELECT k,v FROM meta WHERE k GLOB 'dispatch_pending:*'").fetchall()
+    for row in reservations:
+        path = row["k"].removeprefix("dispatch_pending:")
+        pending = json.loads(row["v"])
+        wt = wts.get(path)
+        if not dry_run:
+            con.execute("BEGIN IMMEDIATE")
+        try:
+            gid = pending["ticket_gid"]
+            t = con.execute("SELECT key FROM tickets WHERE gid=? AND skip=1", (gid,)).fetchone()
+            if not t or con.execute("SELECT 1 FROM runs WHERE worktree_path=? AND removed_at IS NULL", (path,)).fetchone():
+                continue
+            checkout_id = pending.get("checkout_id")
+            branch = pending["branch"]
+            if (wt and wt["repo"] == pending.get("repo") and wt["branch"] == branch
+                    and (repo_path := repos.get(wt["repo"])) and R.owns_checkout(path, branch, checkout_id)):
+                last = dict(ticket_gid=gid, key=t["key"], repo=wt["repo"], repo_path=repo_path, github=None,
+                            branch=branch, checkout_id=checkout_id)
+                _clean_skipped(con, path, [], wt, ps, dry_run, stats, log, reservation=last)
+            elif not wt and not dry_run and not os.path.lexists(path):
+                # Once the checkout is gone, the reservation cannot establish ownership of a remaining branch.
+                con.execute("DELETE FROM meta WHERE k=?", (row["k"],))
+                con.commit()
+        except Exception as e:  # noqa: BLE001
+            if dry_run:
+                raise
+            con.rollback()
+            _upsert(con, path, status="error", reason=str(e)[:300], checked_at=now())
+            event(con, "error", f"cleanup {path}: {str(e)[:300]}", pending["ticket_gid"])
+            con.commit()
+        finally:
+            if not dry_run and con.in_transaction:
+                con.rollback()
+
+
 def cleanup_scan(dry_run: bool = False, log=print) -> dict:
     con = db()
     cfg = track_config()
-    wts = {w["path"]: w for w in R.worktrees([(r["name"], r["path"]) for r in con.execute("SELECT name, path FROM repos")])}
     ps = _ps_entries()
     deployed: dict[str, tuple[str | None, str]] = {}
     stats = {"checked": 0, "removed": 0, "kept": 0, "waiting": 0, "ambiguous": 0}
+    with dispatch_lock(con):
+        repos = dict(con.execute("SELECT name, path FROM repos"))
+        wts = {w["path"]: w for w in R.worktrees(repos.items())}
+        _clean_pending_skipped(con, wts, repos, ps, dry_run, stats, log)
     for path, runs in _candidates(con).items():
         last = runs[-1]
         wt = wts.get(os.path.realpath(path))

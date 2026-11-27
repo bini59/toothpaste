@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
+from ticket_pilot import dispatch, ticket_sync
 from ticket_pilot import cli, core, mode, notion, pipeline, release, server
 from ticket_pilot.storage import connection
 
@@ -436,7 +437,7 @@ class NotionTest(NotionDashboard):
         self.assertEqual(self.stages(), {t["title"]: t["stage"] for t in tickets})
         self.assertEqual({t["title"] for t in tickets if t["auto_start"]}, {n for n, s in self.stages().items() if s == "queued"})
         self.assertTrue(all(t["stage"] != "queued" for t in self.preview(cfg, repos=["app", "web"])))
-        with mock.patch.object(pipeline, "asana_comments", side_effect=AssertionError("Notion is not Asana")):
+        with mock.patch.object(dispatch, "asana_comments", side_effect=AssertionError("Notion is not Asana")):
             log = []
             pipeline.dispatch(dry_run=True, log=log.append)
             self.assertEqual(sum("페이지 본문에서 가져온 작업 설명" in s for s in log), 2)
@@ -579,6 +580,35 @@ class NotionTest(NotionDashboard):
         self.fixture.truncate_path = f"/data_sources/{TEAM_DB}/query"
         self.assertIn("example", pipeline.sync(log=lambda *_: None)["notion_errors"])
         self.assertEqual(self.stages(), {"개인 일정": "queued"})
+
+    def test_unavailable_source_keeps_its_tickets_and_the_other_sources_sync(self):
+        self.save(self.cfg)
+        self.post("/api/config", {"scope": "global", "value": {
+            "asana_enabled": True, "asana_workspace_gid": "1", "github_issues": {"app": "APP"},
+        }})
+        asana_task = {"gid": "1", "tags": [{"name": "tp"}]}
+        issue = {"number": 2, "url": "https://example.test/issues/2"}
+        page = self.fixture.pages[TEAM_DB][0]["properties"]["제목"]["title"]
+        read_tasks = self.enterContext(mock.patch.object(ticket_sync, "asana_all", return_value=[asana_task]))
+        read_issues = self.enterContext(mock.patch.object(ticket_sync, "_open_issues", return_value=[issue]))
+        gids = ("1", "gh:example/app#2", "notion:" + uid(101))
+        names = ("Asana", "GitHub", "Notion")
+        expected_titles = {}
+
+        for error_source in (None, "Asana", "GitHub", "Notion"):
+            with self.subTest(source=error_source):
+                read_tasks.side_effect = core.AsanaError("offline") if error_source == "Asana" else None
+                read_issues.side_effect = RuntimeError("offline") if error_source == "GitHub" else None
+                self.fixture.truncate_path = f"/data_sources/{TEAM_DB}/query" if error_source == "Notion" else None
+                titles = [f"{name} after {error_source}" for name in names]
+                asana_task["name"], issue["title"], page[0]["plain_text"] = titles
+                pipeline.sync(log=lambda *_: None)
+                for name, gid, title in zip(names, gids, titles):
+                    row = pipeline.find_ticket(self.con, gid)
+                    self.assertEqual((row["assigned"], row["completed"]), (1, 0))
+                    if name != error_source:
+                        expected_titles[name] = title
+                    self.assertEqual(row["name"], expected_titles[name])
 
     def test_page_moved_between_databases_wins_over_an_old_failed_listing(self):
         self.save({**self.cfg, "assignee": "all"}, "first")

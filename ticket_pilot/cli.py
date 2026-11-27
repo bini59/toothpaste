@@ -22,7 +22,7 @@ from . import mode as MO
 from . import milestone as MS
 from . import metrics as MET
 from . import metrics_usage as MU
-from . import automation, notion, notion_write, precheck, tick, ticket_write
+from . import automation, dispatch, notion, notion_write, precheck, tick, ticket_sync, ticket_write
 from . import pipeline as P
 from . import release as R
 from . import review
@@ -215,11 +215,11 @@ def main(argv=None):
     na.set_defaults(fn=cmd_notion_app)
     notion_write.register(sp)
     ticket_write.register(sp)
-    sp.add_parser("sync").set_defaults(fn=_log_errors(lambda a: P.sync()))
+    sp.add_parser("sync").set_defaults(fn=_log_errors(lambda a: ticket_sync.sync()))
     d = sp.add_parser("dispatch")
     d.add_argument("--dry-run", action="store_true")
     d.add_argument("--only")
-    d.set_defaults(fn=_log_errors(lambda a: P.dispatch(dry_run=a.dry_run, only=a.only)))
+    d.set_defaults(fn=_log_errors(lambda a: dispatch.dispatch(dry_run=a.dry_run, only=a.only)))
     sp.add_parser("scan").set_defaults(fn=_log_errors(lambda a: P.scan()))
     sp.add_parser("track").set_defaults(fn=_log_errors(lambda a: T.track_deploys()))
     sp.add_parser("precheck-dispatch").set_defaults(fn=cmd_precheck_dispatch)

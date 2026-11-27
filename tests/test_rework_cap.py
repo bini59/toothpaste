@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from ticket_pilot import dispatch as D
 from ticket_pilot import core, pipeline as P, review
 
 
@@ -20,12 +21,13 @@ class ReworkCapTest(unittest.TestCase):
                                   VALUES ('A','r','/wt','in-review','active')""").lastrowid
         self.con.execute("INSERT INTO prs(url,run_id,ticket_gid,repo,number,state,head_sha) VALUES ('u',?,'A','r',1,'OPEN','s0')",
                          (rid,))
-        self.p = [mock.patch.object(P, "db", lambda: self.con), mock.patch.object(P, "github_token", return_value="tok"),
+        self.p = [mock.patch.object(P, "db", lambda: self.con), mock.patch.object(D, "db", lambda: self.con),
+                  mock.patch.object(D, "github_token", return_value="tok"),
                   mock.patch.object(P.R, "launch", return_value="1 /tmp/tp-test-agent.log"),
                   mock.patch.object(P.R, "running", return_value=False),
-                  mock.patch.object(P, "max_rework_rounds", return_value=3),
+                  mock.patch.object(review, "max_rework_rounds", return_value=3),
                   mock.patch.object(P.N.CH, "_layout", return_value=[]),
-                  mock.patch.object(P, "settings", return_value={"max_active_runs": 3, "agent": "codex"})]
+                  mock.patch.object(D, "settings", return_value={"max_active_runs": 3, "agent": "codex"})]
         for x in self.p:
             x.start()
             self.addCleanup(x.stop)
@@ -82,14 +84,14 @@ class ReworkCapTest(unittest.TestCase):
     def test_no_github_token_no_agent_but_escalation_runs(self):
         """TP-112: without tp's GitHub token no agent starts (one error event), the cap still goes to the owner."""
         errors = lambda: self.con.execute("SELECT count(*) c FROM events WHERE kind='error'").fetchone()["c"]  # noqa: E731
-        with mock.patch.object(P, "github_token", return_value=None):
+        with mock.patch.object(D, "github_token", return_value=None):
             self.review_changes(0)
             P.dispatch(log=lambda *a: None)
             P.dispatch(log=lambda *a: None)
             self.assertEqual(len(self.launched()), 0)
             self.assertEqual(self.stage(), "rework")
             self.assertEqual(errors(), 1)
-            with mock.patch.object(P, "max_rework_rounds", return_value=1):
+            with mock.patch.object(review, "max_rework_rounds", return_value=1):
                 self.con.execute("UPDATE reviews SET rework_at='2000-01-01'")  # one round already sent
                 P.dispatch(log=lambda *a: None)
             self.assertEqual(self.stage(), "blocked")

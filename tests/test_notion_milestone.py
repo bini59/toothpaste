@@ -4,7 +4,7 @@ from unittest import mock
 
 from test_notion import DOCS_DB, HOME_DB, MEMBER, OWNER, TEAM_DB, NotionDashboard, uid
 from test_ticket_write import command
-from ticket_pilot import cli, core, deploy, milestone, notion, notion_stages, notion_tickets, pipeline, pr_tracking, release, server
+from ticket_pilot import cli, core, dispatch, deploy, milestone, notion, notion_stages, notion_tickets, pipeline, pr_tracking, release, review, server
 
 
 def relation(*ids):
@@ -552,7 +552,7 @@ class NotionMilestones(NotionDashboard):
             self.assertNotIn("add", args)
             return mock.Mock(returncode=0, stdout="")
         (self.root / "prompts").symlink_to(core.ROOT / "prompts", target_is_directory=True)
-        with mock.patch.object(pipeline, "ROOT", self.root), mock.patch.object(pipeline, "github_token", return_value="fixture"), \
+        with mock.patch.object(dispatch, "ROOT", self.root), mock.patch.object(dispatch, "github_token", return_value="fixture"), \
                 mock.patch.object(pipeline.R, "worktrees", return_value=[]), \
                 mock.patch.object(pipeline.R, "root", return_value=self.root), \
                 mock.patch.object(pipeline.R, "_git", side_effect=git), mock.patch.object(pipeline.R, "launch") as launch:
@@ -569,7 +569,7 @@ class NotionMilestones(NotionDashboard):
             self.use_task_db()
             cli.main(["sync"])
             return [{"repo": "app", "path": str(path)}]
-        with mock.patch.object(pipeline, "github_token", return_value="fixture"), \
+        with mock.patch.object(dispatch, "github_token", return_value="fixture"), \
                 mock.patch.object(pipeline.R, "worktrees", side_effect=discover), mock.patch.object(pipeline.R, "launch") as launch:
             self.assertEqual(pipeline.dispatch(only=gid), [])
         launch.assert_not_called()
@@ -689,7 +689,7 @@ class NotionMilestones(NotionDashboard):
     def test_direct_only_holds_the_subtask_before_dispatch_and_recovers(self):
         cli.main(["sync"])
         self.add_repo("app", modes=["direct"], staging=None)  # the saved queue still says "queued"
-        with mock.patch.object(pipeline, "github_token", return_value="fixture"), \
+        with mock.patch.object(dispatch, "github_token", return_value="fixture"), \
                 mock.patch.object(pipeline.R, "worktrees") as worktrees:
             self.assertEqual(pipeline.dispatch(only=self.gid), [])
         worktrees.assert_not_called()
@@ -732,7 +732,7 @@ class NotionMilestones(NotionDashboard):
     def test_staging_disabled_while_reading_the_brief_holds_the_subtask(self):
         cli.main(["sync"])
         self.fixture.on_markdown = lambda: self.add_repo("app", modes=["direct"], staging=None)
-        with mock.patch.object(pipeline, "github_token", return_value="fixture"), \
+        with mock.patch.object(dispatch, "github_token", return_value="fixture"), \
                 mock.patch.object(pipeline.R, "worktrees") as worktrees:
             self.assertEqual(pipeline.dispatch(only=self.gid), [])
         worktrees.assert_not_called()
@@ -907,7 +907,7 @@ class NotionMilestones(NotionDashboard):
                 self.con.execute("UPDATE tickets SET stage=?, reply='계속' WHERE gid=?", (stage, self.gid))
                 self.con.commit()
                 lines = []
-                with mock.patch.object(pipeline, handler) as resume:
+                with mock.patch.object(review, handler) as resume:
                     pipeline.dispatch(only=self.gid, dry_run=True, log=lines.append)
                 resume.assert_not_called()
                 self.assertTrue(any("app → 배포" in s for s in lines))

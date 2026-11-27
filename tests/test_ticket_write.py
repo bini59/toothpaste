@@ -9,6 +9,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from ticket_pilot import dispatch
+from ticket_pilot import ticket_sync
 from ticket_pilot import asana_write, cli, core, milestone, notion, pipeline, release
 from ticket_pilot.storage import connection
 
@@ -119,7 +121,7 @@ class TicketWriteTest(unittest.TestCase):
         parent = tasks[result["gid"]]
         self.assertEqual(parent["tags"], [tags[0]])
         self.assertEqual([s["key"] for s in result["subtasks"]], ["TASK-103", "TASK-104"])
-        with mock.patch.object(pipeline, "asana_all", return_value=[t for t in tasks.values() if t.get("assignee") == "me"]):
+        with mock.patch.object(ticket_sync, "asana_all", return_value=[t for t in tasks.values() if t.get("assignee") == "me"]):
             pipeline.sync(log=lambda *_: None)
         for child in result["subtasks"]:
             row = pipeline.find_ticket(self.con, child["key"])
@@ -191,7 +193,7 @@ class TicketWriteTest(unittest.TestCase):
             return [{**i, "url": i["html_url"], "parent": {**issues[12], "url": issues[12]["html_url"],
                      "repository": {"nameWithOwner": "Example/App"}} if i.get("parent_issue_id") else None}
                     for i in issues.values()] if repo == "example/app" else []
-        with mock.patch.object(pipeline, "_open_issues", side_effect=listing), mock.patch.object(pipeline, "asana_all", return_value=[]):
+        with mock.patch.object(ticket_sync, "_open_issues", side_effect=listing), mock.patch.object(ticket_sync, "asana_all", return_value=[]):
             self.assertEqual(pipeline.sync(log=lambda *_: None)["new_tagged"], ["APP-13", "APP-14", "APP-15"])
         self.assertEqual(pipeline.find_ticket(self.con, gid)["stage"], "open")
         child = pipeline.find_ticket(self.con, "APP-13")
@@ -200,7 +202,7 @@ class TicketWriteTest(unittest.TestCase):
             branch = milestone.ensure(self.con, child, "app")
         self.assertEqual(branch, "milestone/gh-example-app-12")
         msg = []
-        with mock.patch.object(pipeline, "_gh_issue_json", return_value={"comments": []}):
+        with mock.patch.object(dispatch, "gh_json", return_value={"comments": []}):
             pipeline.dispatch(dry_run=True, only="APP-13", log=msg.append)
         self.assertIn("--base " + branch, msg[-1])
         self.assertIn("ticket create --project proj", msg[-1])
