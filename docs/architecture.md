@@ -52,6 +52,13 @@
 - `#monitoring`의 [Monitoring.tsx](../web/src/views/Monitoring.tsx)에서 각 상세 화면의 기존 해시 주소로 이동한다. [useMonitoringData.ts](../web/src/views/useMonitoringData.ts)는 자동화 로그와 리뷰 화면에서 사용하는 `GET /api/events`와 `GET /api/reviews` 응답을 개별적으로 불러온다.
 - `npm run check`는 [monitoring.check.mjs](../web/src/monitoring.check.mjs)의 탐색 검사와 [usage-card.check.mjs](../web/src/components/usage-card.check.mjs)의 한도 초기화 시각 검사를 실행한다.
 
+## 호스트 서비스 설치와 업데이트
+
+- **호출 경로** — `tp setup`의 [setup.py](../ticket_pilot/setup.py), `tp update`의 [update.py](../ticket_pilot/update.py), `POST /api/lan/share`의 [server.py](../ticket_pilot/server.py), `tp mode host`의 [mode.py](../ticket_pilot/mode.py), `tp migrate`의 [migrate.py](../ticket_pilot/migrate.py)가 [launchd/install.sh](../launchd/install.sh)를 실행한다. Linux에서는 이 스크립트가 [systemd/install.sh](../systemd/install.sh)로 넘긴다.
+- **처리** — 각 설치 스크립트가 Python과 서비스 경로를 선택하고 사용자 서비스를 등록·재시작한다. 두 스크립트가 읽는 [service-install.sh](../scripts/service-install.sh)는 [core.py](../ticket_pilot/core.py)의 `settings()`로 `dashboard_port`와 `lan_share`를 읽고, 각 플랫폼의 템플릿을 렌더링하고, 루프백 주소의 `/api/state` 응답을 기다린다.
+- **운영** — 공개 저장소의 [release.yml](../.github/workflows/release.yml)이 GitHub Release와 웹 자산, Docker 이미지를 발행한다. 호스트는 `tp update`로 릴리스를 적용한다. 별도의 레거시 설치 저장소에서 쓰는 `deploy.yml`은 호스트의 `tp update --to <sha>`를 호출한다. Docker에서는 [compose.yaml](../docker/compose.yaml)의 `tp run`이 `tp-data` 볼륨의 DB를 쓰고, 호스트의 [docker_update_manager.py](../ticket_pilot/docker_update_manager.py)가 배포 이미지를 교체한다.
+- **테스트** — [test_install.py](../tests/test_install.py), [test_setup.py](../tests/test_setup.py), [test_update.py](../tests/test_update.py), [test_mode.py](../tests/test_mode.py), [test_lan.py](../tests/test_lan.py)
+
 ## PR에서 코드 지도 갱신
 
 코드 경로가 바뀌면 같은 PR에서 이 지도 파일을 추가하거나 내용을 수정한다. 경로, 호출 관계 또는 담당 범위가 바뀐 부분을 지도에 반영한다. 지도 삭제나 다른 경로로의 이동은 갱신으로 인정하지 않는다. 코드 변경이 없는 PR은 지도 변경 여부와 관계없이 통과한다.
