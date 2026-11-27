@@ -10,6 +10,7 @@ import urllib.error
 from http.server import ThreadingHTTPServer
 from unittest import mock
 
+from ticket_pilot import ticket_sync
 from ticket_pilot import config as G, core, onboard as OB, pipeline as P
 from ticket_pilot import server as S
 
@@ -152,7 +153,7 @@ class AsanaConnectTest(unittest.TestCase):
         self.assertEqual(self._ws(), "77")
 
     def test_empty_workspace_does_not_block_github_sync(self):
-        with mock.patch.object(P, "sync_issues") as github:
+        with mock.patch.object(ticket_sync, "sync_issues") as github:
             result = P.sync(log=lambda *a: None)
         self.assertIn("워크스페이스", result["asana_error"])
         github.assert_called_once()
@@ -163,9 +164,9 @@ class AsanaConnectTest(unittest.TestCase):
         issue = {"number": 1, "title": "mobile", "body": "", "url": "https://example.test/1",
                  "updatedAt": "now", "labels": [{"name": "tp"}]}
         sources = {"repo": ("REPO", "tp")}
-        with mock.patch.object(P, "issue_repos", return_value=sources), \
-             mock.patch.object(P, "_open_issues", return_value=[issue]), \
-             mock.patch.object(P, "load_map"):
+        with mock.patch.object(ticket_sync, "issue_repos", return_value=sources), \
+             mock.patch.object(ticket_sync, "_open_issues", return_value=[issue]), \
+             mock.patch.object(ticket_sync, "load_map"):
             con.execute("INSERT INTO repos(name, github) VALUES ('repo', 'owner/repo')")
             con.commit()
             result = P.sync(log=lambda *a: None)
@@ -177,7 +178,7 @@ class AsanaConnectTest(unittest.TestCase):
         con = core.db()
         con.execute("INSERT INTO tickets(gid,key,name,assigned,completed) VALUES ('123','AS-123','existing',1,0)")
         con.commit()
-        with mock.patch.object(P, "asana_all") as api, mock.patch.object(P, "sync_issues") as github:
+        with mock.patch.object(ticket_sync, "asana_all") as api, mock.patch.object(ticket_sync, "sync_issues") as github:
             result = P.sync(log=lambda *a: None)
         api.assert_not_called()
         github.assert_called_once()
@@ -196,12 +197,27 @@ class AsanaConnectTest(unittest.TestCase):
             con.execute("UPDATE tickets SET assigned=0 WHERE gid='123'")
             tagged.append("AS-123")
             raise core.AsanaError("offline")
-        with mock.patch.object(P, "_sync_asana", side_effect=partial), mock.patch.object(P, "sync_issues") as github:
+        with mock.patch.object(ticket_sync, "_sync_asana", side_effect=partial), mock.patch.object(ticket_sync, "sync_issues") as github:
             result = P.sync(log=lambda *a: None)
         self.assertEqual(result["asana_error"], "offline")
         self.assertEqual(result["new_tagged"], [])
         self.assertEqual(con.execute("SELECT assigned FROM tickets WHERE gid='123'").fetchone()[0], 1)
         github.assert_called_once()
+
+    def test_missing_task_lookup_distinguishes_deletion_from_read_failure(self):
+        G.update("global", {"asana_workspace_gid": "1"}, actor="cli")
+        con = core.db()
+        con.execute("INSERT INTO tickets(gid,key,name,assigned,completed) VALUES ('123','AS-123','existing',1,0)")
+        con.commit()
+        with mock.patch.object(ticket_sync, "asana_all", return_value=[]), \
+                mock.patch.object(ticket_sync, "asana", side_effect=[
+                    {"data": {"gid": "1"}}, core.AsanaError("unavailable", 503),
+                    {"data": {"gid": "1"}}, core.AsanaError("deleted", 404),
+                ]):
+            self.assertEqual(P.sync(log=lambda *_: None)["asana_error"], "unavailable")
+            self.assertEqual(con.execute("SELECT assigned FROM tickets WHERE gid='123'").fetchone()[0], 1)
+            self.assertNotIn("asana_error", P.sync(log=lambda *_: None))
+            self.assertEqual(con.execute("SELECT assigned FROM tickets WHERE gid='123'").fetchone()[0], 0)
 
     def test_foreign_origin_is_forbidden(self):
         self.kc[("ticket-pilot-asana", "asana")] = "old"

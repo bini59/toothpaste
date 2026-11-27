@@ -4,7 +4,8 @@ import sqlite3
 import unittest
 from unittest import mock
 
-from ticket_pilot import core, milestone, pipeline as P
+from ticket_pilot import ticket_sync as S
+from ticket_pilot import core, milestone
 
 
 def issue(n, *labels):
@@ -23,14 +24,14 @@ class SyncIssuesTest(unittest.TestCase):
         self.st = {"github_issues": {"tp": "TP", "old": "OLD"}}
         self.pm = {"projects": [{"id": "x", "source": "github", "repos": [{"repo": "tp"}]},
                                 {"id": "y", "source": "asana", "asana_gid": "1", "repos": [{"repo": "old"}]}]}
-        for p in (mock.patch.object(P, "settings", lambda: self.st), mock.patch.object(P, "project_map", lambda: self.pm),
-                  mock.patch.object(P, "_open_issues", self.open.__getitem__)):
+        for p in (mock.patch.object(S, "settings", lambda: self.st), mock.patch.object(S, "project_map", lambda: self.pm),
+                  mock.patch.object(S, "_open_issues", self.open.__getitem__)):
             p.start()
             self.addCleanup(p.stop)
 
     def sync(self):
         new = []
-        P.sync_issues(self.con, "now", new)
+        S.sync_issues(self.con, "now", new)
         return new
 
     def row(self, gid):
@@ -76,7 +77,7 @@ class SyncIssuesTest(unittest.TestCase):
     def test_failed_read_keeps_tickets(self):
         self.open["o/tp"] = [issue(1, "tp")]
         self.sync()
-        with mock.patch.object(P, "_open_issues", side_effect=RuntimeError("down")):
+        with mock.patch.object(S, "_open_issues", side_effect=RuntimeError("down")):
             self.sync()
         self.assertEqual(self.row("gh:o/tp#1"), ("TP-1", 0, 1))
 

@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import traceback
 
-from . import checks, cleanup, deploy, diffs, milestone, pipeline, release, track
+from . import checks, cleanup, deploy, diffs, milestone, pipeline, release, ticket_sync, track
+from .dispatch import dispatch as dispatch_tickets
 from .core import db, event
 
 
@@ -29,9 +30,9 @@ def _release_steps():
 
 def dispatch() -> int:
     """Sync and dispatch deterministically. Return the number of tickets needing AI triage."""
-    pipeline.sync()
+    ticket_sync.sync()
     _release_steps()
-    pipeline.dispatch()
+    dispatch_tickets()
     return len(pipeline.triage_list(mark=False))
 
 

@@ -19,8 +19,9 @@
 ## 티켓 동기화와 투입
 
 - **화면·API** — [Board.tsx](../web/src/views/Board.tsx)와 [Tickets.tsx](../web/src/views/Tickets.tsx)는 `GET /api/state`에서 티켓과 단계를 읽는다. `POST /api/refresh`는 동기화와 작업 상태 스캔을 실행하며, `POST /api/assign`은 투입할 저장소를 지정한다.
-- **처리** — `tp sync`와 투입 사전 점검이 [pipeline.py](../ticket_pilot/pipeline.py)의 `sync()`를 호출한다. Asana와 GitHub 이슈는 `_sync_asana()`와 `sync_issues()`에서, Notion 티켓은 [notion_tickets.py](../ticket_pilot/notion_tickets.py)에서 동기화한다. `compute_stage()`가 단계를 계산하고, `dispatch()`가 대상 티켓과 저장소를 골라 [runner.py](../ticket_pilot/runner.py)로 워크트리와 에이전트를 시작한다.
-- **테스트** — [test_issues.py](../tests/test_issues.py), [test_notion.py](../tests/test_notion.py), [test_deps.py](../tests/test_deps.py)
+- **동기화** — `tp sync`, 투입 사전 점검과 `POST /api/refresh`는 [ticket_sync.py](../ticket_pilot/ticket_sync.py)의 `sync()`를 호출한다. 이 모듈의 Asana와 GitHub 이슈 처리기, [notion_tickets.py](../ticket_pilot/notion_tickets.py)의 Notion 처리기가 각 소스의 필터, 부모 관계와 완료 상태를 적용한다.
+- **단계와 투입** — [pipeline.py](../ticket_pilot/pipeline.py)의 `compute_stage()`와 `restage()`는 동기화, 투입, PR 추적이 공유한다. `tp dispatch`와 투입 사전 점검은 [dispatch.py](../ticket_pilot/dispatch.py)에서 단계, 의존성, 남은 슬롯과 저장소를 확인한다. 마일스톤 기준 브랜치는 [milestone.py](../ticket_pilot/milestone.py)에 맡기고 작업 브리프를 작성해 [runner.py](../ticket_pilot/runner.py)로 워크트리와 에이전트를 시작한다. 시작에 실패하면 생성한 워크트리를 다음 투입에서 재사용한다. `--dry-run`은 브리프와 투입 계획을 출력한다.
+- **테스트** — [test_issues.py](../tests/test_issues.py), [test_notion.py](../tests/test_notion.py), [test_deps.py](../tests/test_deps.py), [test_dispatch.py](../tests/test_dispatch.py), [test_milestone.py](../tests/test_milestone.py)
 
 ## PR 검사와 리뷰
 

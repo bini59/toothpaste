@@ -7,6 +7,8 @@ from contextlib import contextmanager
 from unittest import mock
 
 from test_notion import DOCS_DB, MEMBER, OWNER, TEAM_DB, NotionDashboard, uid
+from ticket_pilot import ticket_sync
+from ticket_pilot import dispatch
 from ticket_pilot import chat, cli, core, migrate, notion, notion_stages, notion_tickets, pipeline, precheck, release, track
 
 
@@ -156,7 +158,7 @@ class NotionWrites(NotionDashboard):
     @contextmanager
     def fake_agent(self):
         (self.root / "prompts").symlink_to(core.ROOT / "prompts", target_is_directory=True)
-        with mock.patch.object(pipeline, "ROOT", self.root), mock.patch.object(pipeline, "github_token", return_value="fixture"), \
+        with mock.patch.object(dispatch, "ROOT", self.root), mock.patch.object(dispatch, "github_token", return_value="fixture"), \
                 mock.patch.object(pipeline.R, "worktrees", return_value=[]), mock.patch.object(pipeline.R, "create", return_value={
                     "path": str(self.root / "worktree"), "branch": "tp/example"}), \
                 mock.patch.object(pipeline, "prepare_worktree", return_value=(None, None)), \
@@ -323,9 +325,9 @@ class NotionWrites(NotionDashboard):
                 self.assertIsNone(notion_stages.start_worker(self.con))
                 self.assertIn("Notion 상태 반영", migrate.busy(self.con))
                 with self.fake_agent() as launch, mock.patch.object(precheck, "_release_steps"), \
-                        mock.patch.object(pipeline, "issue_repos", return_value={"app": ("GH", None)}), \
-                        mock.patch.object(pipeline, "_open_issues", return_value=[issue]), \
-                        mock.patch.object(pipeline, "_gh_issue_json", return_value={"comments": []}), \
+                        mock.patch.object(ticket_sync, "issue_repos", return_value={"app": ("GH", None)}), \
+                        mock.patch.object(ticket_sync, "_open_issues", return_value=[issue]), \
+                        mock.patch.object(dispatch, "gh_json", return_value={"comments": []}), \
                         self.assertRaises(SystemExit) as exit_status:
                     cli.main(["precheck-dispatch"])
                 self.assertEqual(exit_status.exception.code, 1)  # deterministic dispatch finished, no AI triage
