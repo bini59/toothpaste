@@ -88,14 +88,17 @@ def flush(con):
                 option = (cfg or {}).get("stage_statuses", {}).get("done" if parent else row["stage"])
                 source = (cfg or {}).get("milestone_data_source_id" if parent else "data_source_id")
                 if option and source == row["data_source_id"]:
+                    kinds = (notion_tickets.milestone_kinds([cfg]) if parent
+                             else notion_tickets.saved_milestone_kinds(con, source))
                     pages = notion_write.ProjectPages(con, cfg, source=source)
                     page = pages.client.page(page_id, pages.source)
-                    tagged_milestone = notion_tickets.milestone_tag_filter(pages.schema, cfg)
-                    same_role = not tagged_milestone or tagged_milestone(page) == parent
+                    tags = notion_tickets.milestone_tag_filters(pages.schema, kinds)
+                    same_role = not tags or any(tagged(page) for tagged in tags.values()) == parent
                     props = pages.status_change(page, option, by_id=True) if same_role else {}
                     # A host transition or settings save may have finished during the page/schema reads.
                     if (not con.execute("SELECT 1 FROM notion_status_queue WHERE id=?", (row["id"],)).fetchone()
-                            or notion_tickets.project_config(con, row["project_id"]) != cfg):
+                            or notion_tickets.project_config(con, row["project_id"]) != cfg
+                            or (not parent and notion_tickets.saved_milestone_kinds(con, source) != kinds)):
                         continue
                     if same_role and (not parent or milestone.all_repos_live(con, gid)):
                         pages.apply_properties(page, props)

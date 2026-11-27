@@ -8,12 +8,12 @@ from dataclasses import dataclass, field
 
 from . import notion, notion_membership
 from .core import ROOT, effective_config, event, meta_get, meta_set, read_config
+from .notion_membership import MILESTONE_KIND_FIELDS
 
 FILTER_TYPES = {"people": ("people",), "tag": ("select", "multi_select"), "status": ("status", "select")}
-MILESTONE_KIND_FIELDS = ("milestone_kind_property", "milestone_kind_option")
 FIELDS = {"connection_id", "data_source_id", "assignee", "people_property", "tag_property", "tag_option",
           "status_property", "status_option", "date_property", "milestone_data_source_id",
-          "milestone_property", *MILESTONE_KIND_FIELDS} | notion_membership.FIELDS
+          "milestone_property"} | notion_membership.FIELDS
 # Stages of an actual Notion run. Filter membership and the pre-dispatch queue are read-only.
 WRITE_STAGES = {"dispatched", "in_progress", "blocked", "agent_done", "pr_open", "rework", "conflict",
                 "reviewed", "approving", "staged", "merged", "deploying", "closed", "done"}
@@ -58,7 +58,7 @@ def validate(cfg, *, con=None, previous=None):
             client = notion.Client(con, cfg["connection_id"])
             schema = {col["id"]: col for col in client.properties(cfg["data_source_id"])}
             notion_membership.relation_column(schema, cfg, "milestone")
-            milestone_tag_filter(schema, cfg)
+            milestone_tag_filters(schema, milestone_kinds([cfg]))
     stages = cfg.get("stage_statuses", {})
     if (not isinstance(stages, dict) or stages.keys() - WRITE_STAGES
             or any(not isinstance(v, str) or not v for v in stages.values())
@@ -74,11 +74,23 @@ def project_config(con, pid):
     return json.loads(row["extra"])["notion"] if row else None
 
 
+def milestone_kinds(configs):
+    return {(cfg["milestone_kind_property"], cfg["milestone_kind_option"])
+            for cfg in configs if cfg.get("milestone_kind_property")}
+
+
+def saved_milestone_kinds(con, source):
+    """Dispatch and status workers need the current rules even between syncs."""
+    rows = con.execute("SELECT extra FROM config_projects WHERE source='notion'")
+    configs = (json.loads(row[0])["notion"] for row in rows)
+    return milestone_kinds(cfg for cfg in configs if cfg["data_source_id"] == source)
+
+
 def uses_milestone_kind(con, ticket):
     if not ticket["gid"].startswith("notion:"):
         return False
     cfg = project_config(con, ticket["project_gid"].removeprefix("notion:"))
-    return bool(cfg and cfg.get("milestone_kind_property"))
+    return bool(cfg and saved_milestone_kinds(con, cfg["data_source_id"]))
 
 
 def ticket_key(page_id):
@@ -156,18 +168,15 @@ class Listing:
     unresolved: set[str] = field(default_factory=set)
     error: str | None = None
     parents: dict[str, dict] = field(default_factory=dict)
+    milestones: set[str] = field(default_factory=set)
 
 
-def milestone_tag_filter(schema, cfg):
-    """Resolve the shared DB's discriminator once, before reading any rows."""
-    if cfg.get("milestone_data_source_id") != cfg["data_source_id"]:
-        return None
-    col = schema.get(cfg["milestone_kind_property"])
+def _milestone_tag_filter(schema, prop, option):
+    col = schema.get(prop)
     if not col or col["type"] not in FILTER_TYPES["tag"]:
-        raise notion.NotionError("마일스톤 판별 열이 바뀌었어요. 프로젝트 설정에서 다시 골라 주세요")
-    option = cfg["milestone_kind_option"]
+        raise notion.NotionError("마일스톤 판별 열이 바뀌었어요. 이 열을 지정한 프로젝트 설정에서 다시 골라 주세요")
     if not any(o["id"] == option for o in col["options"]):
-        raise notion.NotionError(f"{col['name']} 열의 마일스톤 태그가 바뀌었어요. 프로젝트 설정에서 다시 골라 주세요")
+        raise notion.NotionError(f"{col['name']} 열의 마일스톤 태그가 바뀌었어요. 이 태그를 지정한 프로젝트 설정에서 다시 골라 주세요")
 
     def tagged(page):
         kind = col["type"]
@@ -180,6 +189,18 @@ def milestone_tag_filter(schema, cfg):
         return any(o["id"] == option for o in value)
 
     return tagged
+
+
+def milestone_tag_filters(schema, kinds):
+    """Resolve every discriminator on the task DB, independent of the projects' import filters."""
+    return {kind: _milestone_tag_filter(schema, *kind) for kind in sorted(kinds)}
+
+
+def _parent_fields(parent=None, error=None):
+    return {"parent_gid": f"notion:{parent['id']}" if parent else None,
+            "parent_name": (notion.page_title(parent) or "제목 없음") if parent else None,
+            "parent_url": parent["url"] if parent else None, "in_milestone": int(bool(parent)),
+            "milestone_error": error}
 
 
 def _milestone_parent(client, page, column, source, cache):
@@ -204,31 +225,36 @@ def matches(con, project, work_tag, rules, *, track_runs=False):
     client = notion.Client(con, cfg["connection_id"])
     pages, schema = _query(client, cfg)
     milestone_col = notion_membership.relation_column(schema, cfg, "milestone")
-    tagged_milestone = milestone_tag_filter(schema, cfg)
-    milestones = {}
+    tag_filters = milestone_tag_filters(schema, milestone_kinds(rules.values()))
+    tagged_milestone = tag_filters.get((cfg.get("milestone_kind_property"), cfg.get("milestone_kind_option")))
+    parent_cache = {}
     membership = notion_membership.Membership(client, cfg["data_source_id"], schema, rules, project["id"])
     if cfg.get("project_page_id"):
         client.page(cfg["project_page_id"], cfg["project_data_source_id"])
     listing = Listing()
 
-    def read_parent(gid, page=None, *, milestone_row=False):
+    def is_milestone(page):
+        return any(tagged(page) for tagged in tag_filters.values())
+
+    def read_parent(gid, page=None):
         parent, error = None, None
         try:
+            if page is None and (milestone_col or tag_filters):
+                page = client.page(gid.removeprefix("notion:"), cfg["data_source_id"])
+                if is_milestone(page):
+                    listing.milestones.add(gid)
+                    return
             if milestone_col:
-                if page is None:
-                    page = client.page(gid.removeprefix("notion:"), cfg["data_source_id"])
-                    milestone_row = tagged_milestone and tagged_milestone(page)
-                if milestone_row:
-                    raise notion.NotionError("진행 중인 작업에 마일스톤 태그가 붙었어요. 작업을 계속하려면 태그를 제거하세요")
-                parent = _milestone_parent(client, page, milestone_col, cfg["milestone_data_source_id"], milestones)
-                if parent and tagged_milestone and not tagged_milestone(parent):
-                    raise notion.NotionError("연결된 행에 마일스톤 태그가 없어요. 마일스톤 태그가 붙은 행을 연결하세요")
+                parent = _milestone_parent(client, page, milestone_col, cfg["milestone_data_source_id"], parent_cache)
+                if parent and tagged_milestone:
+                    own_tag = tagged_milestone(parent)
+                    if own_tag or is_milestone(parent):
+                        listing.milestones.add(f"notion:{parent['id']}")
+                    if not own_tag:
+                        raise notion.NotionError("연결된 행에 이 프로젝트의 마일스톤 태그가 없어요. 해당 태그가 붙은 행을 연결하세요")
         except notion.NotionError as e:
             parent, error = None, str(e)
-        listing.parents[gid] = {"parent_gid": f"notion:{parent['id']}" if parent else None,
-                                "parent_name": (notion.page_title(parent) or "제목 없음") if parent else None,
-                                "parent_url": parent["url"] if parent else None, "in_milestone": int(bool(parent)),
-                                "milestone_error": error}
+        listing.parents[gid] = _parent_fields(parent, error)
 
     for page in pages:
         if not notion.active_page(page):
@@ -237,10 +263,8 @@ def matches(con, project, work_tag, rules, *, track_runs=False):
         if not notion.valid_id(page_id):
             raise notion.NotionError("Notion 페이지 ID를 확인할 수 없어요")
         gid = f"notion:{page_id}"
-        if tagged_milestone and tagged_milestone(page):
-            # A run may have started by the time sync applies this listing.
-            if track_runs:
-                read_parent(gid, page, milestone_row=True)
+        if is_milestone(page):
+            listing.milestones.add(gid)
             continue
         owners, ancestors = membership.resolve(page)
         if owners is notion_membership.UNRESOLVED:
@@ -263,9 +287,9 @@ def matches(con, project, work_tag, rules, *, track_runs=False):
         running = con.execute("""SELECT t.gid FROM tickets t WHERE project_gid=? AND completed=0
                                  AND gid LIKE 'notion:%' AND (? OR in_milestone=1 OR milestone_error IS NOT NULL)
                                  AND (SELECT state FROM runs WHERE ticket_gid=t.gid ORDER BY id DESC LIMIT 1) != 'abandoned'""",
-                              ("notion:" + project["id"], bool(milestone_col)))
+                              ("notion:" + project["id"], bool(milestone_col or tag_filters)))
         for gid, in running.fetchall():
-            if gid not in listing.parents:
+            if gid not in listing.parents and gid not in listing.milestones:
                 read_parent(gid)
     return listing
 
@@ -338,11 +362,15 @@ def _batches(con, projects, work_tag, listings, run_owners):
     # A page has one owner, the first matching configured project. Keep previous ownership on a failed
     # listing, or just for its unresolved pages, when the settings still match.
     current, confirmed_sources, confirmed_owners = [], {}, {}
+    milestones_by_source = {}
     for p in projects:
-        rules = notion_membership.settings(projects, p["notion"]["data_source_id"])
+        source = p["notion"]["data_source_id"]
+        rules = notion_membership.settings(projects, source)
         version = _version(p, work_tag, rules)
         listing = listings.get((p["id"], version), Listing(error="조회 중 설정이 바뀌었어요. 다음 동기화에서 다시 읽어요"))
-        confirmed_sources.update(dict.fromkeys(listing.rows, p["notion"]["data_source_id"]))
+        confirmed_sources.update(dict.fromkeys(listing.rows, source))
+        confirmed_sources.update(dict.fromkeys(listing.milestones, source))
+        milestones_by_source.setdefault(source, set()).update(listing.milestones)
         for gid, row in listing.rows.items():
             if row["owners"] is not None:
                 confirmed_owners.setdefault(gid, set()).update(row["owners"])
@@ -351,6 +379,14 @@ def _batches(con, projects, work_tag, listings, run_owners):
     claimed = set()
     for p, version, listing in current:
         pid = p["id"]
+        source = p["notion"]["data_source_id"]
+        # A peer may have seen the marker after this query, or read it through a child's relation.
+        marked = milestones_by_source[source]
+        for gid in marked & listing.rows.keys():
+            del listing.rows[gid]
+        for gid in marked & run_owners.keys():
+            if run_owners[gid] == f"notion:{pid}":
+                listing.parents[gid] = _parent_fields(error="진행 중인 작업에 마일스톤 태그가 붙었어요. 작업을 계속하려면 태그를 제거하세요")
         gids = set(listing.rows)
         if (listing.error or listing.unresolved) and previous.get(pid, {}).get("version") == version:
             held = {gid for gid, in con.execute("SELECT gid FROM tickets WHERE project_gid=? AND assigned=1",
@@ -358,8 +394,7 @@ def _batches(con, projects, work_tag, listings, run_owners):
             if not listing.error:
                 held &= listing.unresolved
             # A successful listing can confirm a move to another DB or an explicit owner in this DB.
-            source = p["notion"]["data_source_id"]
-            gids.update(gid for gid in held if confirmed_sources.get(gid, source) == source
+            gids.update(gid for gid in held - marked if confirmed_sources.get(gid, source) == source
                         and (gid not in confirmed_owners or pid in confirmed_owners[gid]))
         owned = {gid for gid in gids - claimed if gid not in run_owners or run_owners[gid] == f"notion:{pid}"}
         claimed.update(owned)
@@ -385,9 +420,10 @@ def _dispatch_source(con, project_gid, gid, parent_gid=None):
 
 def retry_error(con, ticket, *, lock=False):
     """Filtered runs may resume once sync has confirmed their current role and routing."""
+    # A peer can introduce the first marker on this DB right up to a relaunch.
+    if lock and ticket["gid"].startswith("notion:") and not con.in_transaction:
+        con.execute("BEGIN IMMEDIATE")
     if uses_milestone_kind(con, ticket):
-        if lock and not con.in_transaction:
-            con.execute("BEGIN IMMEDIATE")
         try:
             _dispatch_source(con, ticket["project_gid"], ticket["gid"], ticket["parent_gid"])
         except notion.NotionError as e:
@@ -464,7 +500,7 @@ def sync(con, generation, listings, ts, new_tagged):
         if listing.error:
             errors[p["id"]] = listing.error
             event(con, "error", f"Notion 동기화 ({p['name']}): {listing.error}")
-            continue
+            # A peer can still have confirmed the role of this project's active run.
         for gid, row in listing.rows.items():
             if gid not in owned:
                 continue

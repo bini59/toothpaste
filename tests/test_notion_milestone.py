@@ -2,7 +2,7 @@
 import json
 from unittest import mock
 
-from test_notion import DOCS_DB, HOME_DB, TEAM_DB, NotionDashboard, uid
+from test_notion import DOCS_DB, HOME_DB, MEMBER, TEAM_DB, NotionDashboard, uid
 from ticket_pilot import cli, core, deploy, milestone, notion, notion_stages, notion_tickets, pipeline, release, server
 
 
@@ -38,8 +38,9 @@ class NotionMilestones(NotionDashboard):
     def ticket(self, gid):
         return self.con.execute("SELECT * FROM tickets WHERE gid=?", (gid,)).fetchone()
 
-    def save_project(self):
-        self.post("/api/config", {"scope": "project.example", "value": {"source": "notion", "name": "example", "notion": self.cfg}})
+    def save_project(self, pid="example", cfg=None):
+        self.post("/api/config", {"scope": "project." + pid, "value": {"source": "notion", "name": pid,
+                  "notion": self.cfg if cfg is None else cfg, "repos": [{"repo": "app", "role": "app"}]}})
 
     def use_task_db(self, kind="select"):
         task = {"id": "task-id", "name": "작업"}
@@ -55,6 +56,106 @@ class NotionMilestones(NotionDashboard):
         self.cfg.update(milestone_data_source_id=TEAM_DB, milestone_kind_property="kind-id",
                         milestone_kind_option="milestone-id")
         self.save_project()
+
+    def test_milestone_is_excluded_from_every_project_sharing_the_task_db(self):
+        self.use_task_db()
+        peer = {k: v for k, v in self.cfg.items() if not k.startswith("milestone_")}
+        self.save_project("peer", peer)
+        cli.main(["sync"])
+        self.assertIsNone(self.ticket(self.parent_gid))
+        self.assertEqual(self.stages(), {"계정 연결": "queued"})
+        self.assertEqual(self.ticket(self.gid)["parent_gid"], self.parent_gid)
+        self.assertEqual([(t["gid"], t["stage"]) for t in self.preview(peer, pid="peer")],
+                         [(self.gid, "other_project")])
+        starts = [s for s in self.dispatch_log() if "would create" in s]
+        self.assertEqual(len(starts), 1)
+        self.assertIn(f"--base milestone/{self.parent['id']}", starts[0])
+
+    def test_later_projects_marker_applies_outside_its_import_filters(self):
+        self.use_task_db()
+        plain = {k: v for k, v in self.cfg.items() if not k.startswith("milestone_")}
+        self.save_project("example", plain)
+        cli.main(["sync"])
+        self.assertEqual(self.ticket(self.parent_gid)["stage"], "queued")
+
+        # Only the first project imports this assignee. Its existing queue must pick up the new rule.
+        self.save_project("peer", {**self.cfg, "assignee": MEMBER})
+        self.assertEqual([t["gid"] for t in self.preview(plain)], [self.gid])
+        self.assertFalse(any("would create" in s for s in self.dispatch_log()))
+        cli.main(["sync"])
+        self.assertFalse(self.ticket(self.parent_gid)["assigned"])
+        starts = [s.splitlines()[0] for s in self.dispatch_log() if "would create" in s]
+        self.assertNotIn("--- would create app/" + self.ticket(self.parent_gid)["key"].lower(), starts)
+        self.assertIn("--- would create app/" + self.ticket(self.gid)["key"].lower(), starts)
+
+    def test_marker_read_by_a_later_project_overrides_an_earlier_candidate(self):
+        self.use_task_db()
+        plain = {k: v for k, v in self.cfg.items() if not k.startswith("milestone_")}
+        self.save_project("example", plain)
+        self.save_project("peer", self.cfg)
+        kind = self.parent["properties"]["유형"]
+        marker, kind["select"] = kind["select"], None
+        # Return the parent on the first query page, then tag it before the peer's listing.
+        self.fixture.pages[TEAM_DB].reverse()
+        self.fixture.after_listing = lambda: kind.update(select=marker)
+        cli.main(["sync"])
+        self.assertIsNone(self.ticket(self.parent_gid))
+        self.assertEqual(self.stages(), {"계정 연결": "queued"})
+
+    def test_peer_run_blocks_when_only_the_linked_parent_confirms_its_tag(self):
+        self.use_task_db()
+        kind = self.parent["properties"]["유형"]
+        marker, kind["select"] = kind["select"], None
+        peer = {k: v for k, v in self.cfg.items() if not k.startswith("milestone_")}
+        peer["stage_statuses"] = {"in_progress": "doing-id", "blocked": "doing-id"}
+        self.save_project("peer", peer)
+        self.cfg["tag_option"] = "docs-id"
+        self.child["properties"]["라벨"]["multi_select"].append({"id": "docs-id", "name": "문서"})
+        self.save_project()
+        cli.main(["sync"])
+        self.assertEqual(self.ticket(self.parent_gid)["project_gid"], "notion:peer")
+        self.con.execute("INSERT INTO runs(ticket_gid,repo,state,ws_status) VALUES (?,'app','active','in-progress')",
+                         (self.parent_gid,))
+        pipeline.restage(self.con)
+        self.con.commit()
+
+        kind["select"] = marker
+        # The owner's two-page query fails. The other project reads just its child and the linked parent.
+        self.fixture.fail_cursor = TEAM_DB
+        self.assertEqual(set(pipeline.sync()["notion_errors"]), {"peer"})
+        card = next(t for t in server._state(self.con)["tickets"] if t["gid"] == self.parent_gid)
+        self.assertEqual((card["assigned"], card["stage"], card["milestone_kind_blocked"]), (0, "blocked", True))
+        self.assertIn("마일스톤 태그", card["milestone_error"])
+        self.assertIsNotNone(self.con.execute("SELECT 1 FROM notion_status_queue WHERE ticket_gid=?", (self.parent_gid,)).fetchone())
+        notion_stages.flush(self.con)
+        self.assertEqual(self.fixture.writes, [])
+        self.assertIsNone(self.con.execute("SELECT 1 FROM notion_status_queue").fetchone())
+
+        self.fixture.fail_cursor = False
+        self.child["properties"]["출시"] = relation()
+        self.parent["properties"]["개발 담당"]["people"] = []
+        cli.main(["sync"])
+        self.assertEqual(self.ticket(self.parent_gid)["stage"], "blocked")
+        kind["select"] = None
+        cli.main(["sync"])
+        self.assertEqual(self.ticket(self.parent_gid)["stage"], "in_progress")
+
+    def test_each_relation_requires_its_own_tag_and_stale_tags_hold_only_the_shared_db(self):
+        self.use_task_db("multi_select")
+        self.save_project("peer", {**self.cfg, "milestone_kind_option": "task-id"})
+        self.save_project("home", {"connection_id": self.connect("home"), "data_source_id": HOME_DB,
+                                   "people_property": "people-id", "tag_property": "tag-id"})
+        self.parent["properties"]["유형"]["multi_select"].pop()  # only the peer's tag remains
+        cli.main(["sync"])
+        self.assertIsNone(self.ticket(self.parent_gid))
+        self.assertIn("마일스톤 태그가 없어요", self.ticket(self.gid)["milestone_error"])
+        options = self.fixture.props["유형"]["multi_select"]["options"]
+        options.pop(0)  # the peer's saved option no longer exists
+        errors = pipeline.sync()["notion_errors"]
+        self.assertEqual(set(errors), {"example", "peer"})
+        self.assertTrue(all("다시 골라 주세요" in error for error in errors.values()))
+        starts = [s.splitlines()[0] for s in self.dispatch_log() if "would create" in s]
+        self.assertEqual(starts, ["--- would create app/" + notion_tickets.ticket_key(uid(201)).lower()])
 
     def test_task_db_select_uses_ids_for_listing_dispatch_and_verified_status(self):
         self.use_task_db()
