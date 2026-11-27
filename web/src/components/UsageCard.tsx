@@ -105,7 +105,7 @@ export function UsageCard({ usage: { claude, codex, agy }, collapsed }: { usage:
     <div
       role="region"
       aria-label="에이전트 사용량"
-      className={cn("max-h-[45dvh] space-y-2 overflow-y-auto border-t border-border bg-surface px-4 py-2",
+      className={cn("max-h-[45dvh] shrink-0 space-y-2 overflow-y-auto border-t border-border bg-surface px-4 py-2",
         collapsed && "lg:px-2")}
     >
       {claude !== undefined && <div title={tip("Claude", claude, cm)}>

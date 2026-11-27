@@ -19,9 +19,10 @@ const slide = "transition-[width,transform] duration-300 ease-[cubic-bezier(0.4,
 
 function NavLink({ item, small, rail }: { item: SidebarItem; small?: boolean; rail?: boolean }) {
   const Icon = item.icon;
+  // Keep absolutely positioned screen-reader labels in the same scroll container as their links.
   return (
     <a {...inert(item)} aria-current={current(item)} title={rail ? named(item) : undefined}
-      className={cn("flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2 text-sm", item.placeholder && "invisible",
+      className={cn("relative flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2 text-sm", item.placeholder && "invisible",
         rail && "lg:justify-center lg:py-2.5",
         item.active ? "bg-primary-50 font-semibold text-primary-700" : "font-medium text-text-muted hover:bg-grey-50 hover:text-text-main")}>
       <Icon className={cn("shrink-0", small ? "h-4 w-4" : "h-5 w-5")} />
@@ -52,7 +53,7 @@ function Group({ group }: { group: SidebarGroup }) {
 
 /**
  * Fixed sidebar on desktop (the logo button collapses it to an icon rail), overlay drawer on mobile.
- * The rail lists groups flat. Pinned links stay between the scrolling navigation and footer.
+ * The rail lists groups flat. The whole sidebar scrolls if the navigation and footer cannot fit.
  */
 export function Sidebar({ serviceName, version, logo, items, pinnedItems, collapsed, onCollapsedChange, mobileOpen, onMobileClose, className, footer }: {
   serviceName: string; version: string; logo: React.ReactNode; items: SidebarEntry[]; pinnedItems?: SidebarItem[];
@@ -64,7 +65,7 @@ export function Sidebar({ serviceName, version, logo, items, pinnedItems, collap
     <>
       <div aria-hidden={!mobileOpen} onClick={onMobileClose}
         className={cn("fixed inset-0 z-50 bg-black/40 backdrop-blur-sm lg:hidden", slide, mobileOpen ? "opacity-100" : "pointer-events-none opacity-0")} />
-      <aside className={cn("fixed inset-y-0 left-0 z-50 flex w-[260px] max-w-[85vw] flex-col border-r border-border bg-surface lg:max-w-none",
+      <aside className={cn("fixed inset-y-0 left-0 z-50 flex w-[260px] max-w-[85vw] flex-col overflow-y-auto border-r border-border bg-surface lg:max-w-none",
         // transform, not Tailwind's translate-x (the translate property): `slide` transitions transform
         collapsed ? "lg:w-[72px]" : "lg:w-[260px]", mobileOpen ? "transform-none" : "[transform:translateX(-100%)] lg:transform-none", slide, className)}>
         <div className="flex h-14 shrink-0 items-center gap-2 border-b border-border px-3">
