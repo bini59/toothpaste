@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { prerender } from "react-dom/static";
 import { createServer } from "vite";
 
-const routes = ["metrics", "dispatch", "reviews", "deploy", "cleanup", "log", "jobs", "history", "chat-compactions"];
+const routes = ["metrics", "dispatch", "reviews", "deploy", "cleanup", "log", "jobs", "history"];
+const compactionRoutes = ["chat-compactions", "metrics/chat-compactions"];
 const hrefs = (html) => [...html.matchAll(/href="#([^"]+)"/g)].map(([, href]) => href);
 
 // Render the actual hash routes without starting a dashboard or fetching state.
@@ -28,15 +30,21 @@ try {
     for (const nav of [expanded, rail]) {
       const links = hrefs(nav);
       assert.deepEqual(links.slice(0, 6), ["inbox", "board", "milestones", "office", "release", "projects"]);
-      assert(links.every((href) => !["monitoring", ...routes].includes(href)));
+      assert(links.every((href) => !["monitoring", ...routes, ...compactionRoutes].includes(href)));
     }
     assert.deepEqual(hrefs(pinned), ["monitoring", "settings", "help"]);
     assert.match(pinned, /<a\b[^>]+href="#monitoring"[^>]+aria-current="page"/);
   }
-  for (const route of routes) {
+  for (const route of [...routes, ...compactionRoutes]) {
     const html = render(`#${route}`, false);
     assert.match(html, /<a\b[^>]+href="#monitoring"[^>]+aria-current="location"/);
     assert.match(html, /<header\b[^]*?href="#monitoring"[^>]*>모니터링<\/a>/);
+  }
+  for (const route of compactionRoutes) {
+    location.hash = `#${route}`;
+    const { prelude } = await prerender(createElement(App, { me: {} }));
+    const html = await new Response(prelude).text();
+    assert.match(html, /<main\b[^]*?<a\b[^>]+href="#metrics\/chat-compactions"[^>]+aria-current="page"/);
   }
   console.log("monitoring navigation check ok");
 } finally {
