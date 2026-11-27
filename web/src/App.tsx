@@ -1,19 +1,18 @@
-import { forwardRef, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Armchair, ChartNoAxesCombined, CircleHelp, Flag, ArrowUpCircle, Brush, Inbox as InboxIcon, ClipboardList, FolderGit2, GitPullRequest, History as HistoryIcon, LayoutDashboard, ListChecks, Milestone, Minimize2, type LucideIcon, type LucideProps, LayoutGrid, Package, RefreshCw, Rocket, ScrollText, Search, Settings as SettingsIcon, Star, Timer, Workflow } from "lucide-react";
-import { Button, Header, Sidebar, cn, type BreadcrumbItem, type SidebarEntry } from "./ui";
+import { forwardRef, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Activity, Armchair, ChartNoAxesCombined, CircleHelp, Flag, ArrowUpCircle, Brush, Inbox as InboxIcon, ClipboardList, FolderGit2, GitPullRequest, History as HistoryIcon, LayoutDashboard, ListChecks, Milestone, Minimize2, type LucideIcon, type LucideProps, LayoutGrid, Package, RefreshCw, Rocket, ScrollText, Search, Settings as SettingsIcon, Star, Timer, Workflow } from "lucide-react";
+import { Button, Header, Sidebar, cn, type BreadcrumbItem, type SidebarEntry, type SidebarItem } from "./ui";
 import { fetchState, getJson, post, postJson } from "./api";
 import { CommandPalette } from "./components/CommandPalette";
 import { UsageCard } from "./components/UsageCard";
 import { ROLES, ago, deployable, indexState, milestones } from "./lib";
 import type { AgentUsage, DeployRequest, InboxNotification, LanMe, Project, State } from "./types";
 import { Board } from "./views/Board";
-import { ChatCompactions } from "./views/ChatCompactions";
 import { Help } from "./views/Help";
 import { Inbox } from "./views/Inbox";
 import { logout } from "./views/Lan";
 import { Log } from "./views/Log";
-import { Metrics } from "./views/Metrics";
 import { Milestones } from "./views/Milestones";
+import { Monitoring } from "./views/Monitoring";
 import { Office } from "./views/Office";
 import { Projects, SECTIONS, parseProjectSub, projectHref, projectOfRepo } from "./views/Projects";
 import { Release } from "./views/Release";
@@ -26,6 +25,21 @@ import { Tickets } from "./views/Tickets";
 import { Start } from "./views/Start";
 import { Update } from "./views/Update";
 
+const Metrics = lazy(() => import("./views/Metrics").then(
+  (module) => ({ default: module.Metrics }),
+  () => ({ default: MetricsLoadError }),
+));
+
+function MetricsLoadError() {
+  return (
+    <div className="space-y-3">
+      <p role="alert" className="text-sm text-danger-700">지표 화면을 불러오지 못했어요.</p>
+      <Button size="sm" variant="secondary" onClick={() => location.reload()}>페이지 새로고침</Button>
+    </div>
+  );
+}
+const COMPACTIONS_ROUTE = "metrics/chat-compactions";
+const MONITORING = "모니터링";
 const TABS = {
   inbox: { label: "수신함", icon: InboxIcon, group: null },
   board: { label: "보드", icon: LayoutDashboard, group: null },
@@ -35,15 +49,15 @@ const TABS = {
   projects: { label: "프로젝트", icon: FolderGit2, group: null },
   tickets: { label: "전체 티켓", icon: ListChecks, group: "티켓" },
   map: { label: "관계도", icon: Workflow, group: "티켓" },
-  dispatch: { label: ROLES.dispatch.label, icon: ClipboardList, group: "모니터링" },
-  reviews: { label: ROLES.reviews.label, icon: GitPullRequest, group: "모니터링" },
-  deploy: { label: ROLES.deploy.label, icon: Package, group: "모니터링" },
-  cleanup: { label: ROLES.cleanup.label, icon: Brush, group: "모니터링" },
-  log: { label: "전체 로그", icon: ScrollText, group: "모니터링" },
-  jobs: { label: "시스템 자동화", icon: Timer, group: "모니터링" },
-  metrics: { label: "지표", icon: ChartNoAxesCombined, group: "모니터링" },
-  history: { label: "설정 이력", icon: HistoryIcon, group: "모니터링" },
-  "chat-compactions": { label: "채팅 압축", icon: Minimize2, group: "모니터링" },
+  monitoring: { label: MONITORING, icon: Activity, group: null },
+  metrics: { label: "지표", icon: ChartNoAxesCombined, group: MONITORING },
+  dispatch: { label: ROLES.dispatch.label, icon: ClipboardList, group: MONITORING },
+  reviews: { label: ROLES.reviews.label, icon: GitPullRequest, group: MONITORING },
+  deploy: { label: ROLES.deploy.label, icon: Package, group: MONITORING },
+  cleanup: { label: ROLES.cleanup.label, icon: Brush, group: MONITORING },
+  log: { label: "전체 로그", icon: ScrollText, group: MONITORING },
+  jobs: { label: "시스템 자동화", icon: Timer, group: MONITORING },
+  history: { label: "설정 이력", icon: HistoryIcon, group: MONITORING },
   settings: { label: "설정", icon: SettingsIcon, group: null },
   update: { label: "업데이트", icon: ArrowUpCircle, group: null },
   start: { label: "시작하기", icon: Flag, group: null },
@@ -52,13 +66,18 @@ const TABS = {
 type Tab = keyof typeof TABS;
 // #tab or #tab/<sub> (프로젝트: #projects/<project id>/<chat|board|tickets|settings>/<conversation | repo>, 마일스톤: #milestones/<parent gid>,
 // 시스템 자동화: #jobs/<job id>, 설정: #settings/<section>, 설정 이력: #history/<scope>).
+const readRoute = () => location.hash === "#chat-compactions" ? COMPACTIONS_ROUTE : location.hash.slice(1);
 const readTab = (): Tab => {
-  const h = location.hash.slice(1).split("/")[0];
+  const h = readRoute().split("/")[0];
   return h in TABS ? (h as Tab) : "board";
 };
-const PALETTE_TABS = Object.entries(TABS).map(([key, t]) => ({ key, ...t }));
+const PALETTE_TABS = [
+  ...Object.entries(TABS).map(([key, t]) => ({ key, ...t })),
+  { key: COMPACTIONS_ROUTE, label: "채팅 압축", icon: Minimize2, group: `${MONITORING} → ${TABS.metrics.label}` },
+];
+const MONITORING_TABS = PALETTE_TABS.filter((t) => t.group === MONITORING);
 const MAC = /Mac|iPhone|iPad/.test(navigator.platform);
-const readSub = () => decodeURIComponent(location.hash.slice(1).split("/").slice(1).join("/"));
+const readSub = () => decodeURIComponent(readRoute().split("/").slice(1).join("/"));
 
 /** A sidebar icon with a dot in its top-right corner: that project's agent is writing a reply. */
 const withDot = (Icon: LucideIcon) => forwardRef<SVGSVGElement, LucideProps>((p, ref) => (
@@ -141,7 +160,7 @@ export default function App({ me }: { me: LanMe }) {
     let last = page();
     // tab visits, two levels deep (projects/<id>, settings/repos), for pruning unused pages (TP-136, remove ~2026-11-26)
     const view = () => {
-      const [h, s] = location.hash.slice(1).split("/"), t = readTab();
+      const [h, s] = readRoute().split("/"), t = readTab();
       return h === t && s ? `${t}/${s}` : t;
     };
     let lastView = view();
@@ -239,6 +258,7 @@ export default function App({ me }: { me: LanMe }) {
     { label: "전체 보기", icon: LayoutGrid, href: "#projects", active: tab === "projects" && !shortcuts.some((p) => p.id === proj.id), onClick: () => setMobileOpen(false) },
   ];
   const nUnread = (projects ?? []).reduce((n, p) => n + (p.unread || 0), nAlerts);
+  const group = TABS[tab].group;
   const items: SidebarEntry[] = [
     { ...leaf("inbox"), label: nUnread ? `수신함 · ${nUnread}` : "수신함" },
     leaf("board"),
@@ -247,20 +267,22 @@ export default function App({ me }: { me: LanMe }) {
     { ...leaf("release"), label: nReady ? `배포 · ${nReady}` : "배포" },
     { label: "프로젝트", items: projectItems },
     { label: "티켓", items: [leaf("tickets"), leaf("map")] },
-    { label: "모니터링", items: [leaf("metrics"), leaf("dispatch"), leaf("reviews"), leaf("deploy"), leaf("cleanup"), leaf("log"), leaf("jobs"), leaf("history"), leaf("chat-compactions")] },
-    leaf("settings"),
-    leaf("help"),
     // until the first project exists (afterwards 설정 and the ⌘K palette still open it)
     ...(projects && !projects.length || tab === "start" ? [leaf("start")] : []),
     // only when tp tick saw a newer release (or while on the page, so it stays after updating)
     ...(s?.meta.version.update || tab === "update"
       ? [{ ...leaf("update"), label: s?.meta.version.update ? `업데이트 ${s.meta.version.update}` : "업데이트" }] : []),
   ];
+  const pinnedItems: SidebarItem[] = [
+    { ...leaf("monitoring"), active: group === MONITORING ? "location" : tab === "monitoring" },
+    leaf("settings"),
+    leaf("help"),
+  ];
   const subLabel = tab === "milestones" && s ? (milestones(s).find((m) => m.gid === sub)?.name ?? sub) : sub;
   const hasSub = (tab === "milestones" || tab === "jobs" || tab === "history") && !!sub;
   const crumbs: BreadcrumbItem[] = [
     { label: "toothpaste", href: "#board" },
-    ...(TABS[tab].group ? [{ label: TABS[tab].group! }] : []),
+    ...(group ? [{ label: group, href: group === MONITORING ? "#monitoring" : undefined }] : []),
     ...(tab === "projects" && proj.id
       ? [{ label: TABS.projects.label, href: "#projects" },
          { label: projects?.find((p) => p.id === proj.id)?.name ?? proj.id, href: projectHref(proj.id) },
@@ -275,6 +297,7 @@ export default function App({ me }: { me: LanMe }) {
         version={(s?.meta.version.current ?? "").replace(/^v/, "")}
         logo={<Logo />}
         items={items}
+        pinnedItems={pinnedItems}
         collapsed={collapsed}
         onCollapsedChange={setCollapsed}
         mobileOpen={mobileOpen}
@@ -283,7 +306,7 @@ export default function App({ me }: { me: LanMe }) {
       />
       <CommandPalette open={palette} onClose={() => setPalette(false)} tabs={PALETTE_TABS} />
       {/* the office room fits the viewport height: the column is exactly one screen tall and main scrolls (only when the list is open) */}
-      <div className={cn("flex min-w-0 flex-1 flex-col lg:transition-[margin] lg:duration-300", tab === "office" || chatFull ? "h-dvh" : "min-h-screen", collapsed ? "lg:ml-[72px]" : "lg:ml-[260px]")}>
+      <div className={cn("flex min-w-0 flex-1 flex-col lg:transition-[margin] lg:duration-300", tab === "metrics" ? "h-dvh overflow-hidden" : tab === "office" || chatFull ? "h-dvh" : "min-h-screen", collapsed ? "lg:ml-[72px]" : "lg:ml-[260px]")}>
         <Header
           breadcrumbs={crumbs}
           onMenuClick={() => setMobileOpen(true)}
@@ -313,10 +336,17 @@ export default function App({ me }: { me: LanMe }) {
             </>
           }
         />
-        <main className={cn("min-w-0 flex-1", chatFull ? "flex min-h-0 flex-col" : "p-4 sm:p-6", tab === "office" && "flex min-h-0 flex-col overflow-y-auto")}>
-          {error && !s && <p className="text-sm text-danger-700">데이터를 불러오지 못했어요: {error}</p>}
-          {!s || !I ? (
-            !error && <p className="text-sm text-text-muted">불러오는 중…</p>
+        <main className={cn("min-w-0 flex-1", chatFull ? "flex min-h-0 flex-col" : "p-4 sm:p-6", tab === "office" && "flex min-h-0 flex-col overflow-y-auto",
+          tab === "metrics" && "flex min-h-0 flex-col")}>
+          {tab === "monitoring" ? (
+            <Monitoring title={MONITORING} items={MONITORING_TABS} />
+          ) : tab === "metrics" ? (
+            <Suspense fallback={<p role="status" className="text-sm text-text-muted">지표를 불러오는 중…</p>}>
+              <Metrics sub={sub} />
+            </Suspense>
+          ) : !s || !I ? (
+            error ? <p className="text-sm text-danger-700">데이터를 불러오지 못했어요: {error}</p>
+              : <p className="text-sm text-text-muted">불러오는 중…</p>
           ) : tab === "inbox" ? (
             <Inbox onChanged={loadProjects} />
           ) : tab === "board" ? (
@@ -344,12 +374,8 @@ export default function App({ me }: { me: LanMe }) {
             <Update onDone={load} />
           ) : tab === "jobs" ? (
             <SystemJobs sub={sub} />
-          ) : tab === "metrics" ? (
-            <Metrics />
           ) : tab === "history" ? (
             <SettingsHistory sub={sub} />
-          ) : tab === "chat-compactions" ? (
-            <ChatCompactions />
           ) : tab === "reviews" ? (
             <>
               {/* above the log: the log ends with the automations table, which loads late and would push this down (TP-174) */}

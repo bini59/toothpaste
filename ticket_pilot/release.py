@@ -26,6 +26,7 @@ from . import milestone as M
 from . import notifications as N
 from .core import asana, current_actor, db, event, gh_json, meta_get, now, repo_rules, run, settings, train_repos
 from .pipeline import VIOLATION, active_deploy, active_release_pr_urls, latest_run, restage, review_overridden, run_pr
+from .release_checks import AwaitingTests, PUBLIC_REPOSITORY, StagingAdvanced, merge_deployment_pr
 
 
 def cfg() -> dict:
@@ -400,6 +401,20 @@ def release_tick(log=print, force: bool = False) -> str:
     return "done for today"
 
 
+def _open_pr(gh, base, head, title, body) -> str:
+    if (gh, base, head) == (PUBLIC_REPOSITORY, "main", "staging"):
+        # Qualify the head by owner so a fork PR with a branch named staging is never reused.
+        owner = gh.split("/", 1)[0]
+        existing = gh_json(["api", f"repos/{gh}/pulls?state=open&base=main&head={owner}%3Astaging",
+                            "--jq", "map({url: .html_url})"])
+    else:
+        existing = gh_json(["pr", "list", "--repo", gh, "--base", base, "--head", head, "--state", "open", "--json", "url"])
+    if existing:
+        return existing[0]["url"]
+    return _gh(["pr", "create", "--repo", gh, "--base", base, "--head", head, "--title", title[:200],
+                "--body", body]).stdout.strip().splitlines()[-1]
+
+
 def _start(con, rel, log) -> str:
     rc = repo_rules(rel["repo"]) or {}
     gh = rel["github"]
@@ -412,7 +427,11 @@ def _start(con, rel, log) -> str:
         return "waiting for dashboard deploy"
     try:
         # 1) staging must contain only the approved PRs (the owner: anything else -> stop)
-        cmp = gh_json(["api", f"repos/{gh}/compare/{main}...{stg}"])
+        approved_head = None
+        if (gh, stg, main) == (PUBLIC_REPOSITORY, "staging", "main"):
+            # Compare the same staging snapshot that the deployment PR must test and merge.
+            approved_head = gh_json(["api", f"repos/{gh}/commits/{stg}"])["sha"]
+        cmp = gh_json(["api", f"repos/{gh}/compare/{main}...{approved_head or stg}"])
         pending_commits = [x["sha"] for x in cmp.get("commits", [])]
         if not pending_commits:
             _finish(con, rel, "aborted", f"{stg}와 {main}에 차이가 없어요 (이미 배포됐거나 머지가 안 됨)")
@@ -432,7 +451,7 @@ def _start(con, rel, log) -> str:
         if extra:
             _finish(con, rel, "aborted", f"{stg}에 승인 안 된 커밋 {len(extra)}개: " + ", ".join(s[:7] for s in extra[:8]))
             return "aborted"
-        head = gh_json(["api", f"repos/{gh}/commits/{stg}"])["sha"]
+        head = approved_head or gh_json(["api", f"repos/{gh}/commits/{stg}"])["sha"]
         # 2) staging pipeline must be green for the current staging head
         if rc["staging"].get("pipeline"):
             ex = _execution_for(rc["staging"]["pipeline"], head)
@@ -447,16 +466,26 @@ def _start(con, rel, log) -> str:
         title = f"Release {rel['day']}: " + ", ".join((p["title"] or p["key"]).split(" ")[0] for p in prs)
         body = "Weekday release train (ticket-pilot).\n\n" + "\n".join(
             f"- #{p['number']} {p['title']} ({p['key']})" for p in prs) + f"\n\nTickets: {keys}\n"
-        existing = gh_json(["pr", "list", "--repo", gh, "--base", main, "--head", stg, "--state", "open", "--json", "url"])
-        url = existing[0]["url"] if existing else _gh(["pr", "create", "--repo", gh, "--base", main, "--head", stg,
-                                                       "--title", title[:200], "--body", body]).stdout.strip().splitlines()[-1]
-        _gh(["pr", "merge", url, "--merge"])
-        info = gh_json(["pr", "view", url, "--json", "state,mergedAt,mergeCommit"])
-        if info["state"] != "MERGED":
-            _finish(con, rel, "failed", f"{url} merge 실패 (state={info['state']})")
-            return "failed"
+        url = _open_pr(gh, main, stg, title, body)
+        try:
+            sha = merge_deployment_pr(gh, url.rsplit("/", 1)[-1], base=main, method="merge", approved_head=approved_head)
+        except StagingAdvanced as error:
+            log(f"release {rel['repo']}: {error}")
+            return "waiting for staging recheck"
+        except AwaitingTests as error:
+            log(f"release {rel['repo']}: {error}")
+            return "waiting for deployment PR tests"
+        if sha:
+            merged_at = now()
+        else:
+            _gh(["pr", "merge", url, "--merge"])
+            info = gh_json(["pr", "view", url, "--json", "state,mergedAt,mergeCommit"])
+            if info["state"] != "MERGED":
+                _finish(con, rel, "failed", f"{url} merge 실패 (state={info['state']})")
+                return "failed"
+            sha, merged_at = info["mergeCommit"]["oid"], info["mergedAt"]
         con.execute("UPDATE releases SET status='deploying', release_pr_url=?, merge_sha=?, merged_at=? WHERE id=?",
-                    (url, info["mergeCommit"]["oid"], info["mergedAt"], rel["id"]))
+                    (url, sha, merged_at, rel["id"]))
         event(con, "release", f"release {rel['day']} {rel['repo']}: {url} merged ({keys}); waiting for the prod pipeline")
         con.commit()
         log(f"release {rel['repo']}: merged {url}")
