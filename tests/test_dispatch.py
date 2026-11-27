@@ -7,16 +7,17 @@ from pathlib import Path
 from unittest import mock
 
 from ticket_pilot import briefs, cleanup, core, dispatch as D, milestone, pipeline as P, review, runner
+from ticket_pilot.storage import connection
 
 
 class DispatchFixture(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.enterContext(mock.patch.object(core, "DB_PATH", self.root / "tp.db"))
-        self.enterContext(mock.patch.object(core, "_CON", None))
+        self.enterContext(mock.patch.object(connection, "_main_connections", {}))
         self.addCleanup(core.config_cache_clear)
         self.con = core.db()
-        self.addCleanup(self.con.close)
+        self.addCleanup(core.close_db, self.con)
         self.con.execute("INSERT INTO repos(name, path, github) VALUES ('app', ?, 'owner/app')", (str(self.root),))
         settings = {"max_active_runs": 1, "worktree_root": str(self.root / "worktrees"), "deploy": {"repos": {
             "app": {"train": True, "modes": ["staging"], "staging": {"branch": "dev"}, "prod": {"branch": "main"}},
@@ -228,6 +229,36 @@ class DispatchTest(DispatchFixture):
         self.assertEqual(self.run_dispatch(only="A-B"), ["A-B"])
         self.create.assert_called_once()
         self.assertEqual(self.launch.call_count, 2)
+
+    def assert_pending_worktree_allows_collision(self, owner_update):
+        self.ticket("A-B")
+        self.ticket("A B")
+        self.launch.side_effect = [OSError("start failed"), "fixture"]
+        self.assertEqual(self.run_dispatch(only="A-B"), [])
+        original_path = self.existing[0]["path"]
+        reservation_key = f"dispatch_pending:{original_path}"
+        reservation = core.meta_get(self.con, reservation_key)
+        self.assertEqual(reservation["ticket_gid"], "A-B")
+
+        self.con.execute(owner_update, ("A-B",))
+        self.con.commit()  # the stored stage can still be queued when the pass starts
+        self.assertEqual(self.run_dispatch(only="A B"), ["A B"])
+
+        run = P.latest_run(self.con, "A B")
+        self.assertEqual(run["worktree_name"], "a-b--retry-1")
+        self.assertEqual(self.launch.call_args.args[0], run["worktree_path"])
+        self.assertNotEqual(run["worktree_path"], original_path)
+        self.assertEqual(core.meta_get(self.con, reservation_key), reservation)
+        self.assertIsNone(P.latest_run(self.con, "A-B"))
+
+    def test_pending_worktree_does_not_block_after_ticket_completion(self):
+        self.assert_pending_worktree_allows_collision("UPDATE tickets SET completed=1 WHERE gid=?")
+
+    def test_pending_worktree_does_not_block_after_ticket_leaves_tracking(self):
+        self.assert_pending_worktree_allows_collision("UPDATE tickets SET assigned=0 WHERE gid=?")
+
+    def test_pending_worktree_does_not_block_after_ticket_key_changes_slug(self):
+        self.assert_pending_worktree_allows_collision("UPDATE tickets SET key='C' WHERE gid=?")
 
     def test_replaced_pending_checkout_is_neither_retried_nor_removed(self):
         self.ticket("A")

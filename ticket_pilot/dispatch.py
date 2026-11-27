@@ -132,6 +132,8 @@ def dispatch(dry_run=False, log=print, only: str | None = None) -> list[str]:
 
 def _worktree_for(con, t, repo, name, base, existing):
     """Return the name, existing checkout (if any), and checkout ID for a reserved retry."""
+    from .pipeline import compute_stage
+
     retry_prefix = f"{name}--retry-"
     matches = {n: w for w in existing if w["repo"] == repo["repo"]
                and ((n := Path(w["path"]).name) == name or n.startswith(retry_prefix))}
@@ -149,7 +151,9 @@ def _worktree_for(con, t, repo, name, base, existing):
         return name, clash, None  # adopt the existing worktree as usual
     if (pending := owned.get(name)) and pending["ticket_gid"] != t["gid"]:
         owner = con.execute("SELECT * FROM tickets WHERE gid=?", (pending["ticket_gid"],)).fetchone()
-        if owner and not owner["skip"] and (owner_repo := chosen_repo(con, owner)) and owner_repo["repo"] == repo["repo"]:
+        if (owner and owner["milestone_error"] is None and compute_stage(con, owner) == "queued"
+                and owner["key"] and slug(owner["key"]) == name
+                and (owner_repo := chosen_repo(con, owner)) and owner_repo["repo"] == repo["repo"]):
             owner_base = M.base_for(owner, repo["repo"]) or R.worktree_base(repo["repo"])
             if pending["base"] == owner_base:
                 raise RuntimeError("다른 작업이 이 워크트리에서 시작을 재시도할 예정이에요")
