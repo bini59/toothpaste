@@ -26,6 +26,8 @@ from . import guide as GD
 from . import migrate as M
 from . import mode as MO
 from . import milestone as MS
+from . import metrics as MET
+from . import metrics_usage as MU
 from . import notion, notion_stages, notion_write
 from . import pipeline as P
 from . import release as R
@@ -199,6 +201,8 @@ def cmd_tick(a):
         if p.returncode == 0:
             u["handle"] = runner.launch(str(ROOT), (ROOT / "prompts" / prompt).read_text(), f"auto-{aid}",
                                        role=runner.AUTOMATION_ROLES[aid])
+            if aid == "review":
+                MU.register(con, u["handle"], "review")
             u["lastRunStatus"] = "running"
             u["knownRuns"] = u.get("knownRuns", 0) + 1
             history.append({"automationId": aid, "name": name, "startedAt": now(), "status": "running",
@@ -219,6 +223,7 @@ def cmd_tick(a):
         print(f"Notion 상태 반영 작업 시작 실패: {e}", file=sys.stderr, flush=True)
     try:
         # every update.check_min: fetch the tags, keep the latest release for the dashboard's 업데이트 item
+        U.record_installed(con)
         chk = U.check_latest(con)
         con.commit()
         if not docker():
@@ -226,7 +231,13 @@ def cmd_tick(a):
             U.auto_update(con, chk, start_update)
         con.commit()
     except Exception as e:  # noqa: BLE001
+        con.rollback()
         print(f"update check: {e}", file=sys.stderr, flush=True)
+    try:
+        MU.collect(con)
+    except Exception as e:  # a missing or malformed transcript must not stop regular automation
+        con.rollback()
+        print(f"metrics: {e}", file=sys.stderr, flush=True)
 
 
 def run_loop(stop: threading.Event, spawn, every: float = 60.0):
@@ -384,6 +395,9 @@ def main(argv=None):
     gd = sp.add_parser("guide", help="사용 설명서 docs/guide.md: 주제 목록, 또는 한 주제 (milestone, deploy, ...)")
     gd.add_argument("topic", nargs="?")
     gd.set_defaults(fn=lambda a: sys.exit(GD.main(a.topic)))
+    mk = sp.add_parser("mark", help="지표에 비교 시점을 기록해요")
+    mk.add_argument("label")
+    mk.set_defaults(fn=lambda a: print(json.dumps(MET.create_marker(db(), a.label), ensure_ascii=False)))
     na = sp.add_parser("notion-app", help="서버 비밀 저장소에 Notion OAuth 앱 등록 (시크릿은 숨김 입력 또는 표준 입력)")
     na.add_argument("--client-id", required=True, help="Notion OAuth 클라이언트 ID")
     na.set_defaults(fn=cmd_notion_app)
@@ -495,6 +509,9 @@ def main(argv=None):
     ck.set_defaults(fn=_log_errors(lambda a: G.record_check_run(a.record, a.repo, a.ref) if a.record else
                                    K.baseline(a.repo, a.ref) if a.repo else
                                    K.run_pr(a.pr, a.sha) if a.pr else K.tick()))
+    rst = sp.add_parser("review-start", help="자동 리뷰의 PR별 지표 집계를 시작해요")
+    rst.add_argument("--pr", required=True)
+    rst.set_defaults(fn=lambda a: MU.start_review(db(), a.pr))
     rs = sp.add_parser("review-save")
     rs.add_argument("--pr", required=True)
     rs.add_argument("--sha", required=True)
@@ -503,7 +520,8 @@ def main(argv=None):
     rs.add_argument("--file", required=True)
     rs.add_argument("--shot", action="append", default=[], help="PNG to embed in the PR comment (repeatable)")
     rs.add_argument("--no-post", action="store_true")
-    rs.set_defaults(fn=lambda a: P.review_save(a.pr, a.sha, a.verdict, a.file, a.summary, post=not a.no_post, shots=a.shot))
+    rs.set_defaults(fn=lambda a: P.review_save(a.pr, a.sha, a.verdict, a.file, a.summary, post=not a.no_post,
+                                               shots=a.shot, manual=not os.environ.get("TP_AGENT")))
     dev = sp.add_parser("dev", help="start, inspect or stop a ticket worktree's dev server")
     dev.set_defaults(fn=cmd_dev)
     ops = dev.add_subparsers(dest="op", required=True)

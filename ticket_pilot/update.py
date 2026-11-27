@@ -10,13 +10,15 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import tarfile
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 
-from .core import ROOT, GitHubNotConnected, gh_env, github_token, meta_get, meta_set, now, settings
+from .core import ROOT, GitHubNotConnected, db, gh_env, github_token, meta_get, meta_set, now, settings
 from .runner import agent_path
 
 TAG = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
@@ -74,6 +76,19 @@ def current(root=ROOT) -> str:
     if Path(root) == ROOT and TAG.fullmatch(version):
         return version
     return _git(root, "describe", "--tags", "--match", "v*", "--always", check=False)
+
+
+def record_installed(con, root=ROOT):
+    """Observe the active release on tick, after host restart or Docker update acceptance."""
+    if (Path(root) / "data" / "update.pending").exists():
+        return
+    version = current(root)
+    if TAG.fullmatch(version):
+        with con:
+            con.execute("""INSERT INTO metric_markers(at,label,kind)
+                           SELECT ?,?,'version' WHERE ? <> COALESCE(
+                             (SELECT label FROM metric_markers WHERE kind='version' ORDER BY id DESC LIMIT 1),'')""",
+                        (time.time(), version, version))
 
 
 def blocked(root=ROOT) -> str | None:
@@ -229,6 +244,11 @@ def _update(to, root, npm, install, say, build, gh):
     _run(install, root, os.environ)
     pending_f.unlink()
     new_v = current(root)
+    if root.resolve() == ROOT:
+        try:
+            record_installed(db(), root)
+        except (OSError, sqlite3.Error) as e:
+            say(f"지표의 버전 기록을 다음 tick에서 다시 시도해요 ({e})")
     say(f"완료: {old_v} -> {new_v}")
     for n in reversed(notes(root, frm, sha)):
         say(f"  {n['tag']}")
