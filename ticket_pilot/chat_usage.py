@@ -39,41 +39,61 @@ def _total(calls) -> tuple:
     return (*map(sum, zip(*calls)), sum(calls[-1][:3]))
 
 
-def transcript(cwd: str, session: str, start: float, end: float | None) -> tuple:
-    """Sum each API message once. Claude can write several blocks with the same message id."""
+def transcript(cwd: str, session: str, start: float, end: float | None, *,
+               on_call=None, on_tool=None, config_dir=None, include_subagents=False) -> tuple:
+    """Sum each API message once, optionally including retained subagent transcripts."""
     if not re.fullmatch(r"[A-Za-z0-9-]+", session):
         return _total(())
     cwd_path = Path(cwd).resolve()
-    projects = cwd_path / Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "projects"
+    projects = cwd_path / Path(config_dir or os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "projects"
     folder = re.sub(r"[^A-Za-z0-9]", "-", str(cwd_path))
     path = projects / folder / f"{session}.jsonl"
     calls = {}
     try:
         if not path.is_file():
-            # Claude can shorten the folder name for long checkout paths.
-            paths = list(projects.glob(f"*/{session}.jsonl"))
-            if len(paths) != 1:
+            # Claude can shorten the folder name or retain only the subagent files.
+            candidates = set(projects.glob(f"*/{session}.jsonl"))
+            if include_subagents:
+                candidates.update(p.parent.with_suffix(".jsonl") for p in projects.glob(f"*/{session}/subagents"))
+            if len(candidates) != 1:
                 return _total(())
-            path = paths[0]
-        with path.open("rb") as f:
-            for line in f:
-                row = _json(line)
-                if row.get("type") != "assistant" or row.get("isSidechain"):
-                    continue
-                try:
-                    ts = datetime.fromisoformat(row["timestamp"].replace("Z", "+00:00")).timestamp()
-                except (KeyError, AttributeError, ValueError, OverflowError):
-                    continue
-                if ts < start or (end is not None and ts > end):
-                    continue
-                message = _object(row.get("message"))
-                counts = _counts(_object(message.get("usage")))
-                ident = message.get("id") or row.get("requestId") or row.get("uuid")
-                if isinstance(ident, str) and any(counts):
-                    calls[ident] = tuple(map(max, zip(calls.get(ident, counts), counts)))
+            path = candidates.pop()
+        paths = [path]
+        if include_subagents:
+            paths.extend(sorted(path.with_suffix("").glob("subagents/**/agent-*.jsonl")))
     except OSError:
-        pass
-    return _total(calls.values())
+        return _total(())
+    for source in paths:
+        try:
+            with source.open("rb") as f:
+                for line in f:
+                    row = _json(line)
+                    if row.get("type") != "assistant" or (row.get("isSidechain") and not include_subagents):
+                        continue
+                    try:
+                        ts = datetime.fromisoformat(row["timestamp"].replace("Z", "+00:00")).timestamp()
+                    except (KeyError, AttributeError, ValueError, OverflowError, OSError):
+                        continue
+                    if ts < start or (end is not None and ts > end):
+                        continue
+                    message = _object(row.get("message"))
+                    counts = _counts(_object(message.get("usage")))
+                    ident = message.get("id") or row.get("requestId") or row.get("uuid")
+                    if isinstance(ident, str) and any(counts):
+                        # Streaming blocks and forked history can repeat an API message.
+                        first, previous = calls.get(ident, (ts, counts))
+                        calls[ident] = (min(first, ts), tuple(map(max, zip(previous, counts))))
+                    content = message.get("content")
+                    if on_tool and isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") in ("tool_use", "server_tool_use", "mcp_tool_use"):
+                                on_tool(block.get("id"), block.get("name"), block.get("input"))
+        except OSError:
+            continue
+    if on_call:
+        for ts, counts in calls.values():
+            on_call(ts, counts)
+    return _total(counts for _, counts in calls.values())
 
 
 def compaction(log: Path) -> tuple:

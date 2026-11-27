@@ -30,6 +30,7 @@ from . import config as G
 from . import devserver as DS
 from . import guide as GD
 from . import lan as L
+from . import metrics as MET
 from . import milestone as MS
 from . import notifications as N
 from . import notion, notion_tickets
@@ -624,6 +625,18 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, {**d, "admin": self.admin})
         if self.path == "/api/agents/usage":
             return self._send(200, agent_usage())
+        if self.path.split("?", 1)[0] == "/api/metrics":
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            try:
+                mark_id = int(query["marker"][0]) if "marker" in query else None
+                days = int(query.get("days", [MET.DEFAULT_DAYS])[0])
+                rules = repo_rules()
+                with closing(db()) as con:
+                    con.execute("BEGIN")
+                    data = MET.report(con, mark_id=mark_id, days=days, rules=rules)
+            except ValueError as e:
+                return self._send(400, {"error": str(e)})
+            return self._send(200, data)
         if self.path == "/api/agents/codex/login":  # TP-179: shows the one-time code, so admins only
             if not self.admin:
                 return self._send(403, {"error": AGENT_LOGIN_403})
@@ -1013,6 +1026,9 @@ class H(BaseHTTPRequestHandler):
                 D.request_deploy(body["mode"], body.get("ticket") or None, body.get("repo") or None, pr_url=body.get("pr_url"))
             elif self.path == "/api/deploy-cancel":
                 D.cancel_deploy(int(body["id"]))
+            elif self.path == "/api/metrics/mark":
+                with closing(db()) as con:
+                    return self._send(201, MET.create_marker(con, body.get("label")))
             elif self.path == "/api/view":
                 # tab visits for pruning unused pages (TP-136); shortcut: delete with the cleanup ticket around 2026-11-26
                 tab = body.get("tab")

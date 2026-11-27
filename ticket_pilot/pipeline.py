@@ -19,6 +19,7 @@ from .core import (
     feature_base, GitHubNotConnected, github_token,
 )
 from . import runner as R
+from . import metrics_usage as MU
 from . import milestone as M
 from . import notifications as N
 from . import notion, notion_stages, notion_tickets
@@ -908,8 +909,10 @@ def relaunch(con, r, brief: str, tag: str, comment: str, *, ticket=None) -> str:
     rp = con.execute("SELECT path FROM repos WHERE name=?", (r["repo"],)).fetchone()
     if ticket is not None and (err := notion_tickets.retry_error(con, ticket, lock=True)):
         raise notion.NotionError(err)
-    return R.launch(r["worktree_path"], brief, tag, repo_path=rp["path"] if rp else None,
-                    agent=repo_extra(r["repo"]).get("agent"))
+    handle = R.launch(r["worktree_path"], brief, tag, repo_path=rp["path"] if rp else None,
+                      agent=repo_extra(r["repo"]).get("agent"))
+    MU.register(con, handle, "work", r["ticket_gid"], track_ws_set=True)
+    return handle
 
 
 def legacy(r) -> bool:
@@ -937,6 +940,7 @@ def _insert_run(con, t, repo, wt: dict, handle, origin, raw=None):
                 (t["gid"], repo["repo"], wt.get("id"), wt.get("displayName") or Path(wt.get("path", "")).name,
                  wt.get("path"), branch, handle, wt.get("workspaceStatus"), wt.get("comment"), "active", origin, ts, ts,
                  json.dumps(raw or wt)[:20000]))
+    MU.register(con, handle, "work", t["gid"], track_ws_set=True)
 
 
 def adopt(ticket_ref: str, worktree_ref: str, repo_name: str | None = None):
@@ -1106,6 +1110,7 @@ def agent_exits(con) -> None:
             st, msg = "todo", (f"BLOCKED: {said}" + "\n" + f"({how})" if said else f"BLOCKED: {how}")
         con.execute("UPDATE runs SET ws_status=?, ws_comment=?, updated_at=? WHERE id=?", (st, msg, now(), r["id"]))
         event(con, "agent_timeout" if timed_out else "agent_exit", f"{r['worktree_name']}: {msg[:300]}", r["ticket_gid"])
+        MU.workspace_signal(con, r["terminal"], exit_event=True)
         if st == "todo":
             N.blocked(con, r["ticket_gid"], msg, r["repo"])
 
@@ -1197,7 +1202,9 @@ def ws_set(status: str, comment: str, path: str = ".") -> None:
         raise SystemExit(f"no active ticket run for {top}")
     for r in rows:
         con.execute("UPDATE runs SET ws_status=?, ws_comment=?, updated_at=? WHERE id=?", (status, comment, now(), r["id"]))
+        MU.workspace_signal(con, r["terminal"])
         if status == "todo" and comment.upper().startswith("BLOCKED"):
+            event(con, "ws_set_blocked", "ws-set --status todo: BLOCKED", r["ticket_gid"])
             N.blocked(con, r["ticket_gid"], comment, r["repo"])
         else:  # the agent moved on (e.g. in-review after the owner's answer): nothing waits for them
             N.read_blocked(con, r["ticket_gid"])
@@ -1318,7 +1325,8 @@ def screenshot(url: str, out: str, wait_ms: int = 3000, device: str | None = Non
     print(json.dumps({"saved": out}))
 
 
-def review_save(pr_url: str, sha: str, verdict: str, file: str, summary: str, post: bool = True, shots: list[str] = ()):
+def review_save(pr_url: str, sha: str, verdict: str, file: str, summary: str, post: bool = True, shots: list[str] = (),
+                *, manual=False):
     if verdict not in VERDICT_LABEL:
         raise SystemExit("verdict must be approve|changes|blocked")
     if not re.fullmatch(r"[0-9a-f]{40}", sha or ""):  # a bad sha (e.g. "undefined") hides the approve button
@@ -1342,10 +1350,14 @@ def review_save(pr_url: str, sha: str, verdict: str, file: str, summary: str, po
             f.write(text)
         out = run(["gh", "pr", "comment", pr_url, "--body-file", f.name], timeout=120)
         comment_url = out.stdout.strip().splitlines()[-1] if out.stdout.strip() else None
-    con.execute("""INSERT INTO reviews(pr_url,ticket_gid,head_sha,verdict,summary,body,comment_url,posted,created_at)
-                   VALUES(?,?,?,?,?,?,?,?,?)""",
-                (pr_url, p["ticket_gid"], sha, verdict, summary, body, comment_url, 1 if comment_url else 0, now()))
+    review_log = os.environ.get("TP_REVIEW_LOG") if os.environ.get("TP_AGENT") == "auto-review" else None
+    con.execute("""INSERT INTO reviews(pr_url,ticket_gid,head_sha,verdict,summary,body,comment_url,posted,created_at,
+                                       manual,agent_log) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (pr_url, p["ticket_gid"], sha, verdict, summary, body, comment_url, int(bool(comment_url)), now(),
+                 int(manual), review_log))
     event(con, "review", f"{p['key']} PR #{p['number']}: {verdict}", p["ticket_gid"])
+    if manual and verdict == "changes":
+        event(con, "manual_rework", f"{p['key']} PR #{p['number']}: 수정 요청", p["ticket_gid"])
     t = con.execute("SELECT * FROM tickets WHERE gid=?", (p["ticket_gid"],)).fetchone()
     if not (M.is_ms(t["gid"]) or M.in_milestone(t)):  # milestone work merges / waits on its own (TP-105)
         N.add(con, "review", f"{p['key']} PR #{p['number']} AI 리뷰: {VERDICT_KO[verdict]}", summary, pr_url, t["gid"])

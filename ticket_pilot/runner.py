@@ -259,8 +259,10 @@ def launch(cwd: str, prompt: str, tag: str, setup: str | None = None, repo_path:
     if a["tool"] == "claude":
         a["session"] = resume or str(uuid.uuid4())
     cmd = command(a, log)
+    transcript_home = os.environ.get({"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME"}.get(a["tool"], ""))
     meta = {"agent": a["tool"], "model": a["model"], "effort": a["effort"], "ultracode": a["ultracode"],
-            "session": a.get("session") or resume, "cmd": cmd, "cwd": cwd, "started": time.time()}
+            "session": a.get("session") or resume, "cmd": cmd, "cwd": cwd, "started": time.time(),
+            "transcript_home": transcript_home}
     Path(f"{log}.json").write_text(json.dumps(meta))
     if compact:
         cmd = [sys.executable, chat_usage.__file__, str(log), *cmd]
@@ -271,7 +273,8 @@ def launch(cwd: str, prompt: str, tag: str, setup: str | None = None, repo_path:
               '"$@" < "$TP_PROMPT"; echo $? > "$TP_EXIT"')
     # TP_AGENT marks the agent's processes for `tp asana` (asana_write.py); the PAT stays with tp (keychain).
     # gh_env: gh and https git push use tp's GitHub token (TP-112); without one they fail instead of using the owner's login
-    parent_env = {k: v for k, v in os.environ.items() if k not in ("ASANA_PAT", "TP_CHAT_ID", "TP_CHAT_TURN_ID")}
+    parent_env = {k: v for k, v in os.environ.items()
+                  if k not in ("ASANA_PAT", "TP_CHAT_ID", "TP_CHAT_TURN_ID", "TP_REVIEW_LOG")}
     env = gh_env({**parent_env, "TP_PROMPT": str(prompt_file),
                   "TP_EXIT": f"{log}.exit", "TP_SETUP": setup or "", "TP_BIN": str(ROOT / "bin" / "tp"),
                   "PATH": agent_path(), "TP_AGENT": tag}, required=False)
@@ -282,6 +285,8 @@ def launch(cwd: str, prompt: str, tag: str, setup: str | None = None, repo_path:
         env.update(TP_CHAT_ID=ident, TP_CHAT_TURN_ID=str(turn))
         if env.get("TP_DB"):  # the agent invokes tp from the project's checkout
             env["TP_DB"] = str(Path(env["TP_DB"]).resolve())
+    if tag == "auto-review":
+        env["TP_REVIEW_LOG"] = str(log)
     if repo_path:
         for k in ("TP_ROOT_PATH", "ORCA_ROOT_PATH"):
             env[k] = repo_path
@@ -302,6 +307,10 @@ def is_handle(handle: str | None) -> bool:
 def _parts(handle):
     m = HANDLE.match(handle or "")
     return (int(m.group(1)), Path(m.group(2))) if m else (None, None)
+
+
+def log_path(handle: str | None) -> Path | None:
+    return _parts(handle)[1]
 
 
 def _alive(pid: int) -> bool:
@@ -383,13 +392,17 @@ def session(handle: str | None) -> tuple[str | None, str | None]:
         meta = json.loads(Path(f"{log}.json").read_text())
     except (OSError, ValueError, TypeError):
         return None, None
+    return log_session(log, meta)
+
+
+def log_session(log: Path, meta: dict) -> tuple[str | None, str | None]:
     sid = meta.get("session")
     if meta.get("agent") == "agy":
         try:
             sid = Path(f"{log}.conversation").read_text().strip()
         except OSError:
             pass
-        return "agy", sid if sid and antigravity.CONVERSATION.fullmatch(sid) else None
+        return "agy", sid if isinstance(sid, str) and antigravity.CONVERSATION.fullmatch(sid) else None
     for f in ((log, Path(f"{log}.err")) if not sid and log else ()):  # codex prints it in its header (stderr)
         try:
             with open(f, errors="replace") as fh:
