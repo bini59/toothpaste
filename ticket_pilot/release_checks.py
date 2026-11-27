@@ -9,7 +9,8 @@ import subprocess
 from urllib.parse import urlencode
 
 
-FULL_TEST_JOBS = {"oss-check", "unit (ubuntu-latest)", "unit (macos-latest)", "docker", "mode"}
+DEPLOYMENT_CHECK = "deployment-tests-passed"
+FULL_TEST_JOBS = {"oss-check", "unit (ubuntu-latest)", "unit (macos-latest)", "docker", "mode", DEPLOYMENT_CHECK}
 SHA_PATTERN = r"[0-9a-f]{40}"
 PUBLIC_REPOSITORY = "bini59/toothpaste"
 
@@ -81,8 +82,45 @@ def successful_test(pr, repository, api_get, *, merged_at=None):
     return run, tested_sha
 
 
+def require_main_protection():
+    from .core import run
+
+    query = """query($owner: String!, $name: String!) {
+      repository(owner: $owner, name: $name) {
+        ref(qualifiedName: "refs/heads/main") {
+          branchProtectionRule {
+            isAdminEnforced
+            requiresStatusChecks
+            requiresStrictStatusChecks
+            bypassPullRequestAllowances(first: 1) { totalCount }
+            requiredStatusChecks { context app { slug } }
+          }
+        }
+      }
+    }"""
+    owner, name = PUBLIC_REPOSITORY.split("/")
+    result = run(["gh", "api", "graphql", "-f", f"query={query}", "-f", f"owner={owner}", "-f", f"name={name}"],
+                 timeout=30)
+    rule = json.loads(result.stdout)["data"]["repository"]["ref"]["branchProtectionRule"]
+    if (not rule or not rule["isAdminEnforced"] or not rule["requiresStatusChecks"] or not rule["requiresStrictStatusChecks"]
+            or rule["bypassPullRequestAllowances"]["totalCount"] != 0
+            or not any(check["context"] == DEPLOYMENT_CHECK and (check["app"] or {}).get("slug") == "github-actions"
+                       for check in rule["requiredStatusChecks"])):
+        raise AwaitingTests(f"Waiting for main branch protection to require {DEPLOYMENT_CHECK} from GitHub Actions "
+                            "on up-to-date pull requests with no bypass.")
+
+
+def verify_merge_commit(api_get, api, merge_sha, tested, run_id):
+    merged = api_get(f"{api}/git/commits/{merge_sha}")
+    if tested["tree"]["sha"] != merged["tree"]["sha"]:
+        raise ValueError(f"Test run {run_id} did not test the merged contents of {merge_sha}.")
+    comparison = api_get(f"{api}/compare/{merge_sha}...main?per_page=1")
+    if comparison["status"] not in {"identical", "ahead"}:
+        raise ValueError(f"Merge commit {merge_sha} is not in main.")
+
+
 def merge_deployment_pr(repository, number, *, base, method, approved_head=None):
-    """Land exactly the tested merge commit, or return None for other PRs."""
+    """Merge the tested staging head and verify the resulting commit on main."""
     if repository != PUBLIC_REPOSITORY or base != "main":
         return None
     # The host uses toothpaste's GitHub connection. Actions uses its job token directly.
@@ -106,13 +144,14 @@ def merge_deployment_pr(repository, number, *, base, method, approved_head=None)
     head_sha, base_sha = pr["head"]["sha"], pr["base"]["sha"]
     if approved_head is not None and head_sha != approved_head:
         raise StagingAdvanced("staging advanced; rechecking approved commits")
-    _, tested_sha = successful_test(pr, repository, api_get)
+    test_run, tested_sha = successful_test(pr, repository, api_get)
     if tested_sha != pr["merge_commit_sha"]:
         raise AwaitingTests(f"PR #{number} is waiting for a test of its current merge commit.")
     tested = api_get(f"{api}/git/commits/{tested_sha}")
     if [parent["sha"] for parent in tested["parents"]] != [base_sha, head_sha]:
         raise AwaitingTests(f"PR #{number} is waiting for a test of its current base and head.")
 
+    require_main_protection()
     current = api_get(f"{api}/pulls/{number}")
     if current["state"] != "open":
         raise ValueError(f"PR #{number} is no longer open.")
@@ -124,39 +163,40 @@ def merge_deployment_pr(repository, number, *, base, method, approved_head=None)
             or current["base"]["sha"] != base_sha or current["merge_commit_sha"] != tested_sha):
         raise AwaitingTests(f"PR #{number} is waiting for a mergeable, tested candidate.")
 
-    # The PR merge API only pins the head. Require both branch tips in a single
-    # fast-forward transaction. updateRefs cannot enforce the PR state or target.
-    ref_updates = [
-        {"name": "refs/heads/staging", "beforeOid": head_sha, "afterOid": head_sha, "force": False},
-        {"name": "refs/heads/main", "beforeOid": base_sha, "afterOid": tested_sha, "force": False},
-    ]
-    request = {
-        "query": "mutation($input: UpdateRefsInput!) { updateRefs(input: $input) { clientMutationId } }",
-        "variables": {"input": {"repositoryId": pr["base"]["repo"]["node_id"], "refUpdates": ref_updates}},
-    }
+    # GitHub checks the expected head, PR state and current branch protection when merging.
+    command = ["gh", "api", "--method", "PUT", f"{api}/pulls/{number}/merge",
+               "-f", f"sha={head_sha}", "-f", "merge_method=merge"]
+    reported_sha = None
     try:
-        result = run(["gh", "api", "graphql", "--input", "-"], input=json.dumps(request), timeout=30, check=False)
+        result = run(command, timeout=30, check=False)
     except subprocess.TimeoutExpired as error:
         failure = str(error)
     else:
-        if result.returncode == 0:
-            return tested_sha
         failure = result.stderr.strip() or result.stdout.strip()
+        if result.returncode == 0:
+            response = json.loads(result.stdout)
+            if response.get("merged") is True:
+                reported_sha = response["sha"]
 
-    # GitHub can return a generic error for a stale beforeOid. Read the refs to
-    # distinguish contention, a lost response after success, and other failures.
-    live_base = api_get(f"{api}/git/ref/heads/main")["object"]["sha"]
-    if live_base == tested_sha:
-        current = api_get(f"{api}/pulls/{number}")
-        if (is_deployment_pr(current, repository) and current["merged"] is True
-                and current["merge_commit_sha"] == tested_sha):
-            return tested_sha
-        raise ValueError(f"PR #{number} is not confirmed merged into main at {tested_sha}.")
-    if live_base != base_sha:
-        raise AwaitingTests(f"PR #{number}: main advanced before the merge. Waiting for new tests.")
-    if api_get(f"{api}/git/ref/heads/staging")["object"]["sha"] != head_sha:
+    # Confirm the target again because the merge API accepts only an expected head SHA.
+    current = api_get(f"{api}/pulls/{number}")
+    if not is_deployment_pr(current, repository):
+        raise ValueError(f"PR #{number} is no longer the same-repository staging -> main PR.")
+    if current["merged"] is True:
+        merge_sha = current["merge_commit_sha"]
+        if current["head"]["sha"] != head_sha or (reported_sha is not None and reported_sha != merge_sha):
+            raise ValueError(f"PR #{number} has a different merge result from the checked deployment PR.")
+        verify_merge_commit(api_get, api, merge_sha, tested, test_run["id"])
+        return merge_sha
+    if reported_sha is not None or current["state"] != "open":
+        raise ValueError(f"PR #{number} is not confirmed merged into main.")
+    if current["head"]["sha"] != head_sha:
         raise StagingAdvanced("staging advanced; rechecking the deployment PR")
-    raise RuntimeError(f"PR #{number}: GitHub could not land the tested merge commit: {failure[-300:]}")
+    if current["base"]["sha"] != base_sha or current["merge_commit_sha"] != tested_sha:
+        raise AwaitingTests(f"PR #{number}: main advanced before the merge. Waiting for new tests.")
+    if current.get("mergeable_state") == "behind":
+        raise AwaitingTests(f"PR #{number}: staging needs to be updated from main.")
+    raise RuntimeError(f"PR #{number}: GitHub could not merge the deployment PR: {failure[-300:]}")
 
 
 def verify(event, repository):
@@ -176,13 +216,9 @@ def verify(event, repository):
     run, tested_sha = successful_test(pr, repository, gh_api, merged_at=merged_at)
     api = f"repos/{repository}"
     tested = gh_api(f"{api}/git/commits/{tested_sha}")
-    merged = gh_api(f"{api}/git/commits/{merge_sha}")
-    if (len(tested["parents"]) != 2 or tested["parents"][1]["sha"] != head_sha
-            or tested["tree"]["sha"] != merged["tree"]["sha"]):
-        raise ValueError(f"Test run {run['id']} did not test the merged contents.")
-    comparison = gh_api(f"{api}/compare/{merge_sha}...main?per_page=1")
-    if comparison["status"] not in {"identical", "ahead"}:
-        raise ValueError(f"Merge commit {merge_sha} is not in main.")
+    if len(tested["parents"]) != 2 or tested["parents"][1]["sha"] != head_sha:
+        raise ValueError(f"Test run {run['id']} did not test the final head of the deployment PR.")
+    verify_merge_commit(gh_api, api, merge_sha, tested, run["id"])
 
     print(f"Verified test run {run['id']} for PR #{pr['number']} and main commit {merge_sha}.")
     return merge_sha

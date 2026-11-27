@@ -428,11 +428,11 @@ def _merge(con, rel, rr, st, log) -> str:
         if info["mergeable"] == "MERGEABLE" and not pending:
             try:
                 sha = merge_deployment_pr(rel["github"], info["number"], base=into, method=st["method"])
-            except AwaitingTests:
-                pending.append("test")
+            except AwaitingTests as error:
+                pending.append(str(error))
             else:
                 if sha:
-                    break  # the conditional ref update reports the landed SHA directly
+                    break  # the API merge has already been verified
                 _gh(["pr", "merge", url, f"--{st['method']}"])
                 continue  # re-read the merge commit
         if datetime.now(timezone.utc) > deadline:

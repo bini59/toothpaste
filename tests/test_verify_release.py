@@ -1,10 +1,10 @@
 import json
-from subprocess import CompletedProcess
+from subprocess import CompletedProcess, TimeoutExpired
 import unittest
 from unittest.mock import Mock, patch
 
 from ticket_pilot import deploy, release
-from ticket_pilot.release_checks import AwaitingTests, merge_deployment_pr, verify
+from ticket_pilot.release_checks import AwaitingTests, merge_deployment_pr, require_main_protection, verify
 
 
 REPO = "bini59/toothpaste"
@@ -12,7 +12,28 @@ BASE, HEAD, TESTED, MERGED, TREE = (digit * 40 for digit in "abcde")
 ADVANCED = "f" * 40
 PR_URL = f"https://github.com/{REPO}/pull/54"
 PASSED = {"status": "completed", "conclusion": "success"}
-JOBS = ["oss-check", "unit (ubuntu-latest)", "unit (macos-latest)", "docker", "mode"]
+JOBS = ["oss-check", "unit (ubuntu-latest)", "unit (macos-latest)", "docker", "mode", "deployment-tests-passed"]
+
+
+class MainProtectionTest(unittest.TestCase):
+    def test_requires_the_strict_actions_check_without_bypass(self):
+        rule = {
+            "isAdminEnforced": True, "requiresStatusChecks": True, "requiresStrictStatusChecks": True,
+            "bypassPullRequestAllowances": {"totalCount": 0},
+            "requiredStatusChecks": [{"context": "deployment-tests-passed", "app": {"slug": "github-actions"}}],
+        }
+        for configured in (rule, None, dict(rule, isAdminEnforced=False), dict(rule, requiresStrictStatusChecks=False),
+                           dict(rule, requiredStatusChecks=[]), dict(rule, bypassPullRequestAllowances={"totalCount": 1}),
+                           dict(rule, requiredStatusChecks=[{"context": "deployment-tests-passed", "app": None}])):
+            data = {"data": {"repository": {"ref": {"branchProtectionRule": configured}}}}
+            with self.subTest(rule=configured), patch("ticket_pilot.core.run", return_value=Mock(stdout=json.dumps(data))) as run:
+                if configured is rule:
+                    require_main_protection()
+                else:
+                    with self.assertRaisesRegex(AwaitingTests, "main branch protection"):
+                        require_main_protection()
+                self.assertEqual(run.call_args.args[0][:3], ["gh", "api", "graphql"])
+                self.assertIn('ref(qualifiedName: "refs/heads/main")', run.call_args.args[0][4])
 
 
 class ReleaseFixture(unittest.TestCase):
@@ -20,7 +41,7 @@ class ReleaseFixture(unittest.TestCase):
         self.pr = {
             "number": 54, "merged": True, "merged_at": "2024-09-01T12:00:00Z", "merge_commit_sha": MERGED,
             "head": {"ref": "staging", "sha": HEAD, "repo": {"full_name": REPO}},
-            "base": {"ref": "main", "sha": BASE, "repo": {"full_name": REPO, "node_id": "repo-id"}},
+            "base": {"ref": "main", "sha": BASE, "repo": {"full_name": REPO}},
         }
         self.event = {"action": "closed", "pull_request": self.pr}
         self.run = {
@@ -33,7 +54,6 @@ class ReleaseFixture(unittest.TestCase):
         self.tested = {"parents": [{"sha": BASE}, {"sha": HEAD}], "tree": {"sha": TREE}}
         self.merged = {"tree": {"sha": TREE}}
         self.comparison = {"status": "ahead"}
-        self.refs = {"main": {"object": {"sha": BASE}}, "staging": {"object": {"sha": HEAD}}}
         self.responses = {
             "pulls/54": dict(self.pr, state="open", merged=False, merge_commit_sha=TESTED, draft=False, mergeable=True),
             f"actions/workflows/test.yml/runs?event=pull_request&branch=staging&head_sha={HEAD}&per_page=100":
@@ -42,8 +62,6 @@ class ReleaseFixture(unittest.TestCase):
             f"git/commits/{TESTED}": self.tested,
             f"git/commits/{MERGED}": self.merged,
             f"compare/{MERGED}...main?per_page=1": self.comparison,
-            f"compare/{TESTED}...main?per_page=1": self.comparison,
-            **{f"git/ref/heads/{branch}": ref for branch, ref in self.refs.items()},
         }
         api = patch("ticket_pilot.release_checks.gh_api", self.mock_api)
         api.start()
@@ -63,22 +81,6 @@ class ReleaseFixture(unittest.TestCase):
         response = self.responses[endpoint.removeprefix(f"repos/{REPO}/")]
         self.assertEqual(paginate, isinstance(response, list))
         return response
-
-    def update_refs(self, command, *, input, timeout, check):
-        self.assertEqual(command, ["gh", "api", "graphql", "--input", "-"])
-        request = json.loads(input)
-        self.assertIn("updateRefs(input:", request["query"])
-        self.assertEqual(request["variables"]["input"], {"repositoryId": "repo-id", "refUpdates": [
-            {"name": "refs/heads/staging", "beforeOid": HEAD, "afterOid": HEAD, "force": False},
-            {"name": "refs/heads/main", "beforeOid": BASE, "afterOid": TESTED, "force": False},
-        ]})
-        updates = request["variables"]["input"]["refUpdates"]
-        tips = [self.refs[ref["name"].removeprefix("refs/heads/")]["object"] for ref in updates]
-        if any(tip["sha"] != ref["beforeOid"] for tip, ref in zip(tips, updates)):
-            return CompletedProcess(command, 1, "", "gh: Something went wrong while executing your query")
-        for tip, ref in zip(tips, updates):
-            tip["sha"] = ref["afterOid"]
-        return CompletedProcess(command, 0, '{"data":{"updateRefs":{"clientMutationId":null}}}', "")
 
 
 class VerifyReleaseTest(ReleaseFixture):
@@ -130,7 +132,11 @@ class VerifyReleaseTest(ReleaseFixture):
         self.jobs.pop()
         with self.assertRaisesRegex(ValueError, "required job"):
             verify(self.event, REPO)
-        self.jobs.append({"status": "completed", "conclusion": "skipped", "name": "mode", "run_attempt": 1})
+        self.jobs.append(dict(PASSED, conclusion="skipped", name="deployment-tests-passed", run_attempt=1))
+        with self.assertRaisesRegex(ValueError, "required job"):
+            verify(self.event, REPO)
+        self.jobs[-1] = dict(self.jobs[-1], conclusion="success")
+        self.jobs.remove(next(job for job in self.jobs if job["name"] == "unit (macos-latest)"))
         with self.assertRaisesRegex(ValueError, "required job"):
             verify(self.event, REPO)
 
@@ -154,22 +160,40 @@ class VerifyReleaseTest(ReleaseFixture):
 
 
 class HostMergeTest(ReleaseFixture):
-    def test_host_lands_only_the_tested_commit(self):
-        with patch("ticket_pilot.core.run", side_effect=self.update_refs) as mutation:
-            self.assertEqual(merge_deployment_pr(REPO, 54, base="main", method="merge"), TESTED)
-        mutation.assert_called_once()
-        self.assertEqual(self.refs["main"]["object"]["sha"], TESTED)
-        self.assertEqual(self.refs["staging"]["object"]["sha"], HEAD)
-        self.pr["merge_commit_sha"] = TESTED
-        self.assertEqual(verify(self.event, REPO), TESTED)
+    def setUp(self):
+        super().setUp()
+        self.open_pr = self.responses["pulls/54"]
+        protection = patch("ticket_pilot.release_checks.require_main_protection", autospec=True)
+        self.require_protection = protection.start()
+        self.addCleanup(protection.stop)
 
-    def test_host_fails_closed_if_github_refuses_an_update_with_both_tips_current(self):
+    def github_merge(self, command, *, timeout, check):
+        self.assertEqual(command, ["gh", "api", "--method", "PUT", f"repos/{REPO}/pulls/54/merge",
+                                   "-f", f"sha={HEAD}", "-f", "merge_method=merge"])
+        self.assertFalse(check)
+        self.responses["pulls/54"] = dict(self.pr, state="closed")
+        return CompletedProcess(command, 0, json.dumps({"merged": True, "sha": MERGED}), "")
+
+    def test_host_merges_the_tested_head_and_returns_the_actual_merge_sha(self):
+        with patch("ticket_pilot.core.run", side_effect=self.github_merge) as mutation:
+            self.assertEqual(merge_deployment_pr(REPO, 54, base="main", method="merge"), MERGED)
+        self.require_protection.assert_called_once()
+        mutation.assert_called_once()
+        self.assertEqual(verify(self.event, REPO), MERGED)
+
+    def test_host_waits_for_protection_before_attempting_merge(self):
+        self.require_protection.side_effect = AwaitingTests("Waiting for main branch protection")
+        with patch("ticket_pilot.core.run") as mutation, self.assertRaisesRegex(AwaitingTests, "main branch protection"):
+            merge_deployment_pr(REPO, 54, base="main", method="merge")
+        mutation.assert_not_called()
+
+    def test_host_fails_closed_if_github_refuses_the_merge_with_both_tips_current(self):
         result = CompletedProcess([], 1, "", "gh: update rejected by repository rules")
         with patch("ticket_pilot.core.run", return_value=result) as mutation:
             with self.assertRaisesRegex(RuntimeError, "update rejected by repository rules"):
                 merge_deployment_pr(REPO, 54, base="main", method="merge")
         mutation.assert_called_once()
-        self.assertEqual(self.refs["main"]["object"]["sha"], BASE)
+        self.assertIs(self.responses["pulls/54"], self.open_pr)
 
     def test_host_uses_normal_merge_for_other_prs(self):
         self.responses["pulls/54"]["head"] = {"ref": "staging", "repo": {"full_name": "fork/toothpaste"}}
@@ -262,61 +286,77 @@ class HostMergeTest(ReleaseFixture):
                 self.assertEqual(result, "failed")
                 self.assertIn(message, finish.call_args.args[-1])
                 self.assertFalse(any("status='deploying'" in call.args[0] for call in con.execute.call_args_list))
-                self.assertEqual(self.refs["main"]["object"]["sha"], BASE)
-                self.assertEqual(self.refs["staging"]["object"]["sha"], HEAD)
 
     def test_dashboard_rejects_pr_already_merged_into_another_branch(self):
         with self.assertRaisesRegex(RuntimeError, "base가 other"):
             self.dashboard_merge(state="MERGED", baseRefName="other", mergeCommit={"oid": MERGED})
 
-    def test_host_only_recovers_a_failed_response_for_a_confirmed_pr_merge(self):
-        original_pr = self.responses["pulls/54"]
-        self.refs["main"]["object"]["sha"] = TESTED
-        for changes, confirmed in (({"state": "closed"}, False),
-                                   ({"state": "closed", "merged": True}, True)):
+    def test_host_only_recovers_a_timeout_for_a_confirmed_pr_merge(self):
+        for confirmed in (False, True):
             def lose_response(command, **kwargs):
-                self.responses["pulls/54"] = dict(original_pr, **changes)
-                return CompletedProcess(command, 1, "", "gh: connection lost")
+                self.responses["pulls/54"] = (dict(self.pr, state="closed") if confirmed
+                                               else dict(self.open_pr, state="closed"))
+                raise TimeoutExpired(command, kwargs["timeout"])
 
-            with self.subTest(changes=changes), patch("ticket_pilot.core.run", side_effect=lose_response):
-                self.responses["pulls/54"] = original_pr
+            with self.subTest(confirmed=confirmed), patch("ticket_pilot.core.run", side_effect=lose_response):
+                self.responses["pulls/54"] = self.open_pr
                 if confirmed:
-                    self.assertEqual(merge_deployment_pr(REPO, 54, base="main", method="merge"), TESTED)
+                    self.assertEqual(merge_deployment_pr(REPO, 54, base="main", method="merge"), MERGED)
                 else:
                     with self.assertRaisesRegex(ValueError, "not confirmed merged"):
                         merge_deployment_pr(REPO, 54, base="main", method="merge")
 
+    def test_host_rejects_api_success_for_pr_retargeted_after_validation(self):
+        def retarget(*args, **kwargs):
+            result = self.github_merge(*args, **kwargs)
+            self.responses["pulls/54"]["base"] = dict(self.pr["base"], ref="other")
+            return result
+
+        with patch("ticket_pilot.core.run", side_effect=retarget):
+            with self.assertRaisesRegex(ValueError, "no longer the same-repository"):
+                merge_deployment_pr(REPO, 54, base="main", method="merge")
+
+    def test_host_rejects_api_success_for_an_unexpected_merge_tree(self):
+        self.merged["tree"]["sha"] = ADVANCED
+        with patch("ticket_pilot.core.run", side_effect=self.github_merge):
+            with self.assertRaisesRegex(ValueError, "did not test the merged contents"):
+                self.dashboard_merge()
+            self.responses["pulls/54"] = self.open_pr
+            result, con, finish = self.train_merge()
+        self.assertEqual(result, "failed")
+        self.assertIn("did not test the merged contents", finish.call_args.args[-1])
+        self.assertFalse(any("status='deploying'" in call.args[0] for call in con.execute.call_args_list))
+
     def test_host_paths_wait_if_main_advances_after_validation(self):
-        def advance_main(*args, **kwargs):
-            self.refs["main"]["object"]["sha"] = ADVANCED
-            return self.update_refs(*args, **kwargs)
+        def advance_main(command, **kwargs):
+            self.responses["pulls/54"] = dict(self.open_pr, base=dict(self.pr["base"], sha=ADVANCED),
+                                              merge_commit_sha=MERGED)
+            return CompletedProcess(command, 1, "", "gh: Base branch was modified (HTTP 405)")
 
         for merge, expected in ((self.dashboard_merge, "waiting for checks"),
                                 (self.train_merge, "waiting for deployment PR tests")):
             with self.subTest(merge=merge.__name__):
-                self.refs["main"]["object"]["sha"] = BASE
+                self.responses["pulls/54"] = self.open_pr
                 with patch("ticket_pilot.core.run", side_effect=advance_main) as mutation:
                     self.assertEqual(merge()[0], expected)
                 mutation.assert_called_once()
-                self.assertEqual(self.refs["main"]["object"]["sha"], ADVANCED)
-                self.assertEqual(self.refs["staging"]["object"]["sha"], HEAD)
 
     def test_train_waits_if_staging_advances_after_validation(self):
-        def advance_staging(*args, **kwargs):
-            self.refs["staging"]["object"]["sha"] = ADVANCED
-            return self.update_refs(*args, **kwargs)
+        def advance_staging(command, **kwargs):
+            self.assertIn(f"sha={HEAD}", command)
+            self.responses["pulls/54"] = dict(self.open_pr, head=dict(self.pr["head"], sha=ADVANCED))
+            return CompletedProcess(command, 1, "", "gh: Head branch was modified (HTTP 409)")
 
         with patch("ticket_pilot.core.run", side_effect=advance_staging) as mutation:
             self.assertEqual(self.train_merge()[0], "waiting for staging recheck")
         mutation.assert_called_once()
-        self.assertEqual(self.refs["main"]["object"]["sha"], BASE)
 
     def test_host_paths_record_the_exact_landed_commit(self):
-        with patch("ticket_pilot.core.run", side_effect=self.update_refs):
+        with patch("ticket_pilot.core.run", side_effect=self.github_merge):
             result, save = self.dashboard_merge()
             self.assertEqual(result, "deploying")
-            self.assertEqual(save.call_args.kwargs["merge_sha"], TESTED)
-            self.refs["main"]["object"]["sha"] = BASE
+            self.assertEqual(save.call_args.kwargs["merge_sha"], MERGED)
+            self.responses["pulls/54"] = self.open_pr
             result, con, _ = self.train_merge()
             self.assertEqual(result, "deploying")
-            self.assertEqual(con.execute.call_args.args[1][:2], (PR_URL, TESTED))
+            self.assertEqual(con.execute.call_args.args[1][:2], (PR_URL, MERGED))
