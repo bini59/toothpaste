@@ -67,6 +67,15 @@ function Picker({ label, value, choices, placeholder, disabled, onChange }: {
   </label>;
 }
 
+function OptionalSettings({ title, children }: { title: string; children: React.ReactNode }) {
+  return <details>
+    <summary className="cursor-pointer rounded-md px-2 py-3 text-sm font-semibold text-text-main hover:bg-grey-50">
+      {title}
+    </summary>
+    <div className="space-y-3 px-2 pb-4">{children}</div>
+  </details>;
+}
+
 function rowChoices(rows: Choice[]) {
   const seen = new Set<string>(), repeated = new Set<string>();
   for (const { name } of rows) {
@@ -163,6 +172,7 @@ export function NotionPreview({ projectId, value, repos }: { projectId: string; 
   const [preview, setPreview] = useState<Preview>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const validation = notionError(value);
   const load = async () => {
     setBusy(true); setError(""); setPreview(undefined);
     try { setPreview(await request<Preview>("preview", { project_id: projectId, notion: value, repos: repos ?? [] })); }
@@ -170,7 +180,8 @@ export function NotionPreview({ projectId, value, repos }: { projectId: string; 
     finally { setBusy(false); }
   };
   return <div className="space-y-2 border-t border-border pt-3">
-    <Button size="sm" variant="secondary" loading={busy} disabled={!!notionError(value)} onClick={load}>티켓 미리보기</Button>
+    <Button size="sm" variant="secondary" loading={busy} disabled={!!validation} onClick={load}>티켓 미리보기</Button>
+    {validation && <p className="text-xs text-text-muted">{validation}</p>}
     {error && <p role="alert" className="text-sm text-danger-700">{error}</p>}
     {preview && <div aria-live="polite">
       <p className="mb-2 text-sm font-semibold text-text-main">조건에 맞는 티켓 {preview.count}개{repos && <> · 자동 시작 {preview.tickets.filter((t) => t.auto_start).length}개</>}</p>
@@ -253,91 +264,97 @@ export function NotionSource({ projectId, value, repos, workTag, onChange }: {
       placeholder={!sources ? "불러오는 중…" : sources.data?.length ? "데이터 소스 고르기…" : "공유한 데이터 소스가 없어요"}
       onChange={(id) => onChange({ ...emptyNotion, connection_id: value.connection_id, data_source_id: id })} />}
     {connection && value.data_source_id && <>
-      <div className="grid gap-3 sm:grid-cols-2">
-        <Picker label="담당자 열" value={value.people_property || ""} placeholder="사람 속성 고르기…" choices={props.filter((p) => p.type === "people")}
-          disabled={!schema?.data} onChange={(id) => onChange({ ...value, people_property: id })} />
-        <Picker label="가져올 담당자" value={value.assignee ?? "me"} choices={members} onChange={(id) => onChange({ ...value, assignee: id })} />
-      </div>
-      {optionRow("tag", "태그", ["multi_select", "select"])}
-      {optionRow("status", "상태", ["status", "select"])}
-      <fieldset className="space-y-3 border-t border-border pt-3">
-        <legend className="text-sm font-semibold text-text-main">프로젝트 소속과 하위 작업</legend>
-        <Picker label="상위 항목 관계 열" value={value.parent_property ?? ""} placeholder="사용 안 함"
-          choices={relationsTo(value.data_source_id).filter((p) => p.id !== value.project_property)} disabled={!schema?.data}
-          onChange={(id) => onChange({ ...value, parent_property: id || undefined })} />
+      <fieldset className="space-y-3">
+        <legend className="mb-3 text-sm font-semibold text-text-main">가져오기 조건</legend>
         <div className="grid gap-3 sm:grid-cols-2">
-          <Picker label="프로젝트 행이 있는 DB" value={value.project_data_source_id ?? ""} placeholder="사용 안 함"
-            choices={sources?.data ?? []} disabled={!schema?.data} onChange={chooseProjectSource} />
-          {value.project_data_source_id && <Picker label="프로젝트 행" value={value.project_page_id ?? ""}
-            placeholder={rows?.data ? "행 고르기…" : "불러오는 중…"} choices={rowChoices(rows?.data ?? [])} disabled={!rows?.data}
-            onChange={(id) => onChange({ ...value, project_page_id: id || undefined })} />}
+          <Picker label="담당자 열" value={value.people_property || ""} placeholder="사람 속성 고르기…" choices={props.filter((p) => p.type === "people")}
+            disabled={!schema?.data} onChange={(id) => onChange({ ...value, people_property: id })} />
+          <Picker label="가져올 담당자" value={value.assignee ?? "me"} choices={members} onChange={(id) => onChange({ ...value, assignee: id })} />
         </div>
-        {value.project_data_source_id && <Picker label="작업 DB의 프로젝트 관계 열" value={value.project_property ?? ""}
-          choices={relationsTo(value.project_data_source_id).filter((p) => p.id !== value.parent_property)}
-          placeholder="사용 안 함"
-          disabled={!schema?.data} onChange={(id) => onChange({ ...value, project_property: id || undefined })} />}
-        <div className="grid gap-3 sm:grid-cols-2">
-          <Picker label="문자열을 검사할 열" value={value.contains_property ?? ""} placeholder="사용 안 함"
-            choices={props.filter((p) => ["title", "rich_text", "formula", "unique_id"].includes(p.type))}
-            disabled={!schema?.data} onChange={(id) => onChange({ ...value, contains_property: id || undefined,
-              contains_text: id ? value.contains_text : undefined })} />
-          <label className="block min-w-0 space-y-1">
-            <span className="block text-sm font-semibold text-text-main">포함할 문자열</span>
-            <Input value={value.contains_text ?? ""} placeholder="예: TP-" disabled={!value.contains_property || !schema?.data}
-              onChange={(e) => onChange({ ...value, contains_text: e.target.value })} />
-          </label>
-        </div>
-        <p className="text-xs text-text-muted">직접 연결된 프로젝트 행, 상위 작업의 프로젝트, 문자열 일치 순으로 소속을 정해요.</p>
+        {optionRow("tag", "태그", ["multi_select", "select"])}
+        {optionRow("status", "상태", ["status", "select"])}
+        <p className="text-xs text-text-muted">해당 프로젝트에서 담당자·태그·상태 조건을 모두 만족하는 페이지를 가져와요. 태그 열에 <strong>{workTag}</strong>가 있고 작업 레포가 정해진 티켓이 자동 시작 대상이에요.</p>
       </fieldset>
-      <fieldset className="space-y-3 border-t border-border pt-3">
-        <legend className="text-sm font-semibold text-text-main">마일스톤</legend>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <Picker label="마일스톤 DB" value={value.milestone_data_source_id ?? ""} placeholder="사용 안 함"
-            choices={sources?.data ?? []} disabled={!sources?.data || !schema?.data}
-            onChange={(id) => {
-              const columns = id ? relationsTo(id) : [];
-              onChange({ ...value, milestone_data_source_id: id || undefined,
-                milestone_property: columns.length === 1 ? columns[0].id : undefined,
-                milestone_kind_property: undefined, milestone_kind_option: undefined });
-            }} />
-          {value.milestone_data_source_id && <Picker label="작업 DB의 마일스톤 관계 열" value={value.milestone_property ?? ""}
-            choices={relationsTo(value.milestone_data_source_id)} placeholder="관계 열 고르기…" disabled={!schema?.data}
-            onChange={(id) => onChange({ ...value, milestone_property: id || undefined })} />}
-        </div>
-        {value.milestone_data_source_id && schema?.data && !relationsTo(value.milestone_data_source_id).length &&
-          <p className="text-xs text-text-muted">작업 DB에 선택한 마일스톤 DB를 가리키는 관계 열을 추가하세요.</p>}
-        {value.milestone_data_source_id === value.data_source_id && <div className="grid gap-3 sm:grid-cols-2">
-          <Picker label="마일스톤 판별 열" value={value.milestone_kind_property ?? ""} placeholder="판별 열 고르기…"
-            choices={props.filter((p) => p.type === "select" || p.type === "multi_select")} disabled={!schema?.data}
-            onChange={(id) => onChange({ ...value, milestone_kind_property: id || undefined, milestone_kind_option: undefined })} />
-          <Picker label="마일스톤 태그" value={value.milestone_kind_option ?? ""} placeholder="태그 고르기…"
-            choices={props.find((p) => p.id === value.milestone_kind_property)?.options ?? []}
-            disabled={!schema?.data || !value.milestone_kind_property}
-            onChange={(id) => onChange({ ...value, milestone_kind_option: id || undefined })} />
-        </div>}
-      </fieldset>
-      <p className="text-xs text-text-muted">해당 프로젝트에서 담당자·태그·상태 조건을 모두 만족하는 페이지를 가져와요. 태그 열에 <strong>{workTag}</strong>가 있고 작업 레포가 정해진 티켓이 자동 시작 대상이에요.</p>
       <NotionPreview key={JSON.stringify([projectId, value, repos, workTag])} projectId={projectId} value={value} repos={repos} />
-      <Picker label="마감일 열" value={value.date_property || ""} placeholder="날짜 열이 하나면 자동 선택"
-        choices={props.filter((p) => p.type === "date")} disabled={!schema?.data}
-        onChange={(id) => onChange({ ...value, date_property: id })} />
-      {value.status_property && <fieldset className="space-y-3 border-t border-border pt-3">
-        <legend className="text-sm font-semibold text-text-main">작업 단계별 Notion 상태</legend>
-        <div className="grid gap-3 sm:grid-cols-2">
-          {stagePicker("in_progress", "작업 시작 · 작업 중")}
-          {stagePicker("done", "운영 배포 확인")}
-        </div>
-        <details>
-          <summary className="cursor-pointer text-sm text-primary">다른 작업 단계</summary>
-          <div className="mt-3 grid gap-3 sm:grid-cols-2">
-            {["dispatched", "blocked", "agent_done", "pr_open", "rework", "conflict", "reviewed", "approving"].map((s) => stagePicker(s))}
-            {stagePicker("staged", "스테이징 반영")}
-            {stagePicker("merged", "머지 후 배포 대기")}
-            {stagePicker("deploying")}
-            {stagePicker("closed", "PR 닫힘")}
+      <div className="divide-y divide-border border-y border-border">
+        <OptionalSettings title="프로젝트 소속과 하위 작업">
+          <Picker label="상위 항목 관계 열" value={value.parent_property ?? ""} placeholder="사용 안 함"
+            choices={relationsTo(value.data_source_id).filter((p) => p.id !== value.project_property)} disabled={!schema?.data}
+            onChange={(id) => onChange({ ...value, parent_property: id || undefined })} />
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Picker label="프로젝트 행이 있는 DB" value={value.project_data_source_id ?? ""} placeholder="사용 안 함"
+              choices={sources?.data ?? []} disabled={!schema?.data} onChange={chooseProjectSource} />
+            {value.project_data_source_id && <Picker label="프로젝트 행" value={value.project_page_id ?? ""}
+              placeholder={rows?.data ? "행 고르기…" : "불러오는 중…"} choices={rowChoices(rows?.data ?? [])} disabled={!rows?.data}
+              onChange={(id) => onChange({ ...value, project_page_id: id || undefined })} />}
           </div>
-        </details>
-      </fieldset>}
+          {value.project_data_source_id && <Picker label="작업 DB의 프로젝트 관계 열" value={value.project_property ?? ""}
+            choices={relationsTo(value.project_data_source_id).filter((p) => p.id !== value.parent_property)}
+            placeholder="사용 안 함"
+            disabled={!schema?.data} onChange={(id) => onChange({ ...value, project_property: id || undefined })} />}
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Picker label="문자열을 검사할 열" value={value.contains_property ?? ""} placeholder="사용 안 함"
+              choices={props.filter((p) => ["title", "rich_text", "formula", "unique_id"].includes(p.type))}
+              disabled={!schema?.data} onChange={(id) => onChange({ ...value, contains_property: id || undefined,
+                contains_text: id ? value.contains_text : undefined })} />
+            <label className="block min-w-0 space-y-1">
+              <span className="block text-sm font-semibold text-text-main">포함할 문자열</span>
+              <Input value={value.contains_text ?? ""} placeholder="예: TP-" disabled={!value.contains_property || !schema?.data}
+                onChange={(e) => onChange({ ...value, contains_text: e.target.value })} />
+            </label>
+          </div>
+          <p className="text-xs text-text-muted">직접 연결된 프로젝트 행, 상위 작업의 프로젝트, 문자열 일치 순으로 소속을 정해요.</p>
+        </OptionalSettings>
+        <OptionalSettings title="마일스톤">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Picker label="마일스톤 DB" value={value.milestone_data_source_id ?? ""} placeholder="사용 안 함"
+              choices={sources?.data ?? []} disabled={!sources?.data || !schema?.data}
+              onChange={(id) => {
+                const columns = id ? relationsTo(id) : [];
+                onChange({ ...value, milestone_data_source_id: id || undefined,
+                  milestone_property: columns.length === 1 ? columns[0].id : undefined,
+                  milestone_kind_property: undefined, milestone_kind_option: undefined });
+              }} />
+            {value.milestone_data_source_id && <Picker label="작업 DB의 마일스톤 관계 열" value={value.milestone_property ?? ""}
+              choices={relationsTo(value.milestone_data_source_id)} placeholder="관계 열 고르기…" disabled={!schema?.data}
+              onChange={(id) => onChange({ ...value, milestone_property: id || undefined })} />}
+          </div>
+          {value.milestone_data_source_id && schema?.data && !relationsTo(value.milestone_data_source_id).length &&
+            <p className="text-xs text-text-muted">작업 DB에 선택한 마일스톤 DB를 가리키는 관계 열을 추가하세요.</p>}
+          {value.milestone_data_source_id === value.data_source_id && <div className="grid gap-3 sm:grid-cols-2">
+            <Picker label="마일스톤 판별 열" value={value.milestone_kind_property ?? ""} placeholder="판별 열 고르기…"
+              choices={props.filter((p) => p.type === "select" || p.type === "multi_select")} disabled={!schema?.data}
+              onChange={(id) => onChange({ ...value, milestone_kind_property: id || undefined, milestone_kind_option: undefined })} />
+            <Picker label="마일스톤 태그" value={value.milestone_kind_option ?? ""} placeholder="태그 고르기…"
+              choices={props.find((p) => p.id === value.milestone_kind_property)?.options ?? []}
+              disabled={!schema?.data || !value.milestone_kind_property}
+              onChange={(id) => onChange({ ...value, milestone_kind_option: id || undefined })} />
+          </div>}
+        </OptionalSettings>
+        <OptionalSettings title="마감일">
+          <Picker label="마감일 열" value={value.date_property || ""} placeholder="날짜 열이 하나면 자동 선택"
+            choices={props.filter((p) => p.type === "date")} disabled={!schema?.data}
+            onChange={(id) => onChange({ ...value, date_property: id })} />
+        </OptionalSettings>
+        <OptionalSettings title="작업 단계별 Notion 상태">
+          {value.status_property ? <>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {stagePicker("in_progress", "작업 시작 · 작업 중")}
+              {stagePicker("done", "운영 배포 확인")}
+            </div>
+            <details>
+              <summary className="cursor-pointer text-sm text-primary">다른 작업 단계</summary>
+              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                {["dispatched", "blocked", "agent_done", "pr_open", "rework", "conflict", "reviewed", "approving"].map((s) => stagePicker(s))}
+                {stagePicker("staged", "스테이징 반영")}
+                {stagePicker("merged", "머지 후 배포 대기")}
+                {stagePicker("deploying")}
+                {stagePicker("closed", "PR 닫힘")}
+              </div>
+            </details>
+          </> : <p className="text-xs text-text-muted">가져오기 조건에서 상태 열을 고르세요. 가져올 상태는 전체로 둘 수 있어요.</p>}
+        </OptionalSettings>
+      </div>
     </>}
     {[sources, users, schema, rows].map((r, i) => r?.error && <p key={i} role="alert" className="text-sm text-danger-700">{r.error}</p>)}
   </div>;
