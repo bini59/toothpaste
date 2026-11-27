@@ -342,6 +342,25 @@ if (args.includes('build')) {
             self.assertIn(f"--port={started['port']}", Path(started["log"]).read_text())
             self.assertTrue(devserver.port_open(self.port))
 
+    def test_sh_c_wrapper_passes_the_selected_port_to_the_listener(self):
+        (self.wt / "serve.py").write_text(
+            "import http.server, os, sys\n"
+            "assert sys.argv[1:] == ['--port', os.environ['PORT']], sys.argv\n"
+            "http.server.HTTPServer(('127.0.0.1', int(sys.argv[2])), "
+            "http.server.SimpleHTTPRequestHandler).serve_forever()\n")
+        body = f'exec {shlex.quote(sys.executable)} serve.py "$@"'
+        with socket.socket() as foreign:
+            foreign.bind(("127.0.0.1", 0))
+            foreign.listen()
+            self.port = foreign.getsockname()[1]
+            self.cmd = f"sh -c {shlex.quote(body)} -- --port {self.port}"
+            started = dev.start(self.con, self.wt)
+            self.assertNotEqual(started["port"], self.port)
+            with urlopen(started["url"], timeout=2) as response:
+                self.assertEqual(response.read(), b"ticket preview")
+            self.stop()
+            self.assertTrue(devserver.port_open(self.port))
+
     def test_cleanup_ignores_only_the_managed_group_and_stops_it_on_removal(self):
         managed = dev.start(self.con, self.wt)
         with mock.patch.object(cleanup.R, "root", return_value=self.root):

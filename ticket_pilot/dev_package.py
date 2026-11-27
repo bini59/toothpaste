@@ -15,6 +15,7 @@ SHELL_PART = re.compile(rf"(?P<comment>\#[^\n]*)|(?P<redirect>[0-9]*(?:<<-?|>>|[
                         rf"|(?P<separator>[;&|()\n]+)|(?P<word>{SHELL_WORD})")
 PREFIX = r"""\s*(?:(?:exec|env|cross-env|command)\s+|\w+=(?:"[^"]*"|'[^']*'|[^\s;&|]+)\s+)*"""
 MANAGER = re.compile(PREFIX + r"(?P<pm>(?:[\w./-]+/)?(?:npm|pnpm|yarn))(?=\s)")
+SH_C = re.compile(PREFIX + r"(?:[\w./-]+/)?sh\s+-c(?=\s|$)")
 SERVER = re.compile(PREFIX + r"(?:(?:npx|(?:npm|pnpm|yarn)\s+exec(?:\s+--)?)\s+)?(?:[\w./-]+/)?"
                     r"(?P<cli>vite(?!\s+(?:build|optimize)\b)(?:\s+(?:dev|serve|preview)\b)?"
                     r"|remix\s+vite:dev|react-router\s+dev|next\s+(?:dev|start))(?=\s|$)")
@@ -38,7 +39,7 @@ def _commands(body):
     yield start, body[start:]
 
 
-def _arguments(command, start=0, *, package=False):
+def _arguments(command, start=0, *, package=False, skip_words=0):
     redirect = False
     for part in SHELL_PART.finditer(command, start):
         if part.lastgroup == "redirect":
@@ -47,6 +48,9 @@ def _arguments(command, start=0, *, package=False):
             if redirect:
                 redirect = False
                 continue
+            if skip_words:
+                skip_words -= 1
+                continue
             value = shlex.split(part[0])[0]
             if value == "--":
                 if not package:
@@ -54,6 +58,13 @@ def _arguments(command, start=0, *, package=False):
                 package = False  # npm's separator introduces the script's options
             else:
                 yield part, value
+
+
+def _command_arguments(command, start=0, *, package=False):
+    if shell := SH_C.match(command):
+        # sh consumes the script and $0 (often '--') before passing the remaining words in "$@".
+        return _arguments(command, shell.end(), skip_words=2)
+    return _arguments(command, start, package=package)
 
 
 def _port_options(arguments):
@@ -77,7 +88,7 @@ def _literal_port(options):
 
 def declared_port(body: str) -> int | None:
     for _, command in _commands(body):
-        flag = _literal_port(_port_options(_arguments(command, package=bool(MANAGER.match(command)))))
+        flag = _literal_port(_port_options(_command_arguments(command, package=bool(MANAGER.match(command)))))
         if flag:
             return int(flag.value)
     return None
@@ -94,7 +105,7 @@ def bind_port(body: str, port: str, forwarded: str = "") -> str:
             pos = start + pm.start("pm")
             edits.append((pos, pos, shlex.quote(__file__) + " "))
         server = SERVER.match(command)
-        arguments = list(_arguments(command, server.end("cli") if server else 0, package=bool(pm)))
+        arguments = list(_command_arguments(command, server.end("cli") if server else 0, package=bool(pm)))
         options = list(_port_options(arguments))
         if server and not (server["cli"] == "vite" and VITE_BUILD.match(command, server.end("cli"))):
             servers.append((start, server, arguments, options[0] if options else None))

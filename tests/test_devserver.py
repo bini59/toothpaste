@@ -107,6 +107,21 @@ class DetectTest(unittest.TestCase):
                 self.assertEqual(result["port"], 5173)
                 self.assertEqual(result["cmd"], f"vite --port {{port}} --strictPort {suffix}")
 
+    def test_ticket_detects_forwarded_port_in_sh_c_wrapper(self):
+        for wrapper in ('sh -c \'exec vite "$@"\' --',
+                        'exec /bin/sh -c \'exec vite "$@"\' --port=6200'):
+            with self.subTest(wrapper=wrapper):
+                self.conf = {"dev": {"cmd": f"{wrapper} --port 6100"}}
+                result = DS.detect("Site", self.d, ticket=True)
+                self.assertEqual(result["port"], 6100)
+                self.assertEqual(result["cmd"], f"{wrapper} --port {{port}}")
+
+        command = 'sh -c \'exec vite "$@"\' -- -- --port 6100'
+        self.conf = {"dev": {"cmd": command}}
+        result = DS.detect("Site", self.d, ticket=True)
+        self.assertEqual(result["port"], 5173)
+        self.assertEqual(result["cmd"], command)
+
     def test_env_check_reports_missing_and_empty_keys_without_values(self):
         main = Path(tempfile.mkdtemp())
         (main / ".env").write_text("A=1\nB=\n")
