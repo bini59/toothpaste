@@ -36,9 +36,10 @@
 
 ## 프로젝트 채팅과 압축
 
-- **화면·API** — [ProjectChat.tsx](../web/src/views/ProjectChat.tsx)가 `GET /api/chat/conversations`, `GET /api/chat/messages`로 대화와 메시지를 읽고 `POST /api/chat/new`, `POST /api/chat/send`로 대화를 시작하거나 이어간다. 모니터링 → 지표의 채팅 압축 탭은 [ChatCompactions.tsx](../web/src/views/ChatCompactions.tsx)에서 `GET /api/chat/compactions`를 읽는다.
+- **화면·API** — [ProjectChat.tsx](../web/src/views/ProjectChat.tsx)가 해시에서 선택한 대화에 맞춰 [ConversationList.tsx](../web/src/views/chat/ConversationList.tsx)와 [ChatThread.tsx](../web/src/views/chat/ChatThread.tsx)를 배치한다. [Composer.tsx](../web/src/views/chat/Composer.tsx)는 입력·첨부·미리보기를, [Messages.tsx](../web/src/views/chat/Messages.tsx)는 메시지 렌더링과 스크롤을 담당한다. 채팅·도움말·배포 화면은 [markdown.tsx](../web/src/components/markdown.tsx)의 렌더링 규칙을 공유한다. 모니터링 → 지표의 채팅 압축 탭은 [ChatCompactions.tsx](../web/src/views/ChatCompactions.tsx)에서 `GET /api/chat/compactions`를 읽는다.
+- **채팅 상태** — [useChat.ts](../web/src/views/chat/useChat.ts)가 대화 목록과 메시지를 [pollChat.ts](../web/src/views/chat/pollChat.ts)로 갱신하고, 화면에 표시된 대화의 읽음 처리와 전송 상태를 관리한다. [api.ts](../web/src/views/chat/api.ts)와 [types.ts](../web/src/views/chat/types.ts)에 `/api/chat/conversations`, `/api/chat/messages`, `/api/chat/read`, 새 대화와 전송 등 프로젝트 채팅의 요청과 응답을 모아 둔다.
 - **처리** — [chat.py](../ticket_pilot/chat.py)가 대화, 첨부, 에이전트 세션과 응답을 관리한다. `tp tick`에서 호출되는 `compact_idle()`은 압축 대상을 고르고, `_finalize_compaction()`은 요약을 다음 세션에 전달할 수 있게 저장한다. [chat_usage.py](../ticket_pilot/chat_usage.py)가 사용량을 집계하고, `chat.compaction_report()`가 압축 이력을 제공한다.
-- **테스트** — [test_chat_attach.py](../tests/test_chat_attach.py)에서 첨부와 압축 후 세션 인계를, [test_chat_unread.py](../tests/test_chat_unread.py)에서 읽음 상태를, [test_chat_usage.py](../tests/test_chat_usage.py)에서 사용량을 확인한다.
+- **테스트** — [test_chat_attach.py](../tests/test_chat_attach.py)에서 첨부와 압축 후 세션 인계를, [test_chat_unread.py](../tests/test_chat_unread.py)에서 읽음 상태를, [test_chat_usage.py](../tests/test_chat_usage.py)에서 사용량을, [pollChat.check.mjs](../web/src/views/chat/pollChat.check.mjs)에서 폴링 주기와 요청·타이머 정리를 확인한다.
 
 ## 지표
 

@@ -5,7 +5,7 @@ import { ConfirmButton } from "../components/ConfirmButton";
 import { StageBadge } from "../components/StageBadge";
 import { Table } from "../components/Table";
 import { LIVE_RELEASE, ago, latestPr, liveReleaseOf, pendingItems, type Status } from "../lib";
-import { md } from "./ProjectChat";
+import { md } from "../components/markdown";
 import type { DeployRequest, DiffItem, Mode, PR, Release as Rel, Rule, StagingDiff, State, Ticket } from "../types";
 
 const REL_STATUS: Record<Rel["status"], [string, Status]> = {
