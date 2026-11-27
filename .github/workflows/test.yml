@@ -1,4 +1,4 @@
-# TEMPORARY diagnostic branch: never merge. Times lsof/ps and the slow dev-server tests on macos-latest.
+# TEMPORARY diagnostic branch: never merge.
 name: test
 on:
   pull_request:
@@ -13,40 +13,28 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: time lsof / ps
-        run: |
-          sysctl -n hw.ncpu; ps -A | wc -l
-          touch /tmp/x.log
-          for c in "lsof -t -- /tmp/x.log" "lsof -nP -iTCP:12345 -sTCP:LISTEN -Fp" "lsof -a -p $$ -d cwd -Fn" "ps -A -o pid=,pgid=,stat=" "ps -ww -p $$ -o args="; do
-            s=$(python -c 'import time;print(time.time())'); $c >/dev/null || true; e=$(python -c 'import time;print(time.time())')
-            python -c "print(f'{$e-$s:6.2f}s  $c')"
-          done
-      - name: slow files with durations
-        run: |
-          python -X importtime -c 'pass' 2>/dev/null
-          python -m unittest discover tests -p test_worktree_dev.py --durations 0
-          python -m unittest discover tests -p test_devserver.py --durations 10
-      - name: count subprocess calls in test_worktree_dev
-        run: |
+      - name: time name lookups (before)
+        run: &probe |
+          hostname
           python - <<'PY'
-          import collections, subprocess, sys, time, unittest
-          stats = collections.defaultdict(lambda: [0, 0.0])
-          orig = subprocess.Popen.__init__
-          def init(self, args, *a, **k):
-              s = time.monotonic(); orig(self, args, *a, **k)
-              name = (args[0] if isinstance(args, (list, tuple)) else str(args).split()[0]).rsplit('/', 1)[-1]
-              self._diag = (name, s)
-          orig_wait = subprocess.Popen.wait
-          def wait(self, *a, **k):
-              r = orig_wait(self, *a, **k)
-              d = getattr(self, '_diag', None)
-              if d:
-                  stats[d[0]][0] += 1; stats[d[0]][1] += time.monotonic() - d[1]; self._diag = None
-              return r
-          subprocess.Popen.__init__ = init; subprocess.Popen.wait = wait
-          sys.path.insert(0, 'tests')
-          suite = unittest.defaultTestLoader.discover('tests', pattern='test_worktree_dev.py')
-          unittest.TextTestRunner(verbosity=0).run(suite)
-          for k, (n, t) in sorted(stats.items(), key=lambda x: -x[1][1]):
-              print(f'{k:20} calls={n:5} total={t:7.1f}s')
+          import socket, time, http.server
+          def t(label, f):
+              s = time.monotonic()
+              try: r = f()
+              except Exception as e: r = repr(e)
+              print(f'{time.monotonic()-s:6.2f}s  {label} -> {r}')
+          t('gethostname', socket.gethostname)
+          t("getfqdn('127.0.0.1')", lambda: socket.getfqdn('127.0.0.1'))
+          t("getfqdn('')", lambda: socket.getfqdn(''))
+          t("getfqdn('0.0.0.0')", lambda: socket.getfqdn('0.0.0.0'))
+          t('HTTPServer bind 127.0.0.1:0', lambda: http.server.HTTPServer(('127.0.0.1', 0), http.server.BaseHTTPRequestHandler).server_close())
           PY
+      - name: add hostname to /etc/hosts
+        run: echo "127.0.0.1 $(hostname) $(hostname -s)" | sudo tee -a /etc/hosts
+      - name: time name lookups (after)
+        run: *probe
+      - name: slow files after the hosts fix
+        run: |
+          python -m unittest discover tests -p test_worktree_dev.py 2>&1 | tail -3
+          python -m unittest discover tests -p test_devserver.py 2>&1 | tail -3
+          python -m unittest discover tests -p test_lan.py 2>&1 | tail -3
