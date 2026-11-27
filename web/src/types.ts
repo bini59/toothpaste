@@ -62,6 +62,11 @@ export interface PR {
   state: string;
   is_draft: number;
   head_sha: string | null;
+  /** Verdicts for this head, with and without check-generated reviews. */
+  head_verdict: Review["verdict"] | null;
+  head_ai_verdict: Review["verdict"] | null;
+  latest_review_summary: string | null;
+  rework_count: number;
   base: string | null;
   updated_at: string | null;
   merged_at: string | null;
@@ -191,10 +196,8 @@ export interface State {
   runs: Run[];
   prs: PR[];
   staged_pr_urls: Record<string, string[]>;
-  reviews: Review[];
   repos: Repo[];
   project_map: ProjectMapRow[];
-  events: EventRow[];
   releases: Release[];
   dev_servers?: DevServer[];
 }

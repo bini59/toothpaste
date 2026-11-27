@@ -66,8 +66,8 @@ export async function postConfig<T = { changes: ConfigChange[] }>(path: string, 
 
 
 /** GET a JSON endpoint; the server's {error} becomes the thrown message */
-export async function getJson<T>(path: string): Promise<T> {
-  const r = await fetch(path);
+export async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const r = await fetch(path, { signal });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || `${path} ${r.status}`);
   return j as T;
