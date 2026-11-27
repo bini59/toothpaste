@@ -94,6 +94,8 @@ def compute_stage(con, t, *, repos=None) -> str:
             return own
     if r and r["state"] != "abandoned":
         pr = run_pr(con, r["id"])
+        if (not pr or pr["state"] == "OPEN") and notion_tickets.milestone_kind_blocks_run(con, t):
+            return "blocked"
         if pr:
             if pr["release_id"] or pr["prod_at"]:
                 return "done"  # verified in production (deploy.py / release train / track.py)

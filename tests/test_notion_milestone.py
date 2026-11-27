@@ -38,6 +38,110 @@ class NotionMilestones(NotionDashboard):
     def ticket(self, gid):
         return self.con.execute("SELECT * FROM tickets WHERE gid=?", (gid,)).fetchone()
 
+    def use_task_db(self, kind="select"):
+        task = {"id": "task-id", "name": "작업"}
+        marker = {"id": "milestone-id", "name": "마일스톤"}
+        self.fixture.props["유형"] = {"id": "kind-id", "type": kind, kind: {"options": [task, marker]}}
+        self.fixture.props["출시"]["relation"]["data_source_id"] = TEAM_DB
+        self.parent = self.other  # also matches the assignee, work tag and status filters
+        self.parent_gid = "notion:" + self.parent["id"]
+        for row in self.fixture.pages[TEAM_DB]:
+            row["properties"]["유형"] = {"type": kind, kind: [] if kind == "multi_select" else None}
+        self.parent["properties"]["유형"][kind] = [task, marker] if kind == "multi_select" else marker
+        self.child["properties"]["출시"] = relation(self.parent["id"])
+        self.cfg.update(milestone_data_source_id=TEAM_DB, milestone_kind_property="kind-id",
+                        milestone_kind_option="milestone-id")
+        self.post("/api/config", {"scope": "project.example", "value": {"source": "notion", "name": "example", "notion": self.cfg}})
+
+    def test_task_db_select_uses_ids_for_listing_dispatch_and_verified_status(self):
+        self.use_task_db()
+        self.assertEqual(notion_tickets.project_config(self.con, "example"), self.cfg)
+        self.fixture.props["작업 유형"] = self.fixture.props.pop("유형")
+        self.fixture.props["작업 유형"]["select"]["options"][1]["name"] = "출시 단위"
+        for row in self.fixture.pages[TEAM_DB]:
+            row["properties"]["작업 유형"] = row["properties"].pop("유형")
+        self.assertEqual([t["gid"] for t in self.preview(self.cfg)], [self.gid])
+        cli.main(["sync"])
+        self.assertEqual(self.stages(), {"계정 연결": "queued"})
+        self.assertIsNone(self.ticket(self.parent_gid))
+        self.assertEqual(self.ticket(self.gid)["parent_gid"], self.parent_gid)
+        starts = [s for s in self.dispatch_log() if "would create" in s]
+        self.assertEqual(len(starts), 1)
+        self.assertIn(f"--base milestone/{self.parent['id']}", starts[0])
+
+        self.parent["properties"]["개발 담당"]["people"] = []  # the relation target can be outside the query
+        cli.main(["sync"])
+        with mock.patch.object(milestone, "_gh", return_value=mock.Mock(returncode=0)):
+            base = milestone.ensure(self.con, self.ticket(self.gid), "app")
+        self.merged_pr(self.gid, "app", base)
+        gid = milestone.ms_gid(self.parent_gid, "app")
+        self.ship(gid, "app", self.merged_pr(gid, "app", "staging"))
+        self.assertEqual(self.parent["properties"]["상태"]["status"]["id"], "done-id")
+        self.assertIsNone(self.ticket(self.parent_gid))
+
+    def test_task_db_multi_select_holds_only_the_wrong_link_until_tagged(self):
+        self.use_task_db("multi_select")
+        values = self.parent["properties"]["유형"]["multi_select"]
+        marker = values.pop()
+        preview = {t["gid"]: t["stage"] for t in self.preview(self.cfg)}
+        self.assertEqual(preview, {self.gid: "milestone_error", self.parent_gid: "queued"})
+        cli.main(["sync"])
+        self.assertIn("마일스톤 태그", self.ticket(self.gid)["milestone_error"])
+        starts = [s.splitlines()[0] for s in self.dispatch_log() if "would create" in s]
+        self.assertEqual(starts, ["--- would create app/" + self.ticket(self.parent_gid)["key"].lower()])
+        values.append(marker)
+        cli.main(["sync"])
+        self.assertEqual(self.stages(), {"계정 연결": "queued"})
+        self.assertEqual(self.ticket(self.gid)["parent_gid"], self.parent_gid)
+        self.assertNotIn(self.parent_gid, {t["gid"] for t in server._state(self.con)["tickets"]})
+
+    def test_task_db_requires_valid_kind_binding_at_save_and_after_schema_changes(self):
+        self.use_task_db()
+        for change in ({"milestone_kind_property": ""}, {"milestone_kind_option": ""}, {"milestone_kind_property": "status-id"},
+                       {"milestone_kind_option": "마일스톤"}, {"milestone_data_source_id": DOCS_DB}):
+            with self.subTest(change=change):
+                value = {"source": "notion", "name": "example", "notion": {**self.cfg, **change}}
+                status, result, _ = self.call("/api/config", {"scope": "project.example", "value": value})
+                self.assertEqual(status, 400)
+                self.assertIn("마일스톤", result["error"])
+        cli.main(["sync"])
+        col = self.fixture.props.pop("유형")
+        for replacement in (None, {**col, "id": "new-column"}, {**col, "select": {"options": [{"id": "new-id", "name": "마일스톤"}]}}):
+            with self.subTest(replacement=replacement):
+                if replacement:
+                    self.fixture.props["유형"] = replacement
+                self.assertIn("다시 골라 주세요", pipeline.sync()["notion_errors"]["example"])
+                status, result, _ = self.call("preview", {"project_id": "example", "repos": ["app"], "notion": self.cfg})
+                self.assertEqual(status, 400)
+                self.assertIn("다시 골라 주세요", result["error"])
+                self.assertFalse(any("would create" in s for s in self.dispatch_log()))
+                self.assertIsNone(self.ticket(self.parent_gid))
+        self.fixture.props["유형"] = col
+        cli.main(["sync"])
+        self.assertTrue(any("would create" in s for s in self.dispatch_log()))
+
+    def test_task_retagged_during_a_run_leaves_the_list_and_blocks_on_the_board(self):
+        self.use_task_db()
+        self.cfg["stage_statuses"]["blocked"] = "doing-id"
+        self.post("/api/config", {"scope": "project.example", "value": {"source": "notion", "name": "example", "notion": self.cfg}})
+        cli.main(["sync"])
+        self.con.execute("INSERT INTO runs(ticket_gid,repo,state,ws_status) VALUES (?,'app','active','in-progress')", (self.gid,))
+        self.con.commit()
+        self.child["properties"]["유형"]["select"] = self.parent["properties"]["유형"]["select"]
+        cli.main(["sync"])
+        self.assertEqual(self.preview(self.cfg), [])
+        card = next(t for t in server._state(self.con)["tickets"] if t["gid"] == self.gid)
+        self.assertEqual((card["assigned"], card["stage"], card["parent_gid"]), (0, "blocked", self.parent_gid))
+        self.assertTrue(card["milestone_kind_blocked"])
+        self.assertFalse(any("would create" in s for s in self.dispatch_log()))
+        notion_stages.flush(self.con)
+        self.assertEqual(self.fixture.writes, [])
+
+        self.child["properties"]["유형"]["select"] = None
+        cli.main(["sync"])
+        t = self.ticket(self.gid)
+        self.assertEqual((t["assigned"], t["stage"], t["milestone_error"]), (1, "in_progress", None))
+
     def test_save_checks_both_fields_and_the_target_then_sync_rechecks(self):
         for change in ({"milestone_property": ""}, {"milestone_data_source_id": ""}, {"milestone_property": "title"},
                        {"milestone_data_source_id": HOME_DB}, {"milestone_data_source_id": TEAM_DB}):

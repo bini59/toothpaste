@@ -265,7 +265,7 @@ export function TicketCard({ t, s, I, onAssign, onSkip, onApprove, onOverride, o
         </p>
       )}
       {t.approve_error && t.stage === "reviewed" && !conflict && <p className="mt-2 text-xs font-medium text-danger-700">머지 실패: {t.approve_error}</p>}
-      {t.stage === "blocked" &&
+      {t.stage === "blocked" && !t.milestone_kind_blocked &&
         (t.reply ? (
           <div className="mt-2 flex items-center justify-between gap-2 text-xs text-text-muted">
             <span>답장 보냄 · 5분 안에 에이전트 재실행: {t.reply}</span>
@@ -291,7 +291,7 @@ export function TicketCard({ t, s, I, onAssign, onSkip, onApprove, onOverride, o
             </div>
           </div>
         ))}
-      {DROPPABLE.includes(t.stage) && t.stage !== "blocked" && <div className="mt-2">{dropButton}</div>}
+      {DROPPABLE.includes(t.stage) && (t.stage !== "blocked" || t.milestone_kind_blocked) && <div className="mt-2">{dropButton}</div>}
       {PENDING.includes(t.stage) && (
         <Button size="sm" variant="secondary" className="mt-2" onClick={() => onSkip(t.gid, true)}>
           건너뛰기

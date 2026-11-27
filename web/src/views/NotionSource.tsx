@@ -27,6 +27,9 @@ export function notionError(value: NotionFilters) {
   if (!!value.contains_property !== !!value.contains_text?.trim()) return "문자열을 검사할 열과 포함할 문자열을 함께 입력하세요";
   if (value.project_data_source_id && !value.project_page_id) return "선택한 DB에서 프로젝트 행을 골라 주세요";
   if (!!value.milestone_data_source_id !== !!value.milestone_property) return "마일스톤 DB와 작업 DB의 마일스톤 관계 열을 함께 골라 주세요";
+  if (value.milestone_data_source_id === value.data_source_id && (!value.milestone_kind_property || !value.milestone_kind_option)) {
+    return "작업 DB를 쓰려면 마일스톤 판별 열과 마일스톤 태그를 함께 골라 주세요";
+  }
   return "";
 }
 
@@ -284,11 +287,12 @@ export function NotionSource({ projectId, value, repos, workTag, onChange }: {
         <legend className="text-sm font-semibold text-text-main">마일스톤</legend>
         <div className="grid gap-3 sm:grid-cols-2">
           <Picker label="마일스톤 DB" value={value.milestone_data_source_id ?? ""} placeholder="사용 안 함"
-            choices={(sources?.data ?? []).filter((s) => s.id !== value.data_source_id)} disabled={!sources?.data || !schema?.data}
+            choices={sources?.data ?? []} disabled={!sources?.data || !schema?.data}
             onChange={(id) => {
               const columns = id ? relationsTo(id) : [];
               onChange({ ...value, milestone_data_source_id: id || undefined,
-                milestone_property: columns.length === 1 ? columns[0].id : undefined });
+                milestone_property: columns.length === 1 ? columns[0].id : undefined,
+                milestone_kind_property: undefined, milestone_kind_option: undefined });
             }} />
           {value.milestone_data_source_id && <Picker label="작업 DB의 마일스톤 관계 열" value={value.milestone_property ?? ""}
             choices={relationsTo(value.milestone_data_source_id)} placeholder="관계 열 고르기…" disabled={!schema?.data}
@@ -296,6 +300,15 @@ export function NotionSource({ projectId, value, repos, workTag, onChange }: {
         </div>
         {value.milestone_data_source_id && schema?.data && !relationsTo(value.milestone_data_source_id).length &&
           <p className="text-xs text-text-muted">작업 DB에 선택한 마일스톤 DB를 가리키는 관계 열을 추가하세요.</p>}
+        {value.milestone_data_source_id === value.data_source_id && <div className="grid gap-3 sm:grid-cols-2">
+          <Picker label="마일스톤 판별 열" value={value.milestone_kind_property ?? ""} placeholder="판별 열 고르기…"
+            choices={props.filter((p) => p.type === "select" || p.type === "multi_select")} disabled={!schema?.data}
+            onChange={(id) => onChange({ ...value, milestone_kind_property: id || undefined, milestone_kind_option: undefined })} />
+          <Picker label="마일스톤 태그" value={value.milestone_kind_option ?? ""} placeholder="태그 고르기…"
+            choices={props.find((p) => p.id === value.milestone_kind_property)?.options ?? []}
+            disabled={!schema?.data || !value.milestone_kind_property}
+            onChange={(id) => onChange({ ...value, milestone_kind_option: id || undefined })} />
+        </div>}
       </fieldset>
       <p className="text-xs text-text-muted">해당 프로젝트에서 담당자·태그·상태 조건을 모두 만족하는 페이지를 가져와요. 태그 열에 <strong>{workTag}</strong>가 있고 작업 레포가 정해진 티켓이 자동 시작 대상이에요.</p>
       <NotionPreview key={JSON.stringify([projectId, value, repos, workTag])} projectId={projectId} value={value} repos={repos} />

@@ -10,9 +10,10 @@ from . import notion, notion_membership
 from .core import ROOT, effective_config, event, meta_get, meta_set, read_config
 
 FILTER_TYPES = {"people": ("people",), "tag": ("select", "multi_select"), "status": ("status", "select")}
+MILESTONE_KIND_FIELDS = ("milestone_kind_property", "milestone_kind_option")
 FIELDS = {"connection_id", "data_source_id", "assignee", "people_property", "tag_property", "tag_option",
           "status_property", "status_option", "date_property", "milestone_data_source_id",
-          "milestone_property"} | notion_membership.FIELDS
+          "milestone_property", *MILESTONE_KIND_FIELDS} | notion_membership.FIELDS
 # Stages of an actual Notion run. Filter membership and the pre-dispatch queue are read-only.
 WRITE_STAGES = {"dispatched", "in_progress", "blocked", "agent_done", "pr_open", "rework", "conflict",
                 "reviewed", "approving", "staged", "merged", "deploying", "closed", "done"}
@@ -44,16 +45,20 @@ def validate(cfg, *, con=None, previous=None):
             raise notion.NotionError("선택한 값에 해당하는 열을 골라 주세요")
     notion_membership.validate(cfg)
     source = cfg.get("milestone_data_source_id")
+    if source == cfg["data_source_id"]:
+        if not all(cfg.get(k, "").strip() for k in MILESTONE_KIND_FIELDS):
+            raise notion.NotionError("작업 DB를 쓰려면 마일스톤 판별 열과 마일스톤 태그를 함께 골라 주세요")
+    elif any(k in cfg for k in MILESTONE_KIND_FIELDS):
+        raise notion.NotionError("마일스톤 판별 열과 태그는 작업 DB를 마일스톤 DB로 쓸 때만 설정할 수 있어요")
     if source or cfg.get("milestone_property"):
         if not notion.valid_id(source) or not cfg.get("milestone_property", "").strip():
             raise notion.NotionError("마일스톤 DB와 작업 DB의 마일스톤 관계 열을 함께 골라 주세요")
-        if source == cfg["data_source_id"]:
-            raise notion.NotionError("마일스톤 DB는 작업 DB와 다른 데이터베이스를 골라 주세요")
-        binding = ("connection_id", "data_source_id", "milestone_data_source_id", "milestone_property")
+        binding = ("connection_id", "data_source_id", "milestone_data_source_id", "milestone_property", *MILESTONE_KIND_FIELDS)
         if con is not None and any(cfg.get(k) != (previous or {}).get(k) for k in binding):
             client = notion.Client(con, cfg["connection_id"])
             schema = {col["id"]: col for col in client.properties(cfg["data_source_id"])}
             notion_membership.relation_column(schema, cfg, "milestone")
+            milestone_tag_filter(schema, cfg)
     stages = cfg.get("stage_statuses", {})
     if (not isinstance(stages, dict) or stages.keys() - WRITE_STAGES
             or any(not isinstance(v, str) or not v for v in stages.values())
@@ -64,6 +69,13 @@ def validate(cfg, *, con=None, previous=None):
 def project_config(con, pid):
     row = con.execute("SELECT extra FROM config_projects WHERE id=? AND source='notion'", (pid,)).fetchone()
     return json.loads(row["extra"])["notion"] if row else None
+
+
+def milestone_kind_blocks_run(con, ticket):
+    if not ticket["gid"].startswith("notion:") or not ticket["milestone_error"]:
+        return False
+    cfg = project_config(con, ticket["project_gid"].removeprefix("notion:"))
+    return bool(cfg and cfg.get("milestone_kind_property"))
 
 
 def ticket_key(page_id):
@@ -143,6 +155,30 @@ class Listing:
     parents: dict[str, dict] = field(default_factory=dict)
 
 
+def milestone_tag_filter(schema, cfg):
+    """Resolve the shared DB's discriminator once, before reading any rows."""
+    if cfg.get("milestone_data_source_id") != cfg["data_source_id"]:
+        return None
+    col = schema.get(cfg["milestone_kind_property"])
+    if not col or col["type"] not in FILTER_TYPES["tag"]:
+        raise notion.NotionError("마일스톤 판별 열이 바뀌었어요. 프로젝트 설정에서 다시 골라 주세요")
+    option = cfg["milestone_kind_option"]
+    if not any(o["id"] == option for o in col["options"]):
+        raise notion.NotionError(f"{col['name']} 열의 마일스톤 태그가 바뀌었어요. 프로젝트 설정에서 다시 골라 주세요")
+
+    def tagged(page):
+        kind = col["type"]
+        prop = page["properties"].get(col["name"], {})
+        if prop.get("type") != kind or kind not in prop or prop.get("id", col["id"]) != col["id"]:
+            raise notion.NotionError("페이지의 마일스톤 판별 열을 읽을 수 없어요. 프로젝트 설정에서 다시 골라 주세요")
+        value = prop[kind]
+        if kind == "select":
+            return value is not None and value["id"] == option
+        return any(o["id"] == option for o in value)
+
+    return tagged
+
+
 def _milestone_parent(client, page, column, source, cache):
     prop = page["properties"].get(column["name"], {})
     if prop.get("type") != "relation" or not isinstance(prop.get("relation"), list):
@@ -165,6 +201,7 @@ def matches(con, project, work_tag, rules, *, track_runs=False):
     client = notion.Client(con, cfg["connection_id"])
     pages, schema = _query(client, cfg)
     milestone_col = notion_membership.relation_column(schema, cfg, "milestone")
+    tagged_milestone = milestone_tag_filter(schema, cfg)
     milestones = {}
     membership = notion_membership.Membership(client, cfg["data_source_id"], schema, rules, project["id"])
     if cfg.get("project_page_id"):
@@ -177,16 +214,20 @@ def matches(con, project, work_tag, rules, *, track_runs=False):
             if milestone_col:
                 if page is None:
                     page = client.page(gid.removeprefix("notion:"), cfg["data_source_id"])
+                    if tagged_milestone and tagged_milestone(page):
+                        raise notion.NotionError("진행 중인 작업에 마일스톤 태그가 붙었어요. 작업을 계속하려면 태그를 제거하세요")
                 parent = _milestone_parent(client, page, milestone_col, cfg["milestone_data_source_id"], milestones)
+                if parent and tagged_milestone and not tagged_milestone(parent):
+                    raise notion.NotionError("연결된 행에 마일스톤 태그가 없어요. 마일스톤 태그가 붙은 행을 연결하세요")
         except notion.NotionError as e:
-            error = str(e)
+            parent, error = None, str(e)
         listing.parents[gid] = {"parent_gid": f"notion:{parent['id']}" if parent else None,
                                 "parent_name": (notion.page_title(parent) or "제목 없음") if parent else None,
                                 "parent_url": parent["url"] if parent else None, "in_milestone": int(bool(parent)),
                                 "milestone_error": error}
 
     for page in pages:
-        if not notion.active_page(page):
+        if not notion.active_page(page) or (tagged_milestone and tagged_milestone(page)):
             continue
         page_id = page["id"]
         if not notion.valid_id(page_id):

@@ -10,6 +10,7 @@ export interface Ticket {
   parent_name: string | null;
   parent_url: string | null;
   milestone_error: string | null;
+  milestone_kind_blocked?: boolean;
   staging_config_error?: string | null;
   due_on: string | null;
   tags: string | null;
@@ -484,6 +485,8 @@ export interface NotionFilters {
   parent_property?: string;
   milestone_data_source_id?: string;
   milestone_property?: string;
+  milestone_kind_property?: string;
+  milestone_kind_option?: string;
   contains_property?: string;
   contains_text?: string;
   project_data_source_id?: string;

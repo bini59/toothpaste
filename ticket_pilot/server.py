@@ -97,8 +97,11 @@ def _state(con) -> dict:
     for t in tickets:
         if t["stage"] == "needs_staging" and (repo := P.chosen_repo(con, t)):
             t["staging_config_error"] = MS.staging_config_error(t, repo["repo"])
-        elif t["stage"] == "blocked" and not t["milestone_error"]:
-            t["staging_config_error"] = P.resume_staging_error(con, t)
+        elif t["stage"] == "blocked":
+            if t["milestone_error"]:
+                t["milestone_kind_blocked"] = notion_tickets.milestone_kind_blocks_run(con, t)
+            else:
+                t["staging_config_error"] = P.resume_staging_error(con, t)
         if (ms := landed.get(t["gid"])) and t["parent_gid"] != ms["parent_gid"]:
             t.update(parent_gid=ms["parent_gid"], parent_name=ms["parent_name"], parent_url=ms["url"], in_milestone=1)
         if t["open_deps"]:  # deps merged into the feature base no longer block (TP-20)

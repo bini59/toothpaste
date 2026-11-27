@@ -46,8 +46,8 @@ export const BOARD: { title: string; color: string; stages: string[] }[] = [
 export const DONE_KEEP_DAYS = 7;
 export const staleDone = (t: Ticket) =>
   ["done", "closed"].includes(t.stage) && !!t.done_at && Date.now() - new Date(t.done_at).getTime() > DONE_KEEP_DAYS * 864e5;
-// A subtask waiting for repo setup needs attention before its milestone ticket exists.
-export const onBoard = (t: Ticket) => t.stage === "needs_staging" || !(t.in_milestone && t.parent_gid);
+// Surface setup and shared-DB role errors even when the run still tracks its previous milestone.
+export const onBoard = (t: Ticket) => t.stage === "needs_staging" || !!t.milestone_kind_blocked || !(t.in_milestone && t.parent_gid);
 export const VERDICT: Record<string, [string, Status]> = {
   approve: ["괜찮음", "success"],
   changes: ["수정 필요", "warning"],
