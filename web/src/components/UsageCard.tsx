@@ -5,8 +5,9 @@ const pad = (n: number) => String(n).padStart(2, "0");
 const hhmm = (v?: string | null) => (v ? `${pad(new Date(v).getHours())}:${pad(new Date(v).getMinutes())}` : "");
 /** reset instant: 월/일 only when it is not today */
 const at = (ms: number | null) => {
-  if (ms === null || !Number.isFinite(ms)) return "?";
+  if (ms === null) return null;
   const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return null;
   const day = d.toDateString() === new Date().toDateString() ? "" : `${d.getMonth() + 1}/${d.getDate()} `;
   return `${day}${pad(d.getHours())}:${pad(d.getMinutes())}`;
 };
@@ -35,7 +36,7 @@ const REASON: Record<string, string> = {
 /** one limit window: used percent (null = never read yet, drawn as an empty bar) and its reset instant */
 type Meter = { id: string; label: string; used: number | null; resetAt: number | null };
 
-function Bar({ m, collapsed }: { m: Meter; collapsed: boolean }) {
+function Bar({ m, collapsed, reset }: { m: Meter; collapsed: boolean; reset?: string | null }) {
   const used = m.used === null ? null : Math.max(0, Math.min(100, m.used));
   const tone = used === null ? "" : used >= 95 ? "text-danger-700" : used >= 80 ? "text-warning-700" : "";
   // info blue, not primary: primary-500 (#ee1c24) and danger-500 (#cc1934) are indistinguishable in a 4px bar
@@ -57,6 +58,11 @@ function Bar({ m, collapsed }: { m: Meter; collapsed: boolean }) {
       >
         {used !== null && <div className={cn("h-full rounded-full", fill)} style={{ width: `${used}%` }} />}
       </div>
+      {reset && (
+        <p className={cn("mt-0.5 text-[10px] leading-tight text-text-muted tabular-nums", collapsed && "lg:hidden")}>
+          {reset} 리셋
+        </p>
+      )}
     </div>
   );
 }
@@ -70,7 +76,7 @@ function Row({ name, meters, note, collapsed }: { name: string; meters: Meter[];
         {note && <span className={cn("block font-normal tabular-nums text-text-muted", collapsed && "lg:hidden")}>{note}</span>}
       </span>
       <div className="flex min-w-0 flex-1 gap-2">
-        {meters.map((m) => <Bar key={m.id} m={m} collapsed={collapsed} />)}
+        {meters.map((m) => <Bar key={m.id} m={m} collapsed={collapsed} reset={at(m.resetAt)} />)}
       </div>
     </div>
   );
@@ -78,7 +84,7 @@ function Row({ name, meters, note, collapsed }: { name: string; meters: Meter[];
 
 export function UsageCard({ usage: { claude, codex, agy }, collapsed }: { usage: AgentUsage; collapsed: boolean }) {
   if (claude === undefined && codex === undefined && agy === undefined) return null;
-  const iso = (v: string | null | undefined) => (v ? new Date(v).getTime() : null);
+  const iso = (v: string | null | undefined) => (typeof v === "string" ? Date.parse(v) : null);
   const cm: Meter[] = [
     { id: "5h", label: "5시간", used: claude?.five_hour?.utilization ?? null, resetAt: iso(claude?.five_hour?.resets_at) },
     { id: "7d", label: "7일", used: claude?.seven_day?.utilization ?? null, resetAt: iso(claude?.seven_day?.resets_at) },
@@ -89,7 +95,7 @@ export function UsageCard({ usage: { claude, codex, agy }, collapsed }: { usage:
     .slice(0, 2)
     .map((w) => ({ id: w.window, label: windowName(w.windowDurationMins),
                    used: w.remainingPercent === null ? null : 100 - w.remainingPercent,
-                   resetAt: w.resetAt === null ? null : w.resetAt * 1000 }));
+                   resetAt: typeof w.resetAt === "number" ? w.resetAt * 1000 : null }));
 
   // older than 15 min = at least two missed 5-minute checks; stale values keep their bars and show the last check time
   const old = (u: ClaudeUsage | CodexUsage | null | undefined) =>
@@ -97,7 +103,7 @@ export function UsageCard({ usage: { claude, codex, agy }, collapsed }: { usage:
   const why = (u: ClaudeUsage | CodexUsage | null | undefined) => (u?.error ? REASON[u.error] ?? u.error : "");
   const note = (u: ClaudeUsage | CodexUsage | null | undefined) => (old(u) ? `확인 ${hhmm(u!.checked_at)}` : "");
   const tip = (label: string, u: ClaudeUsage | CodexUsage | null | undefined, ms: Meter[]) =>
-    [`${label} ${ms.map((m) => `${m.label} ${at(m.resetAt)} 리셋`).join(" · ")}`,
+    [`${label} ${ms.map((m) => `${m.label} ${at(m.resetAt) ?? "?"} 리셋`).join(" · ")}`,
      u?.fetched_at ? `마지막 확인 ${hhmm(u.checked_at)}` : "아직 확인 전",
      why(u)].filter(Boolean).join(" · ");
 
@@ -127,7 +133,7 @@ export function UsageCard({ usage: { claude, codex, agy }, collapsed }: { usage:
             <div key={g.name} className="space-y-1">
               <p className="truncate text-text-muted" title={g.name}>{g.name}</p>
               {g.limits.map((w, i) => {
-                const reset = w.reset_at ? at(iso(w.reset_at)) : "";
+                const reset = w.reset_at ? at(iso(w.reset_at)) ?? "?" : "";
                 return (
                   <div key={i} title={`${g.name} · ${w.name}${reset ? ` · ${reset} 리셋` : ""}`}>
                     <Bar m={{ id: w.name, label: w.name, used: w.used, resetAt: iso(w.reset_at) }} collapsed={collapsed} />

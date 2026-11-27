@@ -3,6 +3,7 @@
 This repo is ticket-pilot, the owner's Asana -> git worktree + headless agent -> PR -> review pipeline. See README.md for the flow.
 
 - Backend: Python 3 stdlib only (no pip deps). Entry point: `bin/tp` (`ticket_pilot/cli.py`).
+- 기능별 화면, API, 처리 모듈과 테스트는 [코드 지도](docs/architecture.md)를 참고한다. 코드가 바뀌는 PR은 [지도 갱신 규칙](docs/architecture.md#pr에서-코드-지도-갱신)에 따라 지도도 갱신한다.
 - 사용 흐름(태그, 단계, 승인, 배포, 화면)을 바꾸는 PR은 `docs/guide.md`도 같이 고친다 (`tp guide`, 대시보드 도움말이 이 파일을 보여 줌).
 - Web UI: `web/` is React + Vite + Tailwind v4. Use the `web/src/ui` components and the tokens in `web/src/theme/tokens.css`
   only (no raw hex / Tailwind default greys, no `bg-primary/10`-style opacity shades); `cn` only joins classes, so do not
