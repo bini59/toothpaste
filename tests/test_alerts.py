@@ -8,6 +8,7 @@ from unittest import mock
 from ticket_pilot import core
 from ticket_pilot import notifications as N
 from ticket_pilot import pipeline as P
+from ticket_pilot import pr_tracking as PT
 from ticket_pilot import release as R
 
 
@@ -20,7 +21,7 @@ class AlertTest(unittest.TestCase):
         self.con.execute("INSERT INTO tickets(gid,key,name,has_tag,assigned,repo_override) VALUES ('A','TP-1','t',1,1,'r')")
         self.con.execute("INSERT INTO runs(ticket_gid,repo,worktree_path,ws_status,state,terminal) "
                          "VALUES ('A','r','/tmp','in-progress','active','1 /tmp/x.log')")
-        for x in (mock.patch.object(P, "db", lambda: self.con), mock.patch.object(N.CH, "_layout", return_value=[])):
+        for x in (mock.patch.object(P, "db", lambda: self.con), mock.patch.object(PT, "db", lambda: self.con), mock.patch.object(N.CH, "_layout", return_value=[])):
             x.start()
             self.addCleanup(x.stop)
 
@@ -47,14 +48,14 @@ class AlertTest(unittest.TestCase):
                          ["r 프로덕션 배포 실패: 스모크 체크 실패: x 500", "r 프리뷰 배포 완료: TP-1, TP-2"])
 
     def test_ws_set_blocked_then_reply_reads_it(self):
-        with mock.patch.object(P, "run", return_value=SimpleNamespace(stdout="/tmp\n")), \
-             mock.patch.object(P, "refresh_prs"):
+        with mock.patch.object(PT, "run", return_value=SimpleNamespace(stdout="/tmp\n")), \
+             mock.patch.object(PT, "refresh_prs"):
             P.ws_set("todo", "BLOCKED: which table?\nmore detail")
             P.ws_set("todo", "BLOCKED: still which table?")  # a newer question replaces the older alert
         [a] = self.alerts("blocked")
         self.assertEqual((a["title"], a["ticket_gid"], a["href"]), ("TP-1 답변 필요: still which table?", "A", "#board"))
         with mock.patch.object(N.CH, "_layout", side_effect=ValueError("bad settings")), \
-             mock.patch.object(P, "run", return_value=SimpleNamespace(stdout="/tmp\n")), mock.patch.object(P, "refresh_prs"):
+             mock.patch.object(PT, "run", return_value=SimpleNamespace(stdout="/tmp\n")), mock.patch.object(PT, "refresh_prs"):
             P.ws_set("todo", "BLOCKED: third")  # the status is saved and the alert still made
         [a] = self.alerts("blocked")
         self.assertEqual(a["title"], "TP-1 답변 필요: third")
@@ -63,7 +64,7 @@ class AlertTest(unittest.TestCase):
         self.assertEqual(self.alerts("blocked"), [])
 
     def test_ws_set_in_review_reads_it(self):
-        with mock.patch.object(P, "run", return_value=SimpleNamespace(stdout="/tmp\n")), mock.patch.object(P, "refresh_prs"):
+        with mock.patch.object(PT, "run", return_value=SimpleNamespace(stdout="/tmp\n")), mock.patch.object(PT, "refresh_prs"):
             P.ws_set("todo", "BLOCKED: q")
             P.ws_set("in-review", "PR #1 ready")
         self.assertEqual(self.alerts("blocked"), [])
@@ -72,8 +73,8 @@ class AlertTest(unittest.TestCase):
         with mock.patch.object(P.R, "is_handle", return_value=True), \
              mock.patch.object(P.R, "agent_state", return_value=(False, 1)), \
              mock.patch.object(P.R, "last_message", return_value="need a key"), \
-             mock.patch.object(P, "settings", return_value={}):
-            P.agent_exits(self.con)
+             mock.patch.object(PT, "settings", return_value={}):
+            PT.agent_exits(self.con)
         [a] = self.alerts("blocked")
         self.assertEqual(a["title"], "TP-1 답변 필요: need a key")
 

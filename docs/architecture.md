@@ -25,8 +25,9 @@
 ## PR 검사와 리뷰
 
 - **화면·API** — [Reviews.tsx](../web/src/views/Reviews.tsx)는 `GET /api/reviews`를 읽는다. 보드의 승인과 검사 예외 요청은 `POST /api/approve`, `POST /api/check-override`를 사용한다.
-- **처리** — [precheck.py](../ticket_pilot/precheck.py)의 `review()`가 PR을 스캔하고 [checks.py](../ticket_pilot/checks.py)에서 검사 상태를 확인한다. [pipeline.py](../ticket_pilot/pipeline.py)의 `review_queue()`와 `review_save()`가 AI 리뷰 대상과 결과를 관리한다. 리뷰 에이전트는 [automation_review.md](../prompts/automation_review.md)를 따르며, 수정 요청 후 재작업은 `pipeline.rework()`에서 처리한다.
-- **테스트** — [test_checks.py](../tests/test_checks.py), [test_rework_cap.py](../tests/test_rework_cap.py)
+- **추적** — `tp scan`, `tp ws-set`, 리뷰 사전 점검과 대시보드 새로고침은 [pipeline.py](../ticket_pilot/pipeline.py)를 거쳐 [pr_tracking.py](../ticket_pilot/pr_tracking.py)에서 워크트리, 에이전트 종료, GitHub PR 상태를 읽고 기록한다. 추적 모듈은 [milestone.py](../ticket_pilot/milestone.py)의 규칙에 따라 열린 PR의 base를 재지정하고, 작업 중 머지와 base 브랜치 직접 push를 감시한다.
+- **검사·리뷰** — [precheck.py](../ticket_pilot/precheck.py)의 `review()`는 스캔 후 [checks.py](../ticket_pilot/checks.py)에서 PR HEAD의 검사 상태를 확인한다. [review.py](../ticket_pilot/review.py)의 `review_queue()`와 `review_save()`가 HEAD별 리뷰 대상과 결과를 관리한다. 리뷰 에이전트는 [automation_review.md](../prompts/automation_review.md)를 따르며, `dispatch()`는 재작업과 충돌·답변 후 재시도를 리뷰 모듈에 위임한다. 티켓 단계 갱신은 `pipeline.restage()`가 수행한다.
+- **테스트** — [test_pr_tracking.py](../tests/test_pr_tracking.py), [test_checks.py](../tests/test_checks.py), [test_rework_cap.py](../tests/test_rework_cap.py), [test_milestone.py](../tests/test_milestone.py)
 
 ## 마일스톤과 배포
 

@@ -202,7 +202,7 @@ def _escalate_unchanged(con, p, log=print) -> bool:
         return False
     q = (f"BLOCKED: tp 검사가 계속 실패해요 (PR #{p['number']}, 새 커밋 없음). "
          f"에이전트 설명을 PR에서 확인하고 답장해 주세요. {rv['summary'] or ''}")[:240]
-    from .pipeline import mirror_orca
+    from .pr_tracking import mirror_orca
     mirror_orca(con.execute("SELECT * FROM runs WHERE id=?", (p["run_id"],)).fetchone(), "todo", q, unread=True)
     con.execute("UPDATE runs SET ws_status='todo', ws_comment=?, updated_at=? WHERE id=?", (q, now(), p["run_id"]))
     from . import notifications as N

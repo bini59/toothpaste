@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from ticket_pilot import checks as K, core, pipeline as P, release as R
+from ticket_pilot import checks as K, core, pipeline as P, release as R, review
 
 CFG = {"r": {"ci": False, "checks": [{"name": "lint", "cmd": "run lint"}, {"name": "test", "cmd": "run test"}]},
        "m": {"ci": True, "checks": []}}
@@ -208,7 +208,7 @@ class CheckGateTest(unittest.TestCase):
         K.settle(self.con, self.con.execute("SELECT * FROM prs WHERE url='uA'").fetchone(), log=lambda *a: None)
         P.dispatch(log=lambda *a: None)
         pr = self.con.execute("SELECT * FROM prs WHERE url='uA'").fetchone()
-        self.assertEqual(P.rework_rounds(self.con, self.ticket(), pr), 1)  # within review.max_rework_rounds
+        self.assertEqual(review.rework_rounds(self.con, self.ticket(), pr), 1)  # within review.max_rework_rounds
         self.con.execute("UPDATE prs SET head_sha='s1' WHERE url='uA'")
         self.con.execute("UPDATE runs SET ws_status='in-review' WHERE ticket_gid='A'")
         self.checks(sha="s1", lint="pass", test="pass")
@@ -309,7 +309,7 @@ class CheckGateTest(unittest.TestCase):
         self.checks(lint="pass", test="fail")
         self.settle()
         self.con.execute("UPDATE reviews SET rework_at='2026-10-29T00:00:00+00:00'")
-        with mock.patch.object(P, "rework_rounds", return_value=3):
+        with mock.patch.object(review, "rework_rounds", return_value=3):
             self.assertTrue(P.escalate_rework(self.con, self.ticket(), 3, log=lambda *a: None))
         q = self.con.execute("SELECT ws_comment FROM runs WHERE ticket_gid='A'").fetchone()["ws_comment"]
         self.assertIn("tp 검사 실패", q)
