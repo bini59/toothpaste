@@ -1,15 +1,21 @@
 import { Badge, Card } from "../ui";
 import { VERDICT, ago } from "../lib";
-import type { State } from "../types";
+import type { Review, State } from "../types";
+import { useMonitoringData } from "./useMonitoringData";
 
-export function Reviews({ s }: { s: State }) {
+export function Reviews({ s, syncing }: { s: State; syncing: boolean }) {
+  const { data, error } = useMonitoringData<{ reviews: Review[] }>("/api/reviews", syncing);
+  const errorMessage = error ? <p className="text-sm text-text-muted">불러오기 실패: {error}</p> : null;
+  if (!data) return errorMessage ?? <p className="text-sm text-text-muted">불러오는 중…</p>;
   const tk = Object.fromEntries(s.tickets.map((t) => [t.gid, t]));
-  if (!s.reviews.length) return <Card className="p-5 text-center text-sm text-text-muted">아직 리뷰가 없어요.</Card>;
+  const prs = new Map(s.prs.map((p) => [p.url, p]));
   return (
     <div className="flex flex-col gap-3">
-      {s.reviews.map((v) => {
+      {errorMessage}
+      {!data.reviews.length && <Card className="p-5 text-center text-sm text-text-muted">아직 리뷰가 없어요.</Card>}
+      {data.reviews.map((v) => {
         const t = tk[v.ticket_gid];
-        const p = s.prs.find((x) => x.url === v.pr_url);
+        const p = prs.get(v.pr_url);
         const [label, status] = VERDICT[v.verdict] ?? [v.verdict, "draft"];
         return (
           <Card key={v.id} className="p-5">

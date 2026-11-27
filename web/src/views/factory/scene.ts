@@ -75,7 +75,7 @@ export function buildScene(s: State, snap: AutomationsResponse | null): Scene {
       const rows = pr?.checks?.rows ?? [];
       it.lights = byName[repo].gates.map((g) => light(g === "CI" ? rows : rows.filter((r) => r.name === g)));
     }
-    if (t.stage === "rework" && pr) it.round = (I.revBy[pr.url] ?? []).filter((v) => v.rework_at).length;
+    if (t.stage === "rework" && pr) it.round = pr.rework_count;
     items.push(it);
   }
 

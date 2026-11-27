@@ -3,27 +3,32 @@ import { Badge } from "../ui";
 import { fetchAutomations } from "../api";
 import { Table } from "../components/Table";
 import { ROLES, ago, ofRole, type Role, type Status } from "../lib";
-import type { AutomationsResponse, State } from "../types";
+import type { AutomationsResponse, EventRow, State } from "../types";
+import { useMonitoringData } from "./useMonitoringData";
 
 const kindStatus = (k: string): Status =>
   k === "error" || k === "violation" || k === "agent_timeout" ? "danger" : k === "dispatch" || k === "tagged" || k === "asana_write" ? "info" : k === "stage" ? "success" : "draft";
 const runStatus = (st: string): Status => (/skip/.test(st) ? "warning" : /fail|error/.test(st) ? "danger" : /complete|done|success/.test(st) ? "success" : "info");
 
-export function Log({ s, role }: { s: State; role?: Role }) {
+export function Log({ s, role, syncing }: { s: State; role?: Role; syncing: boolean }) {
+  const { data, error: eventsError } = useMonitoringData<{ events: EventRow[] }>("/api/events", syncing, role);
   const [a, setA] = useState<AutomationsResponse | null>(null);
   const [err, setErr] = useState("");
   useEffect(() => {
     fetchAutomations().then(setA).catch((e) => setErr(String(e)));
   }, [s]);
   const list = (a?.automations || []).filter((x) => /ticket-pilot/i.test(x.name) && (!role || ROLES[role].re.test(x.name)));
-  const events = role ? s.events.filter((e) => ofRole(role, e)) : s.events;
+  const events = role ? data?.events.filter((e) => ofRole(role, e)) : data?.events;
   const usage = Object.fromEntries((a?.items || []).map((i) => [i.automationId, i.usageSummary || {}]));
   return (
     <>
-      {/* events first: they come with the state, the automations table loads after and would push them down (TP-174) */}
+      {/* Keep events above the automations table so it cannot push them down when it loads (TP-174). */}
       <section>
         <h2 className="mb-3 text-base font-bold text-text-main sm:text-lg">이벤트</h2>
-        {events.length ? (
+        {eventsError && <p className="text-sm text-text-muted">불러오기 실패: {eventsError}</p>}
+        {!events ? (
+          !eventsError && <p className="text-sm text-text-muted">불러오는 중…</p>
+        ) : events.length ? (
           <Table head={["시각", "종류", "누가", "내용"]} cols={["13.5rem", "10.5rem", "8rem", undefined]}>
             {events.map((e) => (
             <tr key={e.id}>
