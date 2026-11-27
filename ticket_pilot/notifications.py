@@ -18,10 +18,14 @@ def add(con, kind: str, title: str, body: str, href: str, ticket_gid: str | None
                 (now(), kind, ticket_gid, title, body, href))
 
 
+def milestone_href(parent_gid: str) -> str:
+    return f"#milestones/{quote(parent_gid, safe=':')}"
+
+
 def read_ms_ready(con, parent_gid: str) -> None:
     """A milestone's 작업 완료 alert stops being true (pressed, or a subtask in progress again): no stale one stays unread."""
     con.execute("UPDATE notifications SET read_at=? WHERE kind='ms_ready' AND href=? AND read_at IS NULL",
-                (now(), f"#milestones/{parent_gid}"))
+                (now(), milestone_href(parent_gid)))
 
 
 def deploy(con, rel, status: str, reason: str | None) -> None:
@@ -65,9 +69,9 @@ def review_href(con, t, repo: str | None, layout: list[dict]) -> str | None:
     in web lib.ts inProject's order: the tp project linked to its Asana project, else the first one (미분류 last) with
     the PR's repo. None = no board shows it (keep the PR)."""
     if M.is_ms(t["gid"]):
-        return f"#milestones/{M.parse(t['gid'])[0]}"
+        return milestone_href(M.parse(t["gid"])[0])
     if M.in_milestone(t):
-        return f"#milestones/{t['parent_gid']}"
+        return milestone_href(t["parent_gid"])
     own = t["project_gid"] and con.execute("SELECT project_id FROM project_map WHERE project_gid=? AND project_id IS NOT NULL",
                                            (t["project_gid"],)).fetchone()
     pid = own["project_id"] if own else next((p["id"] for p in layout if any(r["name"] == repo for r in p["repos"])), None)

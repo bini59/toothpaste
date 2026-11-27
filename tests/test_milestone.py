@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from ticket_pilot import core
+from ticket_pilot import core, deploy
 from ticket_pilot import milestone as M
 from ticket_pilot import notifications as N
 from ticket_pilot import pipeline as P
@@ -74,6 +74,79 @@ class MilestoneTest(unittest.TestCase):
         self.ticket("B", in_ms=0)
         self.assertEqual(M.base_for(self.row("A"), API), "milestone/P1")
         self.assertEqual(M.base_for(self.row("B"), API), "staging")
+
+    def test_github_landed_pr_survives_unlink_and_source_closure(self):
+        parent, child = "gh:o/api#12", "gh:o/api#13"
+        self.ticket(parent, parent=None, in_ms=0, tags=("tp-milestone",))
+        self.ticket(child, parent=parent)
+        with mock.patch.object(M, "_gh"):
+            base = M.ensure(self.con, self.row(child), API)
+        gid = M.ms_gid(parent, API)
+        url = self.pr(child, "MERGED", base, merged_at="2026-11-01")
+        self.con.execute("UPDATE tickets SET parent_gid=NULL,in_milestone=0,assigned=0,completed=1 WHERE gid=?", (child,))
+        self.assertEqual(M.landed_parents(self.con)[child]["parent_gid"], parent)
+        self.assertTrue(M.ready(self.con, parent))
+        self.assertEqual([r["gid"] for r in M.subtasks(self.con, parent)], [child])
+        with mock.patch.object(R, "_gh") as close:
+            self.assertIsNone(M.complete(self.con, gid))
+        self.assertEqual([c.args[0][2] for c in close.call_args_list], ["12"])
+        self.assertIsNotNone(self.con.execute("SELECT prod_at FROM prs WHERE url=?", (url,)).fetchone()[0])
+
+    def test_verified_github_close_retries_child_before_parent(self):
+        parent, child = "gh:o/api#12", "gh:o/api#13"
+        self.ticket(parent, parent=None, in_ms=0, tags=("tp-milestone",))
+        self.ticket(child, parent=parent)
+        with mock.patch.object(M, "_gh"):
+            base = M.ensure(self.con, self.row(child), API)
+        url = self.pr(child, "MERGED", base, merged_at="2026-11-01")
+        with mock.patch.object(R, "_gh", side_effect=RuntimeError("offline")) as close:
+            self.assertIn("offline", M.complete(self.con, M.ms_gid(parent, API)))
+            self.assertEqual([c.args[0][2] for c in close.call_args_list], ["13"])
+        self.assertEqual(core.meta_get(self.con, "github_milestone_close_retries"), {parent: {child: url}})
+        with mock.patch.object(M, "db", return_value=self.con), mock.patch.object(R, "_gh") as close:
+            M.tick(log=lambda *_: None)
+            M.tick(log=lambda *_: None)
+            self.assertEqual([c.args[0][2] for c in close.call_args_list], ["13", "12"])
+        self.assertEqual(core.meta_get(self.con, "github_milestone_close_retries"), {})
+
+    def test_github_deploy_rechecks_relation_after_request(self):
+        gid = "gh:o/api#13"
+        self.ticket(gid, parent=None, in_ms=0)
+        url = self.pr(gid, "OPEN", "staging")
+        rel = {"repo": API, "mode": "direct", "ticket_gid": gid, "prs_json": json.dumps([{"url": url}])}
+        deploy._check_milestone_deploy(self.con, rel)
+        self.con.execute("UPDATE tickets SET parent_gid='gh:o/api#12',in_milestone=1 WHERE gid=?", (gid,))
+        with self.assertRaisesRegex(RuntimeError, "마일스톤 PR"):
+            deploy._check_milestone_deploy(self.con, rel)
+
+    def test_verified_github_parent_closes_if_undispatched_child_drops_out(self):
+        parent, child, added = "gh:o/api#12", "gh:o/api#13", "gh:o/shop#1"
+        self.ticket(parent, parent=None, in_ms=0, tags=("tp-milestone",))
+        self.ticket(child, parent=parent)
+        with mock.patch.object(M, "_gh"):
+            base = M.ensure(self.con, self.row(child), API)
+        self.pr(child, "MERGED", base, merged_at="2026-11-01")
+        self.ticket(added, parent=parent, repo="14_Shop", stage="queued")
+        with mock.patch.object(M, "db", return_value=self.con), mock.patch.object(R, "_gh") as close:
+            self.assertIsNone(M.complete(self.con, M.ms_gid(parent, API)))
+            self.assertFalse(self.row(parent)["completed"])
+            self.con.execute("UPDATE tickets SET assigned=0 WHERE gid=?", (added,))
+            M.tick(log=lambda *_: None)
+            M.tick(log=lambda *_: None)
+            self.assertEqual([c.args[0][2] for c in close.call_args_list], ["13", "12"])
+        self.assertEqual(core.meta_get(self.con, "github_milestone_close_retries"), {})
+
+    def test_asana_keeps_milestone_base_while_staging_is_disabled(self):
+        rules = {API: {**RULES[API], "train": False, "pr_into_staging": True, "modes": ["direct"]}}
+        core.write_config(self.con, {"settings": {"deploy": {"repos": rules}}, "project_map": {}})
+        self.ticket("100", parent="99")
+        self.assertEqual(M.base_for(self.row("100"), API), "milestone/99")
+        self.assertEqual(self.stage("100"), "needs_staging")
+
+    def test_external_github_milestone_worktree_names_are_unique(self):
+        keys = [M.ms_gid(f"gh:example/{'long-name-' * 7}#{n}", repo)
+                for n in (12, 13) for repo in ("frontend_api", "backend_api")]
+        self.assertEqual(len({P.slug(key) for key in keys}), len(keys))
 
     def test_no_milestone_without_feature_base(self):
         self.ticket("A", repo="32_Ticket_pilot")

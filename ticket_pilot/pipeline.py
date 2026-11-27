@@ -172,7 +172,7 @@ def compute_stage(con, t, *, repos=None) -> str:
     if t["open_deps"] and unmet_deps(con, t):
         return "waiting_dep"
     if t["repo_override"] and not t["gid"].startswith("notion:"):
-        return "queued"
+        return "needs_staging" if M.staging_config_error(t, t["repo_override"]) else "queued"
     if repos is None:  # preview can supply the project's unsaved repo selection
         repos = repos_for_project(con, t["project_gid"])
     repo = chosen_repo(con, t, repos)
@@ -241,6 +241,28 @@ def issue_ref(gid: str) -> tuple[str, str] | None:
 ISSUE_LABEL = "tp"
 
 
+def _open_issues(gh: str) -> list:
+    # Fetch the immediate parent in the same listing, including parents in another repository.
+    # Finish every page before marking missing issues closed.
+    owner, name = gh.split("/")
+    query = """query($owner:String!, $name:String!, $endCursor:String) {
+      repository(owner:$owner, name:$name) { issues(states:OPEN, first:100, after:$endCursor,
+                                                    orderBy:{field:CREATED_AT, direction:DESC}) {
+        pageInfo { hasNextPage endCursor }
+        nodes { number title body url updatedAt labels(first:100) { nodes { name } }
+                parent { number title url repository { nameWithOwner } labels(first:100) { nodes { name } } } }
+      } }
+    }"""
+    data = run(["gh", "api", "graphql", "--paginate", "-f", f"owner={owner}", "-f", f"name={name}", "-f", f"query={query}",
+                "--jq", ".data.repository.issues.nodes[] | @json"], timeout=120)
+    issues = [json.loads(line) for line in data.stdout.splitlines()]
+    for issue in issues:
+        issue["labels"] = issue["labels"]["nodes"]
+        if parent := issue.get("parent"):
+            parent["labels"] = parent["labels"]["nodes"]
+    return issues
+
+
 def issue_repos() -> dict:
     """{repo: (key prefix, label or None)} of the repos whose GitHub issues are tickets.
     settings.github_issues (legacy): every open issue. Repos of a `source: github` project (TP-92): open issues labeled
@@ -261,6 +283,7 @@ def sync_issues(con, ts: str, new_tagged: list) -> None:
     ticket; ticket-pilot closes it itself once the change is live. An open issue whose `tp` label was removed drops
     out like an Asana task assigned to someone else (assigned=0; re-labeling brings it back)."""
     sources = issue_repos()
+    repo_names = {r[0].lower(): r[0] for r in con.execute("SELECT github FROM repos WHERE github IS NOT NULL")}
     # a repo that is no longer an issue source (project switched to asana/none, repo unlinked): its tickets drop out
     con.executemany("UPDATE tickets SET assigned=0 WHERE completed=0 AND assigned=1 AND gid LIKE 'gh:%' AND repo_override=?",
                     [(r[0],) for r in con.execute("SELECT DISTINCT repo_override FROM tickets WHERE gid LIKE 'gh:%'")
@@ -272,8 +295,7 @@ def sync_issues(con, ts: str, new_tagged: list) -> None:
         gh = r["github"]
         try:
             # all open issues, label filtered here: an unlabeled open issue must not look closed
-            issues = _gh_issue_json(["issue", "list", "--repo", gh, "--state", "open", "--limit", "500",
-                                     "--json", "number,title,body,url,updatedAt,labels"])
+            issues = _open_issues(gh)
         except Exception as e:  # noqa: BLE001  (keep the Asana sync going; do not close tickets on a failed read)
             event(con, "error", f"github issues {gh}: {str(e)[:300]}")
             continue
@@ -282,20 +304,33 @@ def sync_issues(con, ts: str, new_tagged: list) -> None:
             gid, key = f"gh:{gh}#{i['number']}", f"{prefix}-{i['number']}"
             still_open.add(gid)
             labels = [lb["name"] for lb in i.get("labels") or []]
-            if label and label not in [x.lower() for x in labels]:
+            is_parent = M.has_tag(labels)
+            if not is_parent and label and label not in [x.lower() for x in labels]:
                 continue
             seen.add(gid)
-            if not con.execute("SELECT 1 FROM tickets WHERE gid=? AND completed=0 AND assigned=1", (gid,)).fetchone():
+            parent = i.get("parent") or {}
+            parent_gid = None
+            if parent:
+                owner_repo = parent["repository"]["nameWithOwner"]
+                parent_gid = f"gh:{repo_names.get(owner_repo.lower(), owner_repo)}#{parent['number']}"
+            in_ms = M.has_tag([lb["name"] for lb in parent.get("labels") or []])
+            if in_ms:
+                M.refresh_parent(con, parent_gid, parent["title"], parent["url"])
+            if not is_parent and not con.execute(
+                    "SELECT 1 FROM tickets WHERE gid=? AND completed=0 AND assigned=1 AND has_tag=1", (gid,)).fetchone():
                 new_tagged.append(key)
             con.execute("""
               INSERT INTO tickets(gid,key,name,url,project_name,notes,tags,has_tag,deps_json,open_deps,completed,assigned,
-                                  asana_modified_at,first_seen,last_seen,repo_override)
-              VALUES(?,?,?,?,?,?,?,1,'[]',0,0,1,?,?,?,?)
-              ON CONFLICT(gid) DO UPDATE SET name=excluded.name,notes=excluded.notes,tags=excluded.tags,completed=0,
-                assigned=1,asana_modified_at=excluded.asana_modified_at,last_seen=excluded.last_seen
+                                  asana_modified_at,first_seen,last_seen,repo_override,parent_gid,parent_name,parent_url,in_milestone)
+              VALUES(?,?,?,?,?,?,?,?,'[]',0,0,1,?,?,?,?,?,?,?,?)
+              ON CONFLICT(gid) DO UPDATE SET key=excluded.key,name=excluded.name,notes=excluded.notes,tags=excluded.tags,
+                completed=0,assigned=1,has_tag=excluded.has_tag,asana_modified_at=excluded.asana_modified_at,
+                last_seen=excluded.last_seen,parent_gid=excluded.parent_gid,parent_name=excluded.parent_name,
+                parent_url=excluded.parent_url,in_milestone=excluded.in_milestone
             """, (gid, key, i["title"], i["url"], f"GitHub {gh}", i.get("body") or "",
-                  json.dumps(labels), i.get("updatedAt"), ts, ts, repo))
-        for row in con.execute("SELECT gid FROM tickets WHERE completed=0 AND gid LIKE ?", (f"gh:{gh}#%",)).fetchall():
+                  json.dumps(labels), int(not is_parent), i.get("updatedAt"), ts, ts, repo, parent_gid,
+                  parent.get("title"), parent.get("url"), int(in_ms)))
+        for row in con.execute("SELECT gid FROM tickets WHERE completed=0 AND gid GLOB ?", (f"gh:{gh}#*",)).fetchall():
             if row["gid"] not in seen:
                 col = "assigned=0" if row["gid"] in still_open else "completed=1"
                 con.execute(f"UPDATE tickets SET {col} WHERE gid=?", (row["gid"],))
@@ -407,6 +442,9 @@ def sync(log=print) -> dict:
 # ---------------------------------------------------------------- dispatch
 
 def slug(s: str) -> str:
+    if s.startswith("ms:gh:"):
+        _, repo = M.parse(s)
+        return f"ms-{slug(repo)[:14]}-{hashlib.sha256(s.encode()).hexdigest()[:16]}"
     if match := re.fullmatch(r"NT-[0-9a-f]{32}-([a-zA-Z0-9_.-]+)", s):
         # Notion milestone keys share a 35-character parent prefix. Keep repo briefs distinct at the 40-char limit.
         return f"ms-{match[1][:14].lower()}-{hashlib.sha256(s.encode()).hexdigest()[:16]}"
@@ -416,7 +454,13 @@ def slug(s: str) -> str:
 def _agent_brief(template, ticket):
     gid = ticket["project_gid"] if "project_gid" in ticket.keys() else None
     pid = gid.removeprefix("notion:") if gid and gid.startswith("notion:") else None
-    return (template.replace("{{NOTION}}", notion_tickets.agent_rules(pid)).replace("{{ASANA}}", R.asana_rules())
+    template = template.replace("{{NOTION}}", notion_tickets.agent_rules(pid))
+    if not pid and "{{PROJECT_ID}}" in template:
+        repo = ticket["repo_override"] if "repo_override" in ticket.keys() else None
+        projects = [p["id"] for p in project_map()["projects"] if (gid and p.get("asana_gid") == gid)
+                    or (not gid and repo and p["source"] == "github" and any(r["repo"] == repo for r in p.get("repos") or []))]
+        pid = projects[0] if len(projects) == 1 else None
+    return (template.replace("{{PROJECT_ID}}", pid or "PROJECT_ID").replace("{{ASANA}}", R.asana_rules())
             .replace("{{TP}}", TP_BIN).replace("{{OWNER}}", settings().get("owner_name", "the user")))
 
 
@@ -494,7 +538,7 @@ def chosen_repo(con, t, repos=None):
 
 def resume_staging_error(con, t):
     """A retry uses the existing worktree's repo even if the project mapping has changed."""
-    if M.notion_milestone(t) and (r := latest_run(con, t["gid"])):
+    if (M.notion_milestone(t) or M.github_milestone(t)) and (r := latest_run(con, t["gid"])):
         return M.staging_config_error(t, r["repo"])
     return None
 
@@ -559,6 +603,10 @@ def dispatch(dry_run=False, log=print, only: str | None = None) -> list[str]:
         repo = chosen_repo(con, t)
         if not repo:
             slots += 1
+            continue
+        if err := M.staging_config_error(t, repo["repo"]):
+            slots += 1
+            log(f"{t['key']}: {err}")
             continue
         if t["gid"].startswith("notion:") and con.in_transaction:
             con.commit()  # release earlier candidates' writes before reading the page over HTTP
@@ -960,7 +1008,7 @@ def _retarget_pr(con, r, t, pr) -> None:
         return
     target = M.base_for(t, repo)
     into_milestone = (target or "").startswith(M.PREFIX)
-    from_milestone = t and M.on_notion_milestone_branch(t, old_base)
+    from_milestone = t and M.on_milestone_branch(t, old_base)
     if from_milestone and not target:
         # Unlinked tasks on repos without a feature base can still use staging. When that route is
         # disabled, ordinary PRs use the GitHub default branch (which can differ from prod).
@@ -1225,11 +1273,9 @@ SHOT_BRANCH = "ticket-pilot-screenshots"
 
 def gh_api(method: str, path: str, body: dict | None = None) -> dict:
     cmd = ["gh", "api", "-X", method, path]
-    if body is not None:  # via file: base64 images can exceed argv limits
-        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-            json.dump(body, f)
-        cmd += ["--input", f.name]
-    return json.loads(run(cmd, timeout=120).stdout or "{}")
+    if body is not None:
+        cmd += ["--input", "-"]
+    return json.loads(run(cmd, timeout=120, input=json.dumps(body) if body is not None else None).stdout or "{}")
 
 
 def upload_shots(github: str, prefix: str, files: list[str]) -> list[tuple[str, str]]:

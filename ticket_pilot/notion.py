@@ -28,6 +28,10 @@ class NotionError(RuntimeError):
     pass
 
 
+class PageNotFound(NotionError):
+    """A referenced page is absent from the selected data source."""
+
+
 class UncertainWrite(NotionError):
     """The connection may have applied this mutation before the response failed."""
 
@@ -213,9 +217,9 @@ class Client:
         if page.get("id") != page_id or not isinstance(page.get("properties"), dict):
             raise NotionError("Notion 페이지의 속성을 확인할 수 없어요")
         if (page.get("parent") or {}).get("data_source_id") != source:
-            raise NotionError("페이지가 프로젝트에 연결된 Notion 데이터베이스에 없어요")
+            raise PageNotFound("페이지가 프로젝트에 연결된 Notion 데이터베이스에 없어요")
         if page.get("in_trash") or page.get("is_archived") or page.get("archived"):
-            raise NotionError("휴지통에 있는 Notion 페이지예요")
+            raise PageNotFound("휴지통에 있는 Notion 페이지예요")
         return page
 
     def items(self, path, body=None):

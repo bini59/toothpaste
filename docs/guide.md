@@ -107,6 +107,20 @@ tick이 끝난 에이전트 실행을 로컬 transcript에서 한 번 집계해 
 ## ticket · 티켓
 티켓 출처, 단계, 여러 레포 티켓, 의존 관계.
 
+**티켓 만들기**
+
+터미널과 프로젝트 채팅은 같은 명령을 사용해요. `--project`에는 프로젝트 설정의 ID를 넣으세요.
+
+```sh
+tp ticket create --project app --title "로그인 오류" --body "재현 순서" --assignee me --tag 버그
+tp ticket create --project app --title "재현 테스트" --parent APP-12
+tp ticket create --project app --title "모바일 수정" --milestone APP-24
+```
+
+프로젝트의 출처에 따라 Asana 태스크, Notion 작업 DB 페이지 또는 GitHub 이슈가 생깁니다. GitHub는 기본 레포에 만들고 기본 레포를 지정하지 않았으면 설정 순서상 첫 레포를 사용해요. 이슈에는 `tp` 라벨이 붙습니다. `--tag`는 여러 번 줄 수 있고, 하위 티켓에는 `--parent`와 `--milestone` 중 하나를 사용하세요.
+
+성공하면 표준 출력에 `ok`, `source`, `key`, `gid`, `url`을 담은 JSON 한 줄이 나옵니다. 실패하면 표준 오류의 JSON에서 `code`와 `message`를 확인하세요. 종료 코드 4는 요청이나 설정을 고쳐야 한다는 뜻이에요. 예를 들어 `parent_not_found`면 부모 키를, `milestone_unsupported`면 마일스톤 연결과 staging 머지 설정을 확인하세요. `global.agent_asana_write`가 꺼져 있거나 자동화 단계에서 호출하면 `write_disabled`입니다. 외부 API나 로컬 저장 오류는 종료 코드 5와 `upstream_error`로 표시돼요. 오류 JSON에 `created`가 있으면 이미 생성된 티켓의 `key`, `gid`, `url`을 사용하세요.
+
 **출처**
 - Asana: 설정에서 사용을 끄면 동기화와 Asana 작업을 중지하며 기존 연결 정보와 티켓은 보존합니다. 다시 켜면 다음 동기화부터 재개합니다. Asana 연결에 오류가 나도 GitHub 이슈는 동기화합니다. 나에게 배정된 미완료 태스크에 설정 `asana_tag`의 태그(새 설치 기본 **`tp`**)를 붙이면 티켓이 됩니다. 태스크의 프로젝트가 설정에서 레포와 연결돼 있어야 해요.
 - GitHub 이슈: 설정 `github_issues`에 있는 레포의 열린 이슈는 모두 티켓입니다(키 `TP-<번호>` 등). 출처가 `github`인 프로젝트의 레포는 라벨 `tp`가 붙은 열린 이슈만 받습니다. 라벨을 떼면 티켓이 빠지고, 다시 붙이면 돌아와요.
@@ -152,8 +166,6 @@ tick이 끝난 에이전트 실행을 로컬 transcript에서 한 번 집계해 
 프로젝트 채팅에서 “이 DB에 버그 티켓을 만들어 줘” 또는 “이 티켓을 진행 중으로 바꾸고 긴급 태그를 붙여 줘”라고 요청하세요. 터미널과 에이전트는 같은 명령을 사용합니다. 아래 `app`은 프로젝트 설정의 ID이고, `NT-…`에는 생성 결과나 보드의 티켓 키를 넣으세요. 생성 결과에 Notion 링크가 함께 표시됩니다.
 
 ```sh
-tp notion create --project app --title "로그인 오류" --body "재현 순서" --tag 버그
-tp notion create --project app --parent NT-… --title "재현 테스트"
 tp notion update NT-… --title "모바일 로그인 오류" --assignee me --due 2027-01-15
 tp notion status NT-…                  # 현재 DB의 선택지 조회
 tp notion status NT-… "진행 중"
@@ -162,7 +174,7 @@ tp notion tag NT-… 긴급 --remove
 tp notion comment NT-… "수정 PR을 열었습니다. https://github.com/example/app/pull/42"
 ```
 
-채팅에서 “로그인 오류 아래에 재현 테스트를 만들어 줘”라고 요청하거나 `--parent "로그인 오류"`처럼 제목을 지정할 수도 있어요. 같은 작업 DB에서 제목이 정확히 일치하는 행을 우선하고, 일부만 일치하면 후보가 하나일 때 연결합니다. 여러 행이 일치하면 표시된 티켓 키로 부모를 고르세요.
+Notion 하위 티켓을 만들 때는 같은 작업 DB의 부모 키(`NT-…`)나 gid(`notion:…`)를 `--parent`에 넣으세요.
 
 `update --body`는 페이지 본문 전체를 Markdown으로 교체합니다. 담당자와 마감일은 `none`으로 해제할 수 있어요. 사람 열이나 날짜 열이 여러 개면 프로젝트에서 **담당자 열**과 **마감일 열**을 지정하세요. 다중 선택 열에서는 위 명령 후 `버그`가 남고, 단일 선택 열에서는 추가한 값으로 교체되며 그 값을 제거하면 비워져요. 대기 중인 티켓의 속성을 편집하면 다음 동기화에서 가져오기 조건을 다시 확인하고 작업을 시작합니다.
 
@@ -194,10 +206,23 @@ tp notion comment NT-… "수정 PR을 열었습니다. https://github.com/examp
 ## milestone · 마일스톤
 하위 태스크를 모아 한 번에 staging과 프로덕션에 올리기.
 
+**프로젝트에서 만들기**
+
+```sh
+tp milestone create --project app --title "모바일 로그인" --subtask "화면 수정" --subtask "회귀 테스트"
+```
+
+부모를 먼저 만들고 각 제목을 하위 티켓으로 연결해요. 부모만 만들려면 `--subtask`를 생략하세요. 나중에 추가하려면 `tp ticket create --project app --title "추가 검증" --milestone <부모 gid>`를 사용하세요. Asana 하위 티켓에는 작업 태그와 담당자 `me`를 적용해요. Notion 하위 티켓에는 담당자와 상태를 가져오기 조건에 맞추고, 태그 열에 가져오기 태그와 작업 태그를 함께 넣습니다. 태그 열을 골라야 하며 두 태그가 다르면 다중 선택 열이 필요해요. 마일스톤 판별 태그는 하위 티켓의 태그와 구분하세요. `--subtask`나 `--milestone`으로 하위 티켓을 요청할 때 이 조건을 충족하지 않으면 페이지를 만들기 전에 `milestone_unsupported`를 반환합니다. 동기화 후 첫 하위 티켓이 투입되면 브랜치가 생겨요.
+
+결과의 `subtasks`에 생성이 확인된 하위 티켓의 키와 링크가 나옵니다. 하위 티켓 생성 후 로컬 저장 등에 문제가 생기면 오류 JSON의 `warnings`에 사유와 `created` 정보가 나와요. `failed` 항목은 사유와 원격 생성 여부를 확인한 뒤 필요한 하위 티켓만 추가하세요. 부모의 생성 직후 오류가 발생하면 `created`에 부모 정보가 나와요. 오류 사유를 확인한 뒤 그 `gid`로 하위 티켓을 추가하세요.
+
+GitHub에서는 `milestone_tag` 라벨을 붙인 부모 이슈와 `tp` 라벨을 붙인 하위 이슈를 만듭니다. 다른 레포의 부모는 `--milestone 'gh:example/api#12'`처럼 지정할 수 있어요. 부모와 자식 레포의 소유자가 같아야 합니다. 하위 PR이 머지된 뒤 이슈의 부모가 바뀌어도 실제 머지된 브랜치의 배포를 추적해요. 프로덕션 반영이 확인되면 하위 이슈를 닫고, 모든 레포의 반영과 하위 이슈 종료를 확인하면 부모 이슈를 닫습니다. GitHub 오류로 닫기에 실패한 이슈는 다음 tick에서 재시도해요.
+
 **Asana에서 만들기**
 
 부모 태스크에 설정 `milestone_tag`의 태그(새 설치 기본 **`tp-milestone`**)를 붙이고, 하위 태스크에는 평소처럼 티켓 태그(`asana_tag`)를 붙입니다.
 staging 열차 레포, `pr_into_staging` 레포, 배포 규칙에서 별도의 staging 브랜치로 머지하는 레포가 참여합니다.
+열차나 `pr_into_staging` 레포에서 staging 머지를 끄면 기존 하위 티켓은 마일스톤 브랜치를 유지하고 **staging 설정 필요**에서 기다려요.
 
 **Notion에서 만들기**
 
@@ -216,7 +241,7 @@ staging 열차 레포, `pr_into_staging` 레포, 배포 규칙에서 별도의 s
 
 **흐름**
 1. 첫 하위 태스크가 투입되면 그 레포에 staging에서 `milestone/<부모 gid>` 브랜치가 생기고, 마일스톤 티켓(하위작업 진행 중)이 생깁니다.
-   Notion은 브랜치 이름에 마일스톤 행의 페이지 ID만 씁니다. 하위 태스크 PR은 이 브랜치를 향합니다.
+   Notion은 마일스톤 행의 페이지 ID를, GitHub는 `milestone/gh-example-api-12` 같은 브랜치 이름을 씁니다. 하위 태스크 PR은 이 브랜치를 향합니다.
 2. AI 리뷰가 승인하고 tp 검사가 통과한 하위 태스크 PR은 다음 tick에 버튼 없이 마일스톤 브랜치에 머지됩니다(마일스톤에 합침).
    하위 태스크가 진행 중인 동안 staging이 마일스톤 브랜치에 계속 합쳐져 어긋나지 않아요.
 3. 모든 하위 태스크가 브랜치에 들어가면(또는 완료, 닫힘, 건너뜀) 마일스톤 티켓은 "작업 완료 대기"로 멈춥니다.
@@ -305,9 +330,9 @@ staging 열차 레포와 `pr_into_staging` 레포는 티켓 브랜치를 staging
   레포의 dev 서버 명령에 `{port}`를 넣거나 스크립트에서 `PORT` 환경변수를 읽으세요.
   `tp dev status --worktree .`으로 상태를 확인하고, `tp screenshot --url <출력된 URL> --repo . --out shot.png`로 캡처한 뒤
   `tp dev stop --worktree .`으로 종료해요. 티켓 worktree를 자동으로 정리할 때도 tp가 띄운 서버를 함께 꺼요.
-- **채팅 에이전트**: 레포 checkout은 읽기 전용입니다. 실험은 /tmp clone에서. GitHub 이슈는 만들어 달라고 할 때만.
-- Notion 티켓은 사용자나 티켓이 요청하면 프로젝트에 연결된 DB에서 `tp notion`으로 생성·편집하고 댓글을 답니다. 명령 예시는 `tp guide ticket`에 있어요.
-- **Asana 쓰기**(`tp asana comment|create|update|tag`): tp가 토큰을 가지고 있으니 에이전트는 토큰을 찾거나 쓰지 않습니다.
+- **채팅 에이전트**: 레포 checkout은 읽기 전용입니다. 실험은 /tmp clone에서. 티켓과 마일스톤을 만들어 달라고 하면 `tp ticket create`와 `tp milestone create`를 사용합니다.
+- 기존 Notion 티켓은 프로젝트에 연결된 DB에서 `tp notion`으로 편집하고 댓글을 답니다. 명령 예시는 `tp guide ticket`에 있어요.
+- **Asana 편집**(`tp asana comment|update|tag`): tp가 토큰을 가지고 있으니 에이전트는 토큰을 찾거나 쓰지 않습니다.
   사용자나 티켓이 요청할 때, 또는 자기 티켓에 짧은 메모를 남길 때만 씁니다. 티켓 태그(`asana_tag`)를 붙이면 바로 티켓 에이전트가 투입돼요.
   파이프라인에 있는(실행 기록이 있는) 티켓은 완료 처리하거나 담당자를 바꿀 수 없습니다. 프로덕션 반영 후 toothpaste가 완료합니다.
   설정 `agent_asana_write`가 꺼져 있으면 Asana는 읽기 전용이고, 자동화 단계는 언제나 쓸 수 없습니다.

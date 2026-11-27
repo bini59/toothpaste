@@ -2,7 +2,8 @@
 import json
 from unittest import mock
 
-from test_notion import DOCS_DB, HOME_DB, MEMBER, TEAM_DB, NotionDashboard, uid
+from test_notion import DOCS_DB, HOME_DB, MEMBER, OWNER, TEAM_DB, NotionDashboard, uid
+from test_ticket_write import command
 from ticket_pilot import cli, core, deploy, milestone, notion, notion_stages, notion_tickets, pipeline, release, server
 
 
@@ -70,6 +71,142 @@ class NotionMilestones(NotionDashboard):
         starts = [s for s in self.dispatch_log() if "would create" in s]
         self.assertEqual(len(starts), 1)
         self.assertIn(f"--base milestone/{self.parent['id']}", starts[0])
+
+    def test_project_commands_create_related_pages_then_sync(self):
+        self.cfg["parent_property"] = "parent-rel"
+        self.cfg["tag_option"] = "docs-id"
+        self.fixture.props["부모"] = {"id": "parent-rel", "type": "relation", "relation": {"data_source_id": TEAM_DB}}
+        self.save_project()
+        task = command("ticket", "create", "--project", "example", "--title", "Task", "--body", "Notes",
+                       "--assignee", "me", "--tag", "tp")
+        self.assertEqual((task["source"], task["gid"], task["ok"]), ("notion", "notion:" + uid(1001), True))
+        sub = command("ticket", "create", "--project", "example", "--title", "Child", "--parent", task["gid"])
+        self.assertEqual(self.fixture.pages[TEAM_DB][-1]["properties"]["부모"], relation(uid(1001)))
+        self.assertEqual(sub["key"], notion_tickets.ticket_key(uid(1002)))
+        self.assertEqual(command("ticket", "create", "--project", "example", "--title", "Wrong DB",
+                                 "--milestone", task["key"], status=4)["code"], "parent_not_found")
+
+        result = command("milestone", "create", "--project", "example", "--title", "Release", "--body", "Ship it",
+                         "--assignee", "me", "--subtask", "a", "--subtask", "b")
+        parent = self.fixture.pages[DOCS_DB][-1]
+        self.assertEqual(result["gid"], "notion:" + parent["id"])
+        self.assertEqual((parent["properties"]["개발 담당"]["people"], self.fixture.markdown[parent["id"]][1]["markdown"]),
+                         ([{"id": OWNER}], "Ship it"))
+        self.assertIsNone(self.ticket(result["gid"]))
+        pipeline.sync()
+        for i, sub in enumerate(result["subtasks"]):
+            row = pipeline.find_ticket(self.con, sub["key"])
+            self.assertEqual((row["name"], row["stage"], row["parent_gid"], row["in_milestone"]),
+                             ("ab"[i], "queued", result["gid"], 1))
+            self.assertEqual(milestone.base_for(row, "app"), "milestone/" + parent["id"])
+        another = command("ticket", "create", "--project", "example", "--title", "c", "--milestone", result["gid"], "--tag", "버그")
+        pipeline.sync()
+        row = pipeline.find_ticket(self.con, another["key"])
+        self.assertEqual((row["stage"], row["in_milestone"], set(json.loads(row["tags"]))), ("queued", 1, {"tp", "문서", "버그"}))
+
+    def test_create_subtask_without_a_people_column(self):
+        del self.cfg["people_property"]
+        self.cfg["assignee"] = "all"
+        del self.fixture.props["개발 담당"]
+        self.save_project()
+        result = command("milestone", "create", "--project", "example", "--title", "Release", "--subtask", "a")
+        self.assertEqual(len(result["subtasks"]), 1)
+        self.assertEqual(self.fixture.pages[TEAM_DB][-1]["properties"]["출시"], relation(result["gid"].removeprefix("notion:")))
+
+    def test_creating_subtasks_requires_a_configured_work_tag_column(self):
+        del self.cfg["tag_property"]
+        self.save_project()
+        with mock.patch.object(notion, "Client") as client:
+            for kind, opts in (("milestone", ("--subtask", "a")), ("ticket", ("--milestone", self.parent_gid))):
+                with self.subTest(kind=kind):
+                    result = command(kind, "create", "--project", "example", "--title", "Release", *opts, status=4)
+                    self.assertEqual(result["code"], "milestone_unsupported")
+                    self.assertIn("태그 열", result["message"])
+            client.assert_not_called()
+        self.assertEqual(self.fixture.writes, [])
+
+        result = command("milestone", "create", "--project", "example", "--title", "Release")
+        self.assertEqual(result["subtasks"], [])
+        self.assertEqual(result["gid"], "notion:" + self.fixture.pages[DOCS_DB][-1]["id"])
+
+    def test_single_select_import_tag_must_also_be_the_work_tag(self):
+        prop = self.fixture.props["라벨"]
+        prop["type"], prop["select"] = "select", prop.pop("multi_select")
+        for row in self.fixture.pages[TEAM_DB]:
+            labels = row["properties"]["라벨"]["multi_select"]
+            row["properties"]["라벨"] = {"type": "select", "select": next(iter(labels), None)}
+        self.cfg["tag_option"] = "docs-id"
+        self.save_project()
+        with mock.patch.object(self.fixture, "respond", wraps=self.fixture.respond) as respond:
+            for kind, opts in (("milestone", ("--subtask", "a")), ("ticket", ("--milestone", self.parent_gid))):
+                with self.subTest(kind=kind):
+                    result = command(kind, "create", "--project", "example", "--title", "Release", *opts, status=4)
+                    self.assertEqual(result["code"], "milestone_unsupported")
+                    self.assertIn("다중 선택", result["message"])
+        self.assertEqual([c.args[:2] for c in respond.call_args_list], [("GET", "/data_sources/" + TEAM_DB)] * 2)
+        self.assertEqual(self.fixture.writes, [])
+
+        with mock.patch.object(self.fixture, "respond", wraps=self.fixture.respond) as respond:
+            result = command("milestone", "create", "--project", "example", "--title", "Release without subtasks")
+        parent = self.fixture.pages[DOCS_DB][-1]
+        self.assertEqual(result, {"ok": True, "source": "notion", "key": notion_tickets.ticket_key(parent["id"]),
+                                  "gid": "notion:" + parent["id"], "url": parent["url"], "subtasks": []})
+        self.assertEqual([c.args[:2] for c in respond.call_args_list], [("GET", "/data_sources/" + DOCS_DB), ("POST", "/pages")])
+
+        self.cfg["tag_option"] = "tp-id"
+        next(o for o in prop["select"]["options"] if o["id"] == "tp-id")["name"] = "TP"
+        self.save_project()
+        result = command("milestone", "create", "--project", "example", "--title", "Release", "--subtask", "a")
+        pipeline.sync()
+        child = pipeline.find_ticket(self.con, result["subtasks"][0]["key"])
+        self.assertEqual((child["stage"], child["parent_gid"]), ("queued", result["gid"]))
+
+    def test_import_tag_cannot_mark_the_subtask_as_a_milestone(self):
+        self.use_task_db("multi_select")
+        self.cfg.update(tag_property="kind-id", tag_option="milestone-id")
+        self.save_project()
+        result = command("milestone", "create", "--project", "example", "--title", "Release", "--subtask", "a", status=4)
+        self.assertEqual(result["code"], "milestone_unsupported")
+        self.assertIn("판별 태그", result["message"])
+        self.assertEqual(self.fixture.writes, [])
+
+    def test_created_milestone_is_reported_when_event_write_fails(self):
+        with self.con:
+            self.con.execute("""CREATE TRIGGER reject_event BEFORE INSERT ON events
+                                WHEN NEW.kind='notion_write' BEGIN SELECT RAISE(FAIL,'fixture'); END""")
+        result = command("milestone", "create", "--project", "example", "--title", "Release", "--subtask", "a", status=5)
+        parent = self.fixture.pages[DOCS_DB][-1]
+        self.assertEqual(result["code"], "upstream_error")
+        self.assertEqual(result["created"], {"key": notion_tickets.ticket_key(parent["id"]), "gid": "notion:" + parent["id"],
+                                              "url": parent["url"]})
+        self.assertEqual(len(self.fixture.writes), 1)
+
+    def test_created_subtask_is_reported_when_ticket_insert_fails(self):
+        with self.con:
+            self.con.execute("""CREATE TRIGGER reject_ticket BEFORE INSERT ON tickets
+                                WHEN NEW.name='created' BEGIN SELECT RAISE(FAIL,'fixture'); END""")
+        result = command("milestone", "create", "--project", "example", "--title", "Release", "--subtask", "created",
+                         "--subtask", "saved", "--subtask", "", status=5)
+        child, saved = self.fixture.pages[TEAM_DB][-2:]
+        identity = {"key": notion_tickets.ticket_key(child["id"]), "gid": "notion:" + child["id"], "url": child["url"]}
+        self.assertEqual(result["code"], "upstream_error")
+        self.assertEqual([(e["title"], e["created"]) for e in result["warnings"]], [("created", identity)])
+        self.assertEqual([(e["title"], e["code"]) for e in result["failed"]], [("", "invalid_argument")])
+        self.assertEqual(result["subtasks"], [{"key": identity["key"], "url": child["url"]},
+                                              {"key": notion_tickets.ticket_key(saved["id"]), "url": saved["url"]}])
+        self.assertIsNone(self.ticket(identity["gid"]))
+        self.assertEqual(len(self.fixture.writes), 3)
+
+    def test_create_same_db_milestone_sets_its_discriminator(self):
+        self.use_task_db("multi_select")
+        result = command("milestone", "create", "--project", "example", "--title", "Release", "--subtask", "a")
+        self.assertEqual(self.fixture.pages[TEAM_DB][-2]["properties"]["유형"]["multi_select"][0]["id"], "milestone-id")
+        pipeline.sync()
+        self.assertIsNone(self.ticket(result["gid"]))
+        sub = pipeline.find_ticket(self.con, result["subtasks"][0]["key"])
+        self.assertEqual((sub["in_milestone"], sub["parent_gid"]), (1, result["gid"]))
+        self.assertEqual(command("ticket", "create", "--project", "example", "--title", "b", "--milestone",
+                                 sub["key"], status=4)["code"], "parent_not_found")
 
     def test_shared_stage_mapping_is_validated_in_both_save_orders(self):
         self.use_task_db()

@@ -9,19 +9,25 @@ their prompts.
 from __future__ import annotations
 
 import os
+import sqlite3
 
 from .core import NO_WORKSPACE, asana, db, event, settings
 
+
+class CreateRecordError(RuntimeError):
+    def __init__(self, task):
+        super().__init__(f"Asana 태스크는 생성됐어요 ({task.get('permalink_url') or task['gid']}). 로컬 DB에 이벤트를 기록할 수 없어요")
+        self.task = task
+
 # runner.launch fills {{ASANA}} in every agent prompt with one of these (on / off)
-RULES_ON = """- Asana: write only through `{{TP}} asana` (it holds the token; never look for or use an Asana token yourself),
+RULES_ON = """- Edit existing Asana tasks only through `{{TP}} asana` (it holds the token; never look for or use an Asana token yourself),
   and only when {{OWNER}} or the ticket asks for it, or for a short note on your own ticket:
   `{{TP}} asana comment <ticket key|task gid> "<text>"`
-  `{{TP}} asana create --project <project id|Asana project gid> --title "<title>" [--notes "<text>"] [--assignee me] [--tag <name>] [--parent <ticket key|task gid>]`
   `{{TP}} asana update <ticket key|task gid> [--completed true|false] [--assignee me|<user gid>|none] [--title ...] [--notes ...]`
   `{{TP}} asana tag <ticket key|task gid> "<tag name>"`
   The tag `{tag}` dispatches the task to a ticket agent right away. A ticket in ticket-pilot's pipeline (it has a run)
   cannot be completed or reassigned: ticket-pilot completes it once its change is live in production."""
-RULES_OFF = "- Asana is read only for you: never create, comment on, tag or change Asana tasks."
+RULES_OFF = "- Ticket and milestone creation is disabled. Asana is read only for you."
 
 
 def rules() -> str:
@@ -29,17 +35,19 @@ def rules() -> str:
     return RULES_ON.replace("{tag}", st["asana_tag"]) if st.get("agent_asana_write", True) else RULES_OFF
 
 
-def _actor() -> str:
+class WriteDisabled(SystemExit):
+    pass
+
+
+def write_actor(*, agents_only=True) -> str:
     """Who writes: the agent's launch tag (TP_AGENT, e.g. tp-97, tp-97-rework, chat-<project>-<id>) or the CLI.
     Refuses where agents may not write."""
     tag = os.environ.get("TP_AGENT")
-    if not tag:
-        return "cli"
-    if tag.startswith("auto-"):
-        raise SystemExit("automation steps never write to Asana")
-    if not settings().get("agent_asana_write", True):
-        raise SystemExit("Asana writes by agents are off (global.agent_asana_write); Asana is read only for you")
-    return f"agent {tag}"
+    if tag and tag.startswith("auto-"):
+        raise WriteDisabled("automation steps cannot write tickets")
+    if (tag or not agents_only) and not settings().get("agent_asana_write", True):
+        raise WriteDisabled("ticket writes are off (global.agent_asana_write)")
+    return f"agent {tag}" if tag else "cli"
 
 
 def _task(con, ref: str) -> tuple[str, str]:
@@ -69,14 +77,15 @@ def _assignee(v: str | None):
     return None if v in (None, "none") else v  # "me" and user gids go to Asana as they are
 
 
-def _log(con, actor: str, what: str, gid: str):
+def _log(con, actor: str, what: str, gid: str, log=print):
     event(con, "asana_write", f"{actor}: {what}", gid)
     con.commit()
-    print(what)
+    if log:
+        log(what)
 
 
 def comment(ref: str, text: str):
-    actor, con = _actor(), db()
+    actor, con = write_actor(), db()
     if not text.strip():
         raise SystemExit("empty comment")
     gid, label = _task(con, ref)
@@ -97,26 +106,26 @@ def _tag_gid(name: str) -> tuple[str, bool]:
     return asana("POST", "/tags", body={"name": name.strip(), "workspace": ws})["data"]["gid"], True
 
 
-def _add_tag(con, actor: str, gid: str, label: str, name: str):
+def tag(ref: str, name: str):
+    actor, con = write_actor(), db()
+    gid, label = _task(con, ref)
     if not name.strip():
         raise SystemExit("empty tag name")
     tg, created = _tag_gid(name)
     asana("POST", f"/tasks/{gid}/addTag", body={"tag": tg})
+    _log(con, actor, _tag_note(name, label, created), gid)
+
+
+def _tag_note(name, label, created):
     note = " (new tag)" if created else ""
     if name.strip().lower() == settings()["asana_tag"].lower():
         note += " (auto-dispatch tag)"
-    _log(con, actor, f"tag '{name.strip()}' on {label}{note}", gid)
-
-
-def tag(ref: str, name: str):
-    actor, con = _actor(), db()
-    gid, label = _task(con, ref)
-    _add_tag(con, actor, gid, label, name)
+    return f"tag '{name.strip()}' on {label}{note}"
 
 
 def create(project: str, title: str, notes: str | None = None, assignee: str | None = None,
-           tags: list[str] | None = None, parent: str | None = None):
-    actor, con = _actor(), db()
+           tags: list[str] | None = None, parent: str | None = None, *, log=print):
+    actor, con = write_actor(), db()
     if not title.strip():
         raise SystemExit("empty title")
     pg = _project(con, project)
@@ -128,19 +137,33 @@ def create(project: str, title: str, notes: str | None = None, assignee: str | N
         body["notes"] = notes
     if _assignee(assignee):
         body["assignee"] = assignee
-    d = asana("POST", "/tasks", {"opt_fields": "name,permalink_url"}, body)["data"]
-    _log(con, actor, f"created task {d['gid']} '{title.strip()[:60]}' in project {pg}"
-                     + (f" under {pgid}" if pgid else "")
-                     + (f", assignee {assignee}" if _assignee(assignee) else "") + (" with notes" if notes else ""),
-         d["gid"])
-    print(d.get("permalink_url") or d["gid"])
-    for t in tags or ():
-        _add_tag(con, actor, d["gid"], d["gid"], t)
+    if any(not t.strip() for t in tags or []):
+        raise SystemExit("empty tag name")
+    resolved = {t: _tag_gid(t) for t in dict.fromkeys(tags or [])}
+    if resolved:
+        body["tags"] = list(dict.fromkeys(gid for gid, _ in resolved.values()))
+    d = asana("POST", "/tasks", {"opt_fields": "name,permalink_url,custom_fields.name,custom_fields.display_value"}, body)["data"]
+    created_note = (f"created task {d['gid']} '{title.strip()[:60]}' in project {pg}"
+                    + (f" under {pgid}" if pgid else "")
+                    + (f", assignee {assignee}" if _assignee(assignee) else "") + (" with notes" if notes else ""))
+    try:
+        with con:
+            tag_notes = [_tag_note(name, d["gid"], created) for name, (_, created) in resolved.items()]
+            for note in [created_note, *tag_notes]:
+                event(con, "asana_write", f"{actor}: {note}", d["gid"])
+    except sqlite3.Error as e:
+        raise CreateRecordError(d) from e
+    if log:
+        log(created_note)
+        log(d.get("permalink_url") or d["gid"])
+        for note in tag_notes:
+            log(note)
+    return d
 
 
 def update(ref: str, completed: str | None = None, assignee: str | None = None, title: str | None = None,
            notes: str | None = None):
-    actor, con = _actor(), db()
+    actor, con = write_actor(), db()
     gid, label = _task(con, ref)
     body: dict = {}
     if completed is not None:

@@ -66,6 +66,9 @@ and stop.
 ## Never
 - Never merge, never push to main/master/staging/production, never force-push.
 - Never deploy, touch production data, or change secrets/infra.
+- Only when the owner or ticket asks, create tickets with `{{TP}} ticket create --project {{PROJECT_ID}} --title "<title>"`
+  and milestones with `{{TP}} milestone create --project {{PROJECT_ID}} --title "<title>" [--subtask "<title>"]...`.
+  Use `--parent <key|gid>` or `--milestone <key|gid>` for a child. Report the returned key and URL.
 {{NOTION}}
 {{ASANA}}
 - ticket-pilot 사용법(마일스톤, 단계, 배포 등)이 필요하면 `{{TP}} guide`로 주제를 보고 `{{TP}} guide <주제>`로 읽으세요.

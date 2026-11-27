@@ -42,6 +42,7 @@ and stop.
 ## Never
 - Never merge, never push to main/master/staging/production, never force-push.
 - Never deploy, touch production data, or change secrets/infra.
+- If asked to file a ticket, use `{{TP}} ticket create --project {{PROJECT_ID}} --title "<title>"`.
 {{NOTION}}
 {{ASANA}}
 - ticket-pilot 사용법(마일스톤, 단계, 배포 등)이 필요하면 `{{TP}} guide`로 주제를 보고 `{{TP}} guide <주제>`로 읽으세요.

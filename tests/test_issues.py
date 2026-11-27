@@ -4,7 +4,7 @@ import sqlite3
 import unittest
 from unittest import mock
 
-from ticket_pilot import core, pipeline as P
+from ticket_pilot import core, milestone, pipeline as P
 
 
 def issue(n, *labels):
@@ -24,7 +24,7 @@ class SyncIssuesTest(unittest.TestCase):
         self.pm = {"projects": [{"id": "x", "source": "github", "repos": [{"repo": "tp"}]},
                                 {"id": "y", "source": "asana", "asana_gid": "1", "repos": [{"repo": "old"}]}]}
         for p in (mock.patch.object(P, "settings", lambda: self.st), mock.patch.object(P, "project_map", lambda: self.pm),
-                  mock.patch.object(P, "_gh_issue_json", lambda a: self.open[a[a.index("--repo") + 1]])):
+                  mock.patch.object(P, "_open_issues", self.open.__getitem__)):
             p.start()
             self.addCleanup(p.stop)
 
@@ -76,9 +76,29 @@ class SyncIssuesTest(unittest.TestCase):
     def test_failed_read_keeps_tickets(self):
         self.open["o/tp"] = [issue(1, "tp")]
         self.sync()
-        with mock.patch.object(P, "_gh_issue_json", side_effect=RuntimeError("down")):
+        with mock.patch.object(P, "_open_issues", side_effect=RuntimeError("down")):
             self.sync()
         self.assertEqual(self.row("gh:o/tp#1"), ("TP-1", 0, 1))
+
+    def test_cross_repo_parent_relabel_and_unlink(self):
+        parent = {**issue(12, "tp-milestone"), "repository": {"nameWithOwner": "O/old"}}
+        self.open["o/tp"] = [{**issue(1, "tp"), "parent": parent}]
+        self.open["o/old"] = [parent]
+        self.assertEqual(self.sync(), ["TP-1"])
+        def relation():
+            return tuple(self.con.execute("SELECT parent_gid,parent_name,parent_url,in_milestone FROM tickets WHERE key='TP-1'").fetchone())
+        self.assertEqual(relation(), ("gh:o/old#12", "i12", "u12", 1))
+        parent["labels"] = []
+        self.sync()
+        self.assertEqual(relation(), ("gh:o/old#12", "i12", "u12", 0))
+        self.open["o/tp"][0]["parent"] = None
+        self.sync()
+        self.assertEqual(relation(), (None, None, None, 0))
+
+    def test_github_branch_is_a_valid_ref_for_dotted_repo_names(self):
+        import subprocess
+        ref = milestone.branch("gh:my-org/app..v2#12")
+        self.assertEqual(subprocess.run(["git", "check-ref-format", "refs/heads/" + ref]).returncode, 0)
 
 
 if __name__ == "__main__":

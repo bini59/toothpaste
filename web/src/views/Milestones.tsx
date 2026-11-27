@@ -61,13 +61,15 @@ function RepoBadges({ m }: { m: Milestone }) {
  * (same test as 전체 티켓) */
 export function List({ s, I, project }: { s: State; I?: Index; project?: Project }) {
   const list = milestones(s)
-    .filter((m) => !project || !I || [...m.ms, ...m.subtasks].some((t) => inProject(s, I, t, project)))
+    .filter((m) => !project || !I || [...m.ms, ...m.subtasks].some((t) => inProject(s, I, t, project))
+      || s.tickets.some((t) => t.gid === m.gid && inProject(s, I, t, project)))
     .sort((a, b) => Number(finished(a)) - Number(finished(b)) || a.name.localeCompare(b.name));
   if (!list.length)
     return (
       <p className="p-5 text-center text-sm text-text-muted">
         {project ? "이 프로젝트의 마일스톤이 없어요." : "아직 마일스톤이 없어요."}{" "}
-        {project?.source !== "notion" && <>Asana에서는 부모 태스크에 <b>{String(s.meta.settings.milestone_tag || "tp-milestone")}</b> 태그를 붙이세요. </>}
+        {(!project || project.source === "asana") && <>Asana에서는 부모 태스크에 <b>{String(s.meta.settings.milestone_tag || "tp-milestone")}</b> 태그를 붙이세요. </>}
+        {(!project || project.source === "github") && <>GitHub에서는 <b>{String(s.meta.settings.milestone_tag || "tp-milestone")}</b> 라벨이 있는 부모 이슈에 하위 이슈를 연결하세요. </>}
         {(!project || project.source === "notion") && "Notion에서는 프로젝트 설정에서 마일스톤 DB를 고르고 작업에 마일스톤 행을 연결하세요."}
       </p>
     );
@@ -134,7 +136,7 @@ function DoneButton({ m, I, onMilestoneDone }: { m: Milestone; I: Index; onMiles
 
 function Detail({ m, ...p }: Props & { m: Milestone }) {
   const { s, I } = p;
-  const branch = `milestone/${m.gid.replace(/^notion:/, "")}`;
+  const branch = "milestone/" + (m.gid.startsWith("gh:") ? m.gid.replace(/[:/#]/g, "-").replaceAll("..", "+") : m.gid.replace(/^notion:/, ""));
   const card = (t: Milestone["subtasks"][number]) => (
     <TicketCard key={t.gid} t={t} s={s} I={I} onAssign={p.onAssign} onSkip={p.onSkip} onApprove={p.onApprove}
       onOverride={p.onOverride} onReply={p.onReply} onDrop={p.onDrop} inMilestoneView />

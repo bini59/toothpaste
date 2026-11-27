@@ -164,7 +164,7 @@ class AsanaConnectTest(unittest.TestCase):
                  "updatedAt": "now", "labels": [{"name": "tp"}]}
         sources = {"repo": ("REPO", "tp")}
         with mock.patch.object(P, "issue_repos", return_value=sources), \
-             mock.patch.object(P, "_gh_issue_json", return_value=[issue]), \
+             mock.patch.object(P, "_open_issues", return_value=[issue]), \
              mock.patch.object(P, "load_map"):
             con.execute("INSERT INTO repos(name, github) VALUES ('repo', 'owner/repo')")
             con.commit()

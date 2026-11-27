@@ -386,8 +386,8 @@ CLI: `tp approve KEY [--cancel]`, `tp approvals`, `tp release-tick [--force]`, `
 
 ## Milestones (`ticket_pilot/milestone.py`, 2026-10-30)
 
-Tag an Asana parent task with the milestone tag (setting `milestone_tag`, default `tp-milestone`) to ship its subtasks together instead of one by one.
-Only repos with a feature base (train repos, `pr_into_staging` repos) take part.
+Use `tp milestone create --project <id> --title "Release" --subtask "First change"` to ship a group of tickets together.
+The parent is an Asana task or GitHub issue marked with `milestone_tag` (default `tp-milestone`), or a page in the configured Notion milestone database. The repo needs a staging merge route. See `tp guide milestone` for the per-source settings.
 
 1. The first dispatched subtask (tagged with `asana_tag` as usual) creates `milestone/<parent gid>` from staging in its repo and a
    milestone ticket `ms:<parent gid>:<repo>` (stage `collecting`, 하위작업 진행 중). Subtask worktrees branch from the milestone
@@ -402,7 +402,7 @@ Only repos with a feature base (train repos, `pr_into_staging` repos) take part.
    rework / conflict agents on that branch, the owner's staging approval, the weekday train (which accepts the milestone's
    commits, not commits staging got elsewhere).
 4. Live in production: the milestone ticket, the subtasks merged into it and, once every repo of the milestone is live,
-   the Asana parent are completed.
+   the source parent are completed.
 5. Subtasks added later: while the milestone PR is open, a subtask still in progress puts the milestone ticket back in
    `collecting` (no AI review, no staging approval) until it is in the branch. A subtask merged after the milestone PR
    starts the next round: right away when that PR is only on staging (2026-11-10; the train holds its staging commits
@@ -516,8 +516,8 @@ Downgrades are not supported.
 
 프로젝트 lists the repos in the settings; each has a 채팅 tab and a 설정 tab. A conversation is a series of headless
 agent turns in the repo's main checkout, with the repo's agent settings (`repo.<name>.agent`, else the global agent).
-The first turn sends `prompts/chat.md` (read-only checkout, experiments in a /tmp clone, Asana writes only through `tp asana`, GitHub
-issues only when the owner asks) with the message; later turns resume the recorded session (`codex exec resume <id>` /
+The first turn sends `prompts/chat.md` (read-only checkout, experiments in a /tmp clone, ticket creation through
+`tp ticket create` when the owner asks) with the message; later turns resume the recorded session (`codex exec resume <id>` /
 `claude --resume <id>`) with the new message and a reminder to use `tp chat attach <path>...` for reply attachments.
 Changing the repo's agent tool starts a new session. Rows live in
 `chat_conversations` / `chat_messages`; an assistant row with `text` NULL is the running turn (one per conversation).
@@ -581,6 +581,8 @@ bin/tp screenshot --url URL --out shot.png [--repo WORKTREE] [--device "iPhone 1
 bin/tp tick [--only dispatch review diff cleanup] [--force]   # what launchd runs every minute
 bin/tp ws-set --status in-review|todo --comment "..."         # agent completion signal (from its worktree)
 bin/tp attach KEY                                             # how to resume a ticket's agent session by hand
+bin/tp ticket create --project ID --title TITLE [--body BODY] [--parent KEY | --milestone KEY]
+bin/tp milestone create --project ID --title TITLE [--subtask TITLE]...
 bin/tp asana comment|create|update|tag ...                    # Asana writes for chat / ticket agents (TP-97; global.agent_asana_write)
 bin/tp update [--to TAG|SHA] [--build]                        # fast-forward to the latest release, swap/rebuild UI, restart
 bin/tp serve [--port N]

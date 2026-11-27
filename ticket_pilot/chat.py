@@ -387,6 +387,7 @@ def prompt(p: dict, text: str) -> str:
                        for r in p["repos"][1:] if r["path_ok"]) or "  (없음)"
     return ((ROOT / "prompts" / "chat.md").read_text().replace("{{PROJECT}}", p["name"]).replace("{{OTHER_REPOS}}", others)
             .replace("{{NOTION}}", notion_tickets.agent_rules(p["id"] if p.get("source") == "notion" else None))
+            .replace("{{PROJECT_ID}}", p.get("id") or "PROJECT_ID")
             .replace("{{REPO}}", p["repo"]).replace("{{GITHUB}}", p["github"] or "(GitHub 정보 없음)")
             .replace("{{PATH}}", p["path"]).replace("{{OWNER}}", settings().get("owner_name", "the user")).replace("{{MESSAGE}}", text))
 

@@ -13,6 +13,20 @@ from functools import cached_property
 from . import core, notion, notion_membership, notion_tickets
 
 
+class InvalidFields(notion.NotionError):
+    """The requested values cannot be written to the configured columns."""
+
+
+class MilestoneUnsupported(notion.NotionError):
+    """The configured import and dispatch values cannot be written to a milestone task."""
+
+
+class CreateRecordError(notion.NotionError):
+    def __init__(self, message, created):
+        super().__init__(message)
+        self.created = created
+
+
 @contextmanager
 def page_lock(page_id):
     """Serialize tp's read/modify/write of a page across dashboard, tick and CLI processes."""
@@ -38,7 +52,7 @@ def _option(column, value, *, new_tag=False, by_id=False):
     if new_tag and value.strip():
         return {"name": value}
     names = ", ".join(o["name"] for o in column["options"])
-    raise notion.NotionError(f"{column['name']} 열에 해당 선택지가 없어요. 현재 선택지: {names}")
+    raise InvalidFields(f"{column['name']} 열에 해당 선택지가 없어요. 현재 선택지: {names}")
 
 
 class ProjectPages:
@@ -53,11 +67,12 @@ class ProjectPages:
         return {col["id"]: col for col in self.client.properties(self.source)}
 
     def column(self, role):
-        col = notion_tickets.column(self.schema, self.cfg, role)
+        cfg = self.cfg if self.source == self.cfg["data_source_id"] else {}
+        col = notion_tickets.column(self.schema, cfg, role)
         if col:
             return col
         label = {"people": "담당자", "date": "마감일", "tag": "태그", "status": "상태", "title": "제목"}[role]
-        raise notion.NotionError(f"프로젝트 설정에서 {label} 열을 확인하세요")
+        raise InvalidFields(f"프로젝트 설정에서 {label} 열을 확인하세요")
 
     def fields(self, title, assignee, due):
         props = {}
@@ -79,11 +94,12 @@ class ProjectPages:
             props[self.column("date")["id"]] = {"date": value}
         return props
 
-    def find_parent(self, ref):
+    def find_parent(self, ref, *, milestone=False):
         page_id = None
-        if ref[:3].upper() == "NT-":
+        raw = ref.removeprefix("notion:")
+        if ref[:3].upper() == "NT-" or notion.valid_id(raw):
             try:
-                page_id = str(uuid.UUID(ref[3:]))
+                page_id = str(uuid.UUID(ref[3:] if ref[:3].upper() == "NT-" else raw))
             except ValueError:
                 pass  # a task title can also start with NT-
         if not page_id:
@@ -98,35 +114,86 @@ class ProjectPages:
                 choices = ", ".join(f"{r['name']} ({notion_tickets.ticket_key(r['id'])})" for r in candidates[:10])
                 raise notion.NotionError(f"부모 작업 후보가 여러 개예요. 티켓 키를 지정하세요: {choices}")
             page_id = candidates[0]["id"]
-        self.client.page(page_id, self.source)
+        source = self.cfg["milestone_data_source_id"] if milestone else self.source
+        try:
+            page = self.client.page(page_id, source)
+        except notion.APIError as e:
+            if e.status == 404:
+                raise notion.PageNotFound(f"{ref}: {e}") from e
+            raise
+        if milestone and source == self.source:
+            kinds = notion_tickets.milestone_tag_filters(self.schema, notion_tickets.milestone_kinds([self.cfg]))
+            if not any(tagged(page) for tagged in kinds.values()):
+                raise notion.PageNotFound(f"이 프로젝트의 마일스톤 태그가 없는 페이지예요: {ref}")
         return page_id
 
-    def create(self, args):
+    def create(self, args, *, milestone=None, milestone_parent=False):
         props = self.fields(args.title, args.assignee, args.due)
-        if args.parent is not None:
-            col = notion_membership.relation_column(self.schema, self.cfg, "parent")
+        filters = self.milestone_task_filters(args.tag) if milestone else self.create_filters(args.status, args.tag)
+        if args.parent is not None or milestone:
+            role = "milestone" if milestone else "parent"
+            col = notion_membership.relation_column(self.schema, self.cfg, role)
             if not col:
-                raise notion.NotionError("프로젝트 설정에서 상위 항목 관계 열을 먼저 골라 주세요")
-            props[col["id"]] = {"relation": [{"id": self.find_parent(args.parent)}]}
-        if col := notion_membership.relation_column(self.schema, self.cfg, "project"):
+                raise InvalidFields("프로젝트 설정에서 상위 항목 관계 열을 먼저 골라 주세요")
+            props[col["id"]] = {"relation": [{"id": self.find_parent(milestone or args.parent, milestone=bool(milestone))}]}
+        task_db = self.source == self.cfg["data_source_id"]
+        if task_db and (col := notion_membership.relation_column(self.schema, self.cfg, "project")):
             row = self.cfg["project_page_id"]
+            if col["id"] in props and props[col["id"]]["relation"] != [{"id": row}]:
+                raise InvalidFields("프로젝트 관계와 부모 관계에 서로 다른 행을 지정할 수 없어요")
             self.client.page(row, self.cfg["project_data_source_id"])
             props[col["id"]] = {"relation": [{"id": row}]}
-        if args.status is not None:
-            col = self.column("status")
-            props[col["id"]] = {col["type"]: _option(col, args.status)}
-        if args.tag:
-            col = self.column("tag")
-            if col["id"] in props:
-                raise notion.NotionError("상태와 태그가 같은 열이에요. 한 가지 값만 지정하세요")
-            tags = [_option(col, tag, new_tag=True) for tag in dict.fromkeys(args.tag)]
-            if col["type"] == "select" and len(tags) != 1:
-                raise notion.NotionError("단일 선택 열에는 태그를 하나만 지정하세요")
-            props[col["id"]] = {col["type"]: tags if col["type"] == "multi_select" else tags[0]}
-        body = {"parent": {"type": "data_source_id", "data_source_id": self.source}, "properties": props}
+        if milestone_parent and task_db:
+            prop, option = (self.cfg[k] for k in notion_tickets.MILESTONE_KIND_FIELDS)
+            notion_tickets.milestone_tag_filters(self.schema, {(prop, option)})
+            kind = self.schema[prop]["type"]
+            props[prop] = {kind: [{"id": option}] if kind == "multi_select" else {"id": option}}
+        body = {"parent": {"type": "data_source_id", "data_source_id": self.source}, "properties": {**props, **filters}}
         if args.body:
             body["markdown"] = args.body
         return self.client.write("POST", "/pages", body, "콘텐츠 추가")
+
+    def create_filters(self, status, names, *, milestone=False):
+        props = {}
+        if status is not None:
+            col = self.column("status")
+            props[col["id"]] = {col["type"]: _option(col, status)}
+        if names or milestone:
+            col = self.column("tag")
+            tags = []
+            if milestone:
+                if option := self.cfg.get("tag_option"):
+                    tags.append(_option(col, option, by_id=True))
+                work_tag = core.settings()["asana_tag"]
+                work_option = next((o for o in col["options"] if o["name"].casefold() == work_tag.casefold()), None)
+                choice = {"id": work_option["id"]} if work_option else {"name": work_tag}
+                if choice not in tags:
+                    tags.append(choice)
+                if col["type"] == "select" and len(tags) > 1:
+                    raise InvalidFields("가져오기 태그와 작업 태그가 다르면 Notion 태그 열을 다중 선택으로 설정하세요")
+            for name in names or []:
+                choice = _option(col, name, new_tag=True)
+                if choice not in tags:
+                    tags.append(choice)
+            if col["type"] == "select" and len(tags) != 1:
+                raise InvalidFields("단일 선택 열에는 태그를 하나만 지정하세요")
+            if milestone:
+                markers = notion_tickets.saved_milestone_kinds(self.con, self.source)
+                if any((col["id"], choice.get("id")) in markers for choice in tags):
+                    raise InvalidFields("마일스톤 판별 태그를 하위 티켓에 쓸 수 없어요. 가져오기 태그와 작업 태그를 확인하세요")
+            value = {col["type"]: tags if col["type"] == "multi_select" else tags[0]}
+            if col["id"] in props and props[col["id"]] != value:
+                raise InvalidFields("상태와 태그가 같은 열이에요. 한 가지 값만 지정하세요")
+            props[col["id"]] = value
+        return props
+
+    def milestone_task_filters(self, names=None):
+        status = self.cfg.get("status_option") or None
+        try:
+            filters = self.create_filters(status, None, milestone=True)
+        except InvalidFields as e:
+            raise MilestoneUnsupported(str(e)) from e
+        return self.create_filters(status, names, milestone=True) if names else filters
 
     def _remember(self, page_id, page):
         try:
@@ -221,7 +288,7 @@ class ProjectPages:
             raise notion.NotionError("댓글 ID를 확인할 수 없어요. 다시 요청하기 전에 Notion 페이지에서 댓글을 확인하세요")
 
 
-def run(args):
+def run(args, *, milestone=None, milestone_parent=False, with_subtasks=False):
     if os.environ.get("TP_AGENT", "").startswith("auto-"):
         raise notion.NotionError("자동화 에이전트는 Notion 페이지를 수정할 수 없어요")
     con = core.db()
@@ -238,8 +305,13 @@ def run(args):
     if not cfg:
         raise notion.NotionError(f"프로젝트 {pid}에 연결된 Notion 데이터베이스가 없어요")
     pages = ProjectPages(con, cfg)
+    if milestone_parent:
+        if with_subtasks:
+            pages.milestone_task_filters()
+        if cfg["milestone_data_source_id"] != pages.source:
+            pages = ProjectPages(con, cfg, source=cfg["milestone_data_source_id"])
     if args.op == "create":
-        page = pages.create(args)
+        page = pages.create(args, milestone=milestone, milestone_parent=milestone_parent)
         page_id = page.get("id")
         if not notion.valid_id(page_id):
             raise notion.NotionError("생성 응답의 페이지 ID를 확인할 수 없어요. 프로젝트 DB를 확인하세요")
@@ -260,10 +332,11 @@ def run(args):
                 pages.apply_properties(page, pages.status_change(page, args.value))
             else:
                 pages.comment(page_id, args.text)
+    result = {"key": key, "gid": gid, "url": url}
     actor = os.environ.get("TP_AGENT") or "cli"
     try:
         with con:
-            if args.op == "create":
+            if args.op == "create" and not milestone_parent:
                 # Return a usable key before sync, including when the page doesn't match the import filter.
                 ts = core.now()
                 inserted = con.execute("""INSERT INTO tickets(gid,key,name,url,project_gid,assigned,first_seen,last_seen)
@@ -273,13 +346,18 @@ def run(args):
                     notion_tickets.page_edited(con, gid, page, pages.source, pages.schema)
             core.event(con, "notion_write", f"{actor} · {pid} · {key} · {args.op}", gid)
     except sqlite3.Error as e:
-        raise notion.NotionError(f"Notion 요청은 처리됐어요 ({key} {url}). 로컬 DB 기록을 저장할 수 없어요") from e
-    return {"key": key, "url": url}
+        message = f"Notion 요청은 처리됐어요 ({key} {url}). 로컬 DB 기록을 저장할 수 없어요"
+        if args.op == "create":
+            raise CreateRecordError(message, result) from e
+        raise notion.NotionError(message) from e
+    return result
 
 
 def command(args):
     try:
-        print(json.dumps(run(args), ensure_ascii=False))
+        result = run(args)
+        result.pop("gid", None)  # keep the original tp notion output
+        print(json.dumps(result, ensure_ascii=False))
     except notion.NotionError as e:
         raise SystemExit(str(e)) from None
 

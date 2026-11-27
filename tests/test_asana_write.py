@@ -42,9 +42,8 @@ class AsanaWriteTest(unittest.TestCase):
 
     def test_create_with_dispatch_tag(self):
         AW.create("web", "New task", notes="body text", assignee="me", tags=["orca"])
-        self.assertEqual(self.calls[0], ("POST", "/tasks", {"name": "New task", "projects": ["999"], "notes": "body text",
-                                                            "assignee": "me"}))
-        self.assertEqual(self.calls[-1], ("POST", "/tasks/NEW/addTag", {"tag": "T1"}))
+        self.assertEqual(self.calls[-1], ("POST", "/tasks", {"name": "New task", "projects": ["999"], "notes": "body text",
+                                                             "assignee": "me", "tags": ["T1"]}))
         ev = self.events()
         self.assertNotIn("body text", " ".join(ev))
         self.assertIn("(auto-dispatch tag)", ev[-1])
