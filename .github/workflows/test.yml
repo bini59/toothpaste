@@ -1,109 +1,52 @@
-# Tests on Linux and macOS for every PR and push to main (TP-162). GitHub-hosted runners, no secrets.
-# Not the deploy workflow: track.py reads only deploy.yml's runs, so keep this name and these job ids apart from it.
+# TEMPORARY diagnostic branch: never merge. Times lsof/ps and the slow dev-server tests on macos-latest.
 name: test
 on:
   pull_request:
-  push:
-    branches: [main]
 permissions:
   contents: read
-concurrency:
-  group: test-${{ github.ref }}
-  # a push to main is never cancelled: release.yml releases only commits whose test run succeeded (TP-186)
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  oss-check:
-    # TP-184: no personal or company names, home paths or token-shaped strings in the tree
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - run: scripts/oss-check.sh
-  unit:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+  diag:
+    runs-on: macos-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "24"  # runs the .ts check directly
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - name: python -m unittest (test files in parallel)
-        # the tests mostly wait on subprocesses and git; serial runs took ~10 min on macos-latest.
-        # test_devserver / test_worktree_dev free a probed port and bind it again, so they run alone afterwards.
+      - name: time lsof / ps
         run: |
-          ls tests/test_*.py | xargs -n1 basename | grep -vxE 'test_(devserver|worktree_dev)\.py' | xargs -P 4 -n1 sh -c \
-            's=$(date +%s); python -m unittest discover tests -p "$1" >"$RUNNER_TEMP/$1.log" 2>&1; r=$?; echo "$1: $(($(date +%s)-s))s"; [ $r = 0 ] || { cat "$RUNNER_TEMP/$1.log"; exit 1; }' sh
-          python -m unittest discover tests -p 'test_devserver.py'
-          python -m unittest discover tests -p 'test_worktree_dev.py'
-      - name: web build and check
-        working-directory: web
-        run: npm ci --no-audit --no-fund && npm run build && npm run check
-  docker:
-    # TP-164: the image builds, refuses to start without TP_ADMINS / TP_ORG, and asks every visitor to log in
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - name: compose files are valid (TP-166 tunnel profile included)
-        run: docker compose -f docker/compose.yaml --profile tunnel config -q
-      - name: build
-        run: docker build -f docker/Dockerfile -t ticket-pilot:ci .
-      - name: no TP_ADMINS, no TP_ORG -> does not start
+          sysctl -n hw.ncpu; ps -A | wc -l
+          touch /tmp/x.log
+          for c in "lsof -t -- /tmp/x.log" "lsof -nP -iTCP:12345 -sTCP:LISTEN -Fp" "lsof -a -p $$ -d cwd -Fn" "ps -A -o pid=,pgid=,stat=" "ps -ww -p $$ -o args="; do
+            s=$(python -c 'import time;print(time.time())'); $c >/dev/null || true; e=$(python -c 'import time;print(time.time())')
+            python -c "print(f'{$e-$s:6.2f}s  $c')"
+          done
+      - name: slow files with durations
         run: |
-          if out=$(docker run --rm -e TP_ADMINS= -e TP_ORG= ticket-pilot:ci 2>&1); then echo "started: $out"; exit 1; fi
-          echo "$out" | grep TP_ADMINS
-      - name: /api/state needs a login; tp and claude run
+          python -X importtime -c 'pass' 2>/dev/null
+          python -m unittest discover tests -p test_worktree_dev.py --durations 0
+          python -m unittest discover tests -p test_devserver.py --durations 10
+      - name: count subprocess calls in test_worktree_dev
         run: |
-          docker run -d --name tp -e TP_ADMINS=ci-admin -p 127.0.0.1:3032:3032 ticket-pilot:ci
-          for _ in $(seq 30); do curl -s -o /dev/null http://127.0.0.1:3032/api/lan/me && break; sleep 1; done
-          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3032/api/state)
-          [ "$code" = 401 ] || { echo "/api/state: $code"; docker logs tp; exit 1; }
-          docker exec tp tp --help >/dev/null
-          docker exec tp claude --version
-          docker stop tp
-          docker logs tp 2>&1 | grep "tp run: stopped"
-      - name: update button replaces tp and rolls back a failed image
-        run: PYTHONPATH=. python3 tests/docker_update_integration.py
-  mode:
-    # TP-165: a host install -> tp mode docker --apply -> the container sees the DB and the worktree folder at the same
-    # path -> tp mode host --apply brings the DB back (no systemd units on the runner: the service steps are skipped)
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@v4
-      - name: a host install
-        run: |
-          mkdir -p "$RUNNER_TEMP/wt" && echo hi > "$RUNNER_TEMP/wt/marker"
-          bin/tp config set global.worktree_root "\"$RUNNER_TEMP/wt\""
-          bin/tp config set global.owner_name '"ci-marker"'
-          bin/tp mode
-      - name: preview changes nothing
-        run: |
-          bin/tp mode docker --admins ci-admin
-          test ! -e docker/compose.override.yaml && test ! -e ~/tp-work/mode-state.json
-      - name: tp mode docker --apply
-        run: bin/tp mode docker --apply --admins ci-admin
-      - name: the container has the DB and the worktree folder
-        working-directory: docker
-        run: |
-          docker compose exec -T tp tp config get global.owner_name | grep ci-marker
-          docker compose exec -T tp cat "$RUNNER_TEMP/wt/marker" | grep hi
-          docker compose exec -T tp tp config set global.owner_name '"from-docker"'
-          test ! -w ../data/tp.db
-      - name: tp mode host --apply
-        run: |
-          bin/tp mode host --apply
-          bin/tp config get global.owner_name | grep from-docker
-          test -w data/tp.db
-      - if: failure()
-        working-directory: docker
-        run: docker compose logs tp || true; cat ~/tp-work/mode-state.json || true
+          python - <<'PY'
+          import collections, subprocess, sys, time, unittest
+          stats = collections.defaultdict(lambda: [0, 0.0])
+          orig = subprocess.Popen.__init__
+          def init(self, args, *a, **k):
+              s = time.monotonic(); orig(self, args, *a, **k)
+              name = (args[0] if isinstance(args, (list, tuple)) else str(args).split()[0]).rsplit('/', 1)[-1]
+              self._diag = (name, s)
+          orig_wait = subprocess.Popen.wait
+          def wait(self, *a, **k):
+              r = orig_wait(self, *a, **k)
+              d = getattr(self, '_diag', None)
+              if d:
+                  stats[d[0]][0] += 1; stats[d[0]][1] += time.monotonic() - d[1]; self._diag = None
+              return r
+          subprocess.Popen.__init__ = init; subprocess.Popen.wait = wait
+          sys.path.insert(0, 'tests')
+          suite = unittest.defaultTestLoader.discover('tests', pattern='test_worktree_dev.py')
+          unittest.TextTestRunner(verbosity=0).run(suite)
+          for k, (n, t) in sorted(stats.items(), key=lambda x: -x[1][1]):
+              print(f'{k:20} calls={n:5} total={t:7.1f}s')
+          PY
