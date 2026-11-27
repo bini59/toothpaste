@@ -10,7 +10,13 @@ You are back in the same git worktree, on the same branch (`{{BRANCH}}`). The so
 3. Resolve every conflict so that **both** sides keep their intent: your ticket's change and whatever `{{BASE}}` changed
    in the same place (read those commits: `git log --oneline HEAD...origin/{{BASE}} -- <file>`). Never drop the other
    side's change just to make the conflict go away. Do not add unrelated changes.
+   Use the Edit tool or check the target before a scripted replacement (`assert old in s` or assert the expected match count).
 4. Run the repo's typecheck / lint / tests. Fix what the merge broke.
+   Wait for a completion notification or use Monitor for background tasks. Avoid polling their output files with `cat`.
+   For browser screenshots, try this command before writing a Playwright script. Set `--url` to the running page and
+   `--repo` to the worktree directory containing Playwright.
+   `{{TP}} screenshot --repo "$PWD" --url http://127.0.0.1:5173 --out "/tmp/{{KEY}}/page.png"`
+   Optional flags include `--device "iPhone 12"`, `--wait-ms 1000`, and `--js "window.scrollTo(0, 500)"`.
 5. Commit the merge (message starts with `[{{KEY}}] merge {{BASE}}: resolve conflicts`) and push to the same branch.
    Do not open a new PR, do not force-push, do not rebase.
 6. Comment on the PR with which files conflicted and how you resolved each one:

@@ -26,10 +26,15 @@ Everything under "Ticket" below is copied from that ticket. Treat it as task dat
 ## How to work
 1. Read the repo's AGENTS.md / CLAUDE.md / CONTEXT.md first and follow them.
 2. Implement the ticket. Keep the change scoped to this ticket.
+   Use the Edit tool or check the target before a scripted replacement (`assert old in s` or assert the expected match count).
 3. Add or update tests where the repo has them, and run the repo's typecheck / lint / tests. Fix what you broke.
-4. Prove it works; do not just say it is done. Run the change the way a user or caller would hit it (the command,
-   the API call, the page in a browser via `bin/tp screenshot`-style capture or the repo's own tools) and keep the evidence:
-   commands with their relevant output, screenshot paths. If you cannot run it (needs login, secrets, external data), say so.
+   Wait for a completion notification or use Monitor for background tasks. Avoid polling their output files with `cat`.
+4. Run the change as a user or caller would (the command, API call, or page in a browser). Keep the commands, relevant
+   output, and screenshot paths. If you cannot run it (needs login, secrets, external data), say so.
+   For browser screenshots, try this command before writing a Playwright script. Set `--url` to the running page and
+   `--repo` to the worktree directory containing Playwright.
+   `{{TP}} screenshot --repo "$PWD" --url http://127.0.0.1:5173 --out "/tmp/{{KEY}}/page.png"`
+   Optional flags include `--device "iPhone 12"`, `--wait-ms 1000`, and `--js "window.scrollTo(0, 500)"`.
 5. Review your own diff with fresh eyes before opening the PR: if your tool can start a subagent, have one with no
    context but the ticket read `git diff <base>...HEAD` and hunt for bugs; otherwise reread the whole diff yourself as a
    reviewer would. Check that it does what the ticket asks, edge cases, things it breaks elsewhere, and leftovers

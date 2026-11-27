@@ -19,8 +19,14 @@ to settle the review in this round.
    Findings marked pre-existing are not yours to fix; leave them unless the ticket needs it.
    If this is round 2 or later and the findings keep coming, step back: reconsider the approach rather than patching again.
    If you disagree with a finding, do not change code for it; explain why in step 5.
+   Use the Edit tool or check the target before a scripted replacement (`assert old in s` or assert the expected match count).
 3. Run the repo's typecheck / lint / tests and rerun the check that proves the ticket works (as in the original brief).
    Fix what you broke. Reread your new diff (`git diff {{HEAD_SHA}}..HEAD`) once before committing.
+   Wait for a completion notification or use Monitor for background tasks. Avoid polling their output files with `cat`.
+   For browser screenshots, try this command before writing a Playwright script. Set `--url` to the running page and
+   `--repo` to the worktree directory containing Playwright.
+   `{{TP}} screenshot --repo "$PWD" --url http://127.0.0.1:5173 --out "/tmp/{{KEY}}/page.png"`
+   Optional flags include `--device "iPhone 12"`, `--wait-ms 1000`, and `--js "window.scrollTo(0, 500)"`.
 4. Commit with a message that starts with `[{{KEY}}] review fixes` and push to the same branch.
    Do not open a new PR, do not force-push, do not rebase onto another branch.
 5. Comment on the PR with what you fixed and what you intentionally left (and why):
