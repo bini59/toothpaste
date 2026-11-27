@@ -92,6 +92,7 @@ def require_main_protection():
             isAdminEnforced
             requiresApprovingReviews
             requiresStatusChecks
+            requiresStrictStatusChecks
             bypassPullRequestAllowances(first: 1) { totalCount }
             requiredStatusChecks { context app { slug } }
           }
@@ -104,11 +105,12 @@ def require_main_protection():
     rule = json.loads(result.stdout)["data"]["repository"]["ref"]["branchProtectionRule"]
     # GitHub represents the PR requirement with requiresApprovingReviews even with zero required approvals.
     if (not rule or not rule["isAdminEnforced"] or not rule["requiresApprovingReviews"] or not rule["requiresStatusChecks"]
+            or not rule.get("requiresStrictStatusChecks")
             or rule["bypassPullRequestAllowances"]["totalCount"] != 0
             or not any(check["context"] == DEPLOYMENT_CHECK and (check["app"] or {}).get("slug") == "github-actions"
                        for check in rule["requiredStatusChecks"])):
         raise AwaitingTests(f"Waiting for main branch protection to require pull requests and {DEPLOYMENT_CHECK} "
-                            "from GitHub Actions with no bypass.")
+                            "from GitHub Actions, up-to-date branches, and no bypass.")
 
 
 def verify_merge_commit(api_get, api, merge_sha, tested, run_id):
@@ -143,12 +145,18 @@ def merge_deployment_pr(repository, number, *, base, method, approved_head=None)
     head_sha, base_sha = pr["head"]["sha"], pr["base"]["sha"]
     if approved_head is not None and head_sha != approved_head:
         raise StagingAdvanced("staging advanced; rechecking approved commits")
+    if pr.get("mergeable_state") == "behind":
+        raise AwaitingTests(f"PR #{number}: staging needs to be updated from main.")
     test_run, tested_sha = successful_test(pr, repository, api_get)
     if tested_sha != pr["merge_commit_sha"]:
         raise AwaitingTests(f"PR #{number} is waiting for a test of its current merge commit.")
     tested = api_get(f"{api}/git/commits/{tested_sha}")
     if [parent["sha"] for parent in tested["parents"]] != [base_sha, head_sha]:
         raise AwaitingTests(f"PR #{number} is waiting for a test of its current base and head.")
+    # With strict protection, a merge commit into an ancestor of staging has staging's tree.
+    staging = api_get(f"{api}/git/commits/{head_sha}")
+    if tested["tree"]["sha"] != staging["tree"]["sha"]:
+        raise AwaitingTests(f"PR #{number}: staging needs to be updated from main and tested again.")
 
     require_main_protection()
     current = api_get(f"{api}/pulls/{number}")
@@ -162,7 +170,7 @@ def merge_deployment_pr(repository, number, *, base, method, approved_head=None)
             or current["base"]["sha"] != base_sha or current["merge_commit_sha"] != tested_sha):
         raise AwaitingTests(f"PR #{number} is waiting for a mergeable, tested candidate.")
 
-    # GitHub checks the expected head, PR state and current branch protection when merging.
+    # The SHA pins staging. GitHub's strict check requires it to contain the current main at merge time.
     command = ["gh", "api", "--method", "PUT", f"{api}/pulls/{number}/merge",
                "-f", f"sha={head_sha}", "-f", "merge_method=merge"]
     reported_sha = None

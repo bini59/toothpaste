@@ -158,6 +158,21 @@ class ArchitectureMapTest(unittest.TestCase):
         self.assert_needs_map(other_code)
         self.assertNotIn(CODE, self.check().stderr)
 
+    def test_retarget_checks_code_previously_in_the_base(self):
+        self.git("branch", "milestone/other")
+        self.git("checkout", "--quiet", BASE)
+        self.write(CODE, "value = 1\n")
+        self.commit("code on original target")
+        self.git("checkout", "--quiet", "-B", "pr")
+        self.write("docs/notes.md", "PR notes\n")
+        self.commit("docs on top of original target")
+
+        original = self.check(BASE, "pr")
+        retargeted = self.check("milestone/other", "pr")
+        self.assertEqual(original.returncode, 0, original.stderr)
+        self.assertEqual(retargeted.returncode, 1, retargeted.stderr)
+        self.assertIn(repr(CODE), retargeted.stderr)
+
     def test_missing_ref_fails(self):
         result = self.check("missing-target")
         self.assertEqual(result.returncode, 2, result.stderr)

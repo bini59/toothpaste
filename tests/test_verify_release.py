@@ -13,21 +13,26 @@ ADVANCED = "f" * 40
 PR_URL = f"https://github.com/{REPO}/pull/54"
 PASSED = {"status": "completed", "conclusion": "success"}
 JOBS = ["oss-check", "unit (ubuntu-latest)", "unit (macos-latest)", "docker", "mode", "deployment-tests-passed"]
+STRICT_PROTECTION = {
+    "isAdminEnforced": True, "requiresApprovingReviews": True, "requiresStatusChecks": True,
+    "requiresStrictStatusChecks": True, "bypassPullRequestAllowances": {"totalCount": 0},
+    "requiredStatusChecks": [{"context": "deployment-tests-passed", "app": {"slug": "github-actions"}}],
+}
+
+
+def protection_result(rule):
+    data = {"data": {"repository": {"ref": {"branchProtectionRule": rule}}}}
+    return CompletedProcess([], 0, json.dumps(data), "")
 
 
 class MainProtectionTest(unittest.TestCase):
     def test_requires_the_actions_check_without_bypass(self):
-        rule = {
-            "isAdminEnforced": True, "requiresApprovingReviews": True, "requiresStatusChecks": True,
-            "bypassPullRequestAllowances": {"totalCount": 0},
-            "requiredStatusChecks": [{"context": "deployment-tests-passed", "app": {"slug": "github-actions"}}],
-        }
+        rule = STRICT_PROTECTION
         for configured in (rule, None, dict(rule, isAdminEnforced=False), dict(rule, requiresApprovingReviews=False),
-                           dict(rule, requiresStatusChecks=False),
+                           dict(rule, requiresStatusChecks=False), dict(rule, requiresStrictStatusChecks=False),
                            dict(rule, requiredStatusChecks=[]), dict(rule, bypassPullRequestAllowances={"totalCount": 1}),
                            dict(rule, requiredStatusChecks=[{"context": "deployment-tests-passed", "app": None}])):
-            data = {"data": {"repository": {"ref": {"branchProtectionRule": configured}}}}
-            with self.subTest(rule=configured), patch("ticket_pilot.core.run", return_value=Mock(stdout=json.dumps(data))) as run:
+            with self.subTest(rule=configured), patch("ticket_pilot.core.run", return_value=protection_result(configured)) as run:
                 if configured is rule:
                     require_main_protection()
                 else:
@@ -35,6 +40,7 @@ class MainProtectionTest(unittest.TestCase):
                         require_main_protection()
                 self.assertEqual(run.call_args.args[0][:3], ["gh", "api", "graphql"])
                 self.assertIn('ref(qualifiedName: "refs/heads/main")', run.call_args.args[0][4])
+                self.assertIn("requiresStrictStatusChecks", run.call_args.args[0][4])
 
 
 class ReleaseFixture(unittest.TestCase):
@@ -60,6 +66,7 @@ class ReleaseFixture(unittest.TestCase):
             f"actions/workflows/test.yml/runs?event=pull_request&branch=staging&head_sha={HEAD}&per_page=100":
                 [{"workflow_runs": self.runs}],
             "actions/runs/701/jobs?filter=all&per_page=100": [{"jobs": self.jobs}],
+            f"git/commits/{HEAD}": {"tree": {"sha": TREE}},
             f"git/commits/{TESTED}": self.tested,
             f"git/commits/{MERGED}": self.merged,
             f"compare/{MERGED}...main?per_page=1": self.comparison,
@@ -222,6 +229,19 @@ class HostMergeTest(ReleaseFixture):
         with self.assertRaisesRegex(AwaitingTests, "current base and head"):
             merge_deployment_pr(REPO, 54, base="main", method="merge")
 
+    def test_host_waits_for_staging_to_include_main(self):
+        self.open_pr["mergeable_state"] = "behind"
+        self.runs.clear()
+        with self.assertRaisesRegex(AwaitingTests, "staging needs to be updated"):
+            merge_deployment_pr(REPO, 54, base="main", method="merge")
+        self.require_protection.assert_not_called()
+
+    def test_host_waits_if_the_tested_tree_differs_from_staging(self):
+        self.responses[f"git/commits/{HEAD}"]["tree"]["sha"] = ADVANCED
+        with self.assertRaisesRegex(AwaitingTests, "staging needs to be updated"):
+            merge_deployment_pr(REPO, 54, base="main", method="merge")
+        self.require_protection.assert_not_called()
+
     def dashboard_merge(self, **pr_fields):
         info = {"state": "OPEN", "baseRefName": "main", "number": 54, "mergeable": "MERGEABLE",
                 "headRefName": "staging", "isCrossRepository": False, "isDraft": False,
@@ -346,19 +366,29 @@ class HostMergeTest(ReleaseFixture):
         self.assertIn("did not test the merged contents", finish.call_args.args[-1])
         self.assertFalse(any("status='deploying'" in call.args[0] for call in con.execute.call_args_list))
 
-    def test_host_paths_wait_if_github_declines_to_merge_after_main_advances(self):
-        def advance_main(command, **kwargs):
-            self.responses["pulls/54"] = dict(self.open_pr, base=dict(self.pr["base"], sha=ADVANCED),
-                                              merge_commit_sha=MERGED)
-            return CompletedProcess(command, 1, "", "gh: Base branch was modified (HTTP 405)")
-
+    def test_host_paths_require_strict_protection_for_a_last_moment_main_advance(self):
+        self.require_protection.side_effect = require_main_protection
         for merge, expected in ((self.dashboard_merge, "waiting for checks"),
                                 (self.train_merge, "waiting for deployment PR tests")):
-            with self.subTest(merge=merge.__name__):
-                self.responses["pulls/54"] = self.open_pr
-                with patch("ticket_pilot.core.run", side_effect=advance_main) as mutation:
-                    self.assertEqual(merge()[0], expected)
-                mutation.assert_called_once()
+            for strict in (False, True):
+                rule = dict(STRICT_PROTECTION, requiresStrictStatusChecks=strict)
+
+                def github(command, **kwargs):
+                    if command[:3] == ["gh", "api", "graphql"]:
+                        return protection_result(rule)
+                    self.assertTrue(strict, "loose protection would allow the untested merge")
+                    self.assertIn(f"sha={HEAD}", command)
+                    self.responses["pulls/54"] = dict(self.open_pr, base=dict(self.pr["base"], sha=ADVANCED),
+                                                      merge_commit_sha=MERGED, mergeable_state="behind")
+                    return CompletedProcess(command, 1, "", "gh: Base branch was modified (HTTP 405)")
+
+                with self.subTest(merge=merge.__name__, strict=strict):
+                    self.responses["pulls/54"] = self.open_pr
+                    with patch("ticket_pilot.core.run", side_effect=github) as api:
+                        self.assertEqual(merge()[0], expected)
+                    self.assertEqual(api.call_count, 2 if strict else 1)
+                    self.assertEqual(self.responses["pulls/54"]["state"], "open")
+                    self.assertFalse(self.responses["pulls/54"]["merged"])
 
     def test_train_waits_if_staging_advances_after_validation(self):
         def advance_staging(command, **kwargs):

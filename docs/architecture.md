@@ -25,7 +25,7 @@
 
 - **화면·API** — [Milestones.tsx](../web/src/views/Milestones.tsx)의 작업 완료는 `POST /api/milestone-done`을 사용한다. [Release.tsx](../web/src/views/Release.tsx)는 `GET /api/state`의 배포 상태를 표시하고 `POST /api/deploy`, `POST /api/deploy-cancel`, `POST /api/release-hold`로 요청을 보낸다.
 - **처리** — [milestone.py](../ticket_pilot/milestone.py)와 [release.py](../ticket_pilot/release.py)의 `process_approvals()`가 마일스톤과 스테이징 병합을 처리한다. [deploy.py](../ticket_pilot/deploy.py)의 `deploy_tick()`은 대시보드 배포를, `release.release_tick()`은 정기 배포를 진행한다. `release.verify_deploy()`와 `release.finalize()`가 프로덕션 반영을 확인하고 티켓 완료를 처리한다. 별도로 병합된 PR의 프로덕션 상태는 [track.py](../ticket_pilot/track.py)가 추적한다.
-- **공개 릴리스** — [test.yml](../.github/workflows/test.yml)의 전체 테스트는 같은 저장소의 `staging → main` PR에서 실행한다. `deployment-tests-passed`는 배포 PR의 전체 테스트 작업이 성공해야 통과한다. 다른 `main` 대상 PR에서는 이 작업을 건너뛰며 GitHub는 이를 필수 검사 충족으로 처리한다. 배포 화면과 열차는 `release._open_pr()`에서 같은 저장소의 배포 PR을 찾아 사용한다. [release_checks.py](../ticket_pilot/release_checks.py)에서 최신 테스트, 머지 후보의 부모와 `main` 보호 규칙을 확인한 뒤 검사한 `staging` SHA를 지정해 GitHub PR 머지 API를 호출하고, 반환된 머지의 대상과 파일 트리를 확인한다. [release.yml](../.github/workflows/release.yml)은 머지 이벤트를 받고 같은 모듈에서 머지 전 테스트 결과와 실제 `main` 커밋을 확인한 뒤 발행한다. [test_verify_release.py](../tests/test_verify_release.py)는 보호 규칙, PR과 브랜치 경합, 머지 결과와 발행 조건을 검증한다.
+- **공개 릴리스** — [test.yml](../.github/workflows/test.yml)의 전체 테스트는 같은 저장소의 `staging → main` PR에서 실행한다. `deployment-tests-passed`는 배포 PR의 전체 테스트 작업이 성공해야 통과한다. 다른 `main` 대상 PR에서는 이 작업을 건너뛰며 GitHub는 이를 필수 검사 충족으로 처리한다. 배포 화면과 열차는 `release._open_pr()`에서 같은 저장소의 배포 PR을 찾는다. [release_checks.py](../ticket_pilot/release_checks.py)는 최신 테스트, 머지 후보의 부모와 `staging` 파일 트리, `main` 보호 규칙을 확인한다. 호스트는 GitHub PR 머지 API에 검사한 `staging` SHA를 지정하고, GitHub는 그 SHA가 최신 `main`을 포함하도록 필수 검사로 강제한다. 호스트는 반환된 머지의 대상과 파일 트리를 확인한다. [release.yml](../.github/workflows/release.yml)은 머지 이벤트를 받고 같은 모듈에서 머지 전 테스트 결과와 실제 `main` 커밋을 확인한 뒤 발행한다. [test_verify_release.py](../tests/test_verify_release.py)는 보호 규칙, PR과 브랜치 경합, 머지 결과와 발행 조건을 검증한다.
 - **테스트** — [test_milestone.py](../tests/test_milestone.py), [test_release_candidates.py](../tests/test_release_candidates.py), [test_busy_release.py](../tests/test_busy_release.py), [test_track.py](../tests/test_track.py)
 
 ## 프로젝트와 저장소 설정
@@ -43,7 +43,7 @@
 ## 지표
 
 - **화면·API** — 모니터링 목록의 지표 링크(`#metrics`)를 열면 [App.tsx](../web/src/App.tsx)가 [Metrics.tsx](../web/src/views/Metrics.tsx)를 불러온다. 채팅 압축 검색 항목(`#metrics/chat-compactions`)과 기존 `#chat-compactions` 주소는 지표의 채팅 압축 탭을 연다. 개요·주간 추이·시점 비교는 `GET /api/metrics`로 리포트를 읽고 `POST /api/metrics/mark`로 시점을 기록한다.
-- **처리** — [metrics_usage.py](../ticket_pilot/metrics_usage.py)가 작업·리뷰 실행을 기록하고 `tp tick`에서 에이전트 로그의 사용량을 수집한다. [metrics.py](../ticket_pilot/metrics.py)의 `report()`가 DB의 티켓, PR, 작업 기록을 기간별로 집계한다. [compactionData.ts](../web/src/views/metrics/compactionData.ts)는 압축 기록을 UTC 기준 일·주·월별로 묶는다. [MetricChart.tsx](../web/src/views/metrics/MetricChart.tsx)는 차트 크기, 텍스트 값, 주간 차트의 시점선과 이름을 관리한다. [Metrics.tsx](../web/src/views/Metrics.tsx)가 차트와 선택 상자의 시점을 비교 탭에 전달한다.
+- **처리** — [metrics_usage.py](../ticket_pilot/metrics_usage.py)가 작업·리뷰 실행을 기록하고 `tp tick`에서 에이전트 로그의 사용량을 수집한다. [metrics.py](../ticket_pilot/metrics.py)의 `report()`가 DB의 티켓, PR, 작업 기록을 기간별로 집계한다. [compactionData.ts](../web/src/views/metrics/compactionData.ts)는 압축 기록을 UTC 기준 일·주·월별로 묶는다. [MetricChart.tsx](../web/src/views/metrics/MetricChart.tsx)는 차트 크기, 텍스트 값, 주간 차트의 시점선과 이름을 관리한다. [uPlot의 로케일 수정 커밋](https://github.com/leeoniya/uPlot/commit/8eafc9531b26596a2389cff331ad9cbfc5223f44)을 호출 시점에 불러오고, 로드나 초기화에 실패하면 차트 위치에 안내를 표시하면서 텍스트 값과 화면의 집계·기록은 제공한다. [Metrics.tsx](../web/src/views/Metrics.tsx)가 차트와 선택 상자의 시점을 비교 탭에 전달한다.
 - **테스트** — [test_metrics.py](../tests/test_metrics.py), [compactionData.check.mjs](../web/src/views/metrics/compactionData.check.mjs)
 
 ## 대시보드 탐색과 모니터링
@@ -56,7 +56,7 @@
 
 코드 경로가 바뀌면 같은 PR에서 이 지도 파일을 추가하거나 내용을 수정한다. 경로, 호출 관계 또는 담당 범위가 바뀐 부분을 지도에 반영한다. 지도 삭제나 다른 경로로의 이동은 갱신으로 인정하지 않는다. 코드 변경이 없는 PR은 지도 변경 여부와 관계없이 통과한다.
 
-[architecture-map.yml](../.github/workflows/architecture-map.yml)은 PR 이벤트의 대상 커밋과 PR HEAD에서 공통 조상을 찾아, 그 조상부터 PR HEAD까지 비교한다. 마일스톤 하위 PR도 해당 PR의 대상 커밋을 사용한다. 추가, 수정, 삭제를 모두 검사하고 이동은 이전 경로의 삭제와 새 경로의 추가로 검사한다. 실패 시 갱신할 문서와 변경된 코드 경로를 출력한다.
+[architecture-map.yml](../.github/workflows/architecture-map.yml)은 PR을 열거나 다시 열 때, 커밋을 올릴 때, 또는 대상을 바꿀 때 이벤트의 대상 커밋과 PR HEAD의 공통 조상부터 PR HEAD까지 비교한다. 마일스톤 하위 PR도 해당 PR의 대상 커밋을 사용한다. 제목이나 본문 편집은 진행 중인 검사와 기존 검사 결과에 영향을 주지 않는다. 추가, 수정, 삭제를 모두 검사하고 이동은 이전 경로의 삭제와 새 경로의 추가로 검사한다. 실패 시 갱신할 문서와 변경된 코드 경로를 출력한다.
 
 [검사 스크립트](../scripts/check_architecture_map.py)는 다음 경로를 코드로 판정한다. 디렉터리 규칙은 하위 디렉터리에도 적용된다.
 

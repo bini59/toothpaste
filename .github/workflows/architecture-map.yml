@@ -1,14 +1,17 @@
 name: architecture-map
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, edited]
 permissions:
   contents: read
 concurrency:
-  group: architecture-map-${{ github.ref }}
+  group: architecture-map-${{ github.event.action == 'edited' && !github.event.changes.base.ref.from && github.run_id || github.ref }}
   cancel-in-progress: true
 jobs:
   architecture-map:
+    # A metadata edit should neither cancel a check nor replace its result.
+    name: ${{ (github.event.action != 'edited' || github.event.changes.base.ref.from) && 'architecture-map' || 'architecture-map-metadata-edit' }}
+    if: github.event.action != 'edited' || github.event.changes.base.ref.from
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

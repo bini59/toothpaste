@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import uPlot from "uplot";
-import "uplot/dist/uPlot.min.css";
+import type uPlot from "uplot";
 import { Select } from "../../components/Select";
 import { useThemeVersion } from "../../theme/theme";
 import { Button, Card, cn } from "../../ui";
@@ -10,6 +9,14 @@ type ChartSeries = { label: string; format: (value: number | null) => string };
 type MarkerLine = { id: number; at: number; label: string; date: string; details: string };
 const colors = ["primary", "secondary", "success-700", "warning-700"];
 const integerIncrements = Array.from({ length: 12 }, (_, power) => [1, 2, 5].map((n) => n * 10 ** power)).flat();
+let chartAssets: Promise<typeof uPlot> | undefined;
+
+function loadPlot() {
+  // All cards wait for the same stylesheet load, including cards opened after a failed request.
+  chartAssets ??= Promise.all([import("uplot"), import("uplot/dist/uPlot.min.css")])
+    .then(([{ default: Plot }]) => Plot);
+  return chartAssets;
+}
 
 function layoutMarkers(plot: uPlot, markers: MarkerLine[], fontFamily: string) {
   const { offsetLeft, clientWidth } = plot.over;
@@ -46,35 +53,49 @@ export function MetricChart({ title, points, series, start, end, axis, percent, 
   const theme = useThemeVersion();
   const [chosen, setChosen] = useState<number | null>(null);
   const [markerLayout, setMarkerLayout] = useState<ReturnType<typeof layoutMarkers>>();
+  const [plotFailed, setPlotFailed] = useState(false);
   const point = points.find((p) => p.at === chosen) ?? points.at(-1);
   const hasData = points.some((p) => p.values.some((v) => v !== null));
   const showPlot = hasData || !!markers?.length;
 
   useEffect(() => {
     const el = container.current;
-    if (!el || !showPlot) return;
+    if (!el || !showPlot || plotFailed) return;
     const style = getComputedStyle(el);
     const color = (name: string) => style.getPropertyValue(`--color-${name}`).trim();
     const font = `11px ${style.fontFamily}`;
     const data: uPlot.AlignedData = [points.map((p) => p.at), ...series.map((_, i) => points.map((p) => p.values[i]))];
     const ticks = new Map(points.map((p) => [p.at, p.tick]));
+    let disposed = false;
     let plot: uPlot | undefined;
-    const resize = new ResizeObserver(([entry]) => {
+    let resize: ResizeObserver | undefined;
+    function cleanup() {
+      resize?.disconnect();
+      plot?.destroy();
+      plot = undefined;
+    }
+    function failPlot() {
+      if (disposed) return;
+      cleanup();
+      setPlotFailed(true);
+    }
+    const resizePlot = (Plot: typeof uPlot, entry: ResizeObserverEntry) => {
       const width = Math.floor(entry.contentRect.width);
       const height = Math.floor(entry.contentRect.height);
       if (width < 100 || height < 70) return;
       if (plot) {
-        plot.setSize({ width, height });
+        const chart = plot;
+        chart.batch(() => chart.setSize({ width, height }));
         return;
       }
-      plot = new uPlot({
+      new Plot({
         width, height, padding: [10, 20, 0, 0],
         legend: { show: false },
         cursor: { drag: { x: false, y: false }, points: { show: false } },
         scales: {
           x: { time: false, range: [start, end] },
           y: { range: (_u, min, max) => percent ? [0, 1]
-            : uPlot.rangeNum(Math.min(0, min || 0), Math.max(min < 0 ? 0 : 1, max || 0), 0.1, true) },
+            : Plot.rangeNum(Math.min(0, min || 0), Math.max(min < 0 ? 0 : 1, max || 0), 0.1, true) },
         },
         axes: [
           { stroke: color("text-muted"), font, size: 27, grid: { show: false }, ticks: { show: false },
@@ -90,7 +111,7 @@ export function MetricChart({ title, points, series, start, end, axis, percent, 
         series: [{}, ...series.map((s, i): uPlot.Series => ({
           label: s.label, stroke: color(colors[i]), width: 2, spanGaps: false,
           points: { show: !bars, size: 5 },
-          ...(bars ? { fill: color(colors[i]), paths: uPlot.paths.bars!({ size: [0.7, 36] }) } : {}),
+          ...(bars ? { fill: color(colors[i]), paths: Plot.paths.bars!({ size: [0.7, 36] }) } : {}),
         }))],
         hooks: {
           setSize: [(u) => {
@@ -143,16 +164,34 @@ export function MetricChart({ title, points, series, start, end, axis, percent, 
             });
           }],
         },
-      }, data, el);
-    });
-    resize.observe(el);
-    return () => { resize.disconnect(); plot?.destroy(); };
-  }, [axis, bars, end, integerTicks, markers, onMarkerSelect, percent, points, selectedMarker, series, showPlot, start, theme]);
+      }, data, (chart, init) => {
+        plot = chart;
+        el.appendChild(chart.root);
+        // Run the first draw inside the try block instead of uPlot's queued microtask.
+        chart.batch(() => init());
+      });
+    };
+    void loadPlot().then((Plot) => {
+      if (disposed) return;
+      resize = new ResizeObserver(([entry]) => {
+        try {
+          resizePlot(Plot, entry);
+        } catch {
+          failPlot();
+        }
+      });
+      resize.observe(el);
+    }).catch(failPlot);
+    return () => {
+      disposed = true;
+      cleanup();
+    };
+  }, [axis, bars, end, integerTicks, markers, onMarkerSelect, percent, plotFailed, points, selectedMarker, series, showPlot, start, theme]);
 
   return (
     <Card className="flex min-h-0 min-w-0 flex-1 flex-col gap-2 p-3 sm:p-4">
       <h3 className="text-sm font-bold text-text-main">{title}</h3>
-      {!!markers?.length && markerLayout && onMarkerSelect && (
+      {!plotFailed && !!markers?.length && markerLayout && onMarkerSelect && (
         <div role="group" aria-label="차트 시점" className="relative max-h-16 shrink-0 overflow-y-auto"
           style={{ height: markerLayout.height }}>
           {markerLayout.labels.map(({ marker, width, left, top }) => (
@@ -169,7 +208,11 @@ export function MetricChart({ title, points, series, start, end, axis, percent, 
       )}
       <div className="relative min-h-24 flex-1">
         <div ref={container} aria-hidden="true" className="absolute inset-0 overflow-hidden" />
-        {!hasData && <p className="pointer-events-none absolute inset-0 grid place-items-center text-sm text-text-muted">기록이 없어요</p>}
+        {showPlot && plotFailed ? (
+          <p role="status" className="absolute inset-0 grid place-items-center text-sm text-text-muted">차트를 표시할 수 없어요</p>
+        ) : !hasData && (
+          <p className="pointer-events-none absolute inset-0 grid place-items-center text-sm text-text-muted">기록이 없어요</p>
+        )}
       </div>
       {point && (
         <div className="shrink-0 border-t border-border pt-2">
