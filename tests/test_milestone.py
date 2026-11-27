@@ -119,6 +119,30 @@ class MilestoneTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "마일스톤 PR"):
             deploy._check_milestone_deploy(self.con, rel)
 
+    def test_verified_github_parent_closes_if_undispatched_child_drops_out(self):
+        parent, child, added = "gh:o/api#12", "gh:o/api#13", "gh:o/shop#1"
+        self.ticket(parent, parent=None, in_ms=0, tags=("tp-milestone",))
+        self.ticket(child, parent=parent)
+        with mock.patch.object(M, "_gh"):
+            base = M.ensure(self.con, self.row(child), API)
+        self.pr(child, "MERGED", base, merged_at="2026-11-01")
+        self.ticket(added, parent=parent, repo="14_Shop", stage="queued")
+        with mock.patch.object(M, "db", return_value=self.con), mock.patch.object(R, "_gh") as close:
+            self.assertIsNone(M.complete(self.con, M.ms_gid(parent, API)))
+            self.assertFalse(self.row(parent)["completed"])
+            self.con.execute("UPDATE tickets SET assigned=0 WHERE gid=?", (added,))
+            M.tick(log=lambda *_: None)
+            M.tick(log=lambda *_: None)
+            self.assertEqual([c.args[0][2] for c in close.call_args_list], ["13", "12"])
+        self.assertEqual(core.meta_get(self.con, "github_milestone_close_retries"), {})
+
+    def test_asana_keeps_milestone_base_while_staging_is_disabled(self):
+        rules = {API: {**RULES[API], "train": False, "pr_into_staging": True, "modes": ["direct"]}}
+        core.write_config(self.con, {"settings": {"deploy": {"repos": rules}}, "project_map": {}})
+        self.ticket("100", parent="99")
+        self.assertEqual(M.base_for(self.row("100"), API), "milestone/99")
+        self.assertEqual(self.stage("100"), "needs_staging")
+
     def test_external_github_milestone_worktree_names_are_unique(self):
         keys = [M.ms_gid(f"gh:example/{'long-name-' * 7}#{n}", repo)
                 for n in (12, 13) for repo in ("frontend_api", "backend_api")]

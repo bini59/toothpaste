@@ -199,6 +199,7 @@ GitHub에서는 `milestone_tag` 라벨을 붙인 부모 이슈와 `tp` 라벨을
 
 부모 태스크에 설정 `milestone_tag`의 태그(새 설치 기본 **`tp-milestone`**)를 붙이고, 하위 태스크에는 평소처럼 티켓 태그(`asana_tag`)를 붙입니다.
 staging 열차 레포, `pr_into_staging` 레포, 배포 규칙에서 별도의 staging 브랜치로 머지하는 레포가 참여합니다.
+열차나 `pr_into_staging` 레포에서 staging 머지를 끄면 기존 하위 티켓은 마일스톤 브랜치를 유지하고 **staging 설정 필요**에서 기다려요.
 
 **Notion에서 만들기**
 

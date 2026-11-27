@@ -145,13 +145,15 @@ def staging_config_error(t, repo: str) -> str | None:
     if notion_milestone(t) and not staging_of(repo, notion=True):
         return (f"Notion 마일스톤에는 staging 머지가 필요해요. 프로젝트 → 설정 → 레포별 설정 → {repo} → 배포에서 "
                 "‘staging 브랜치 사용’을 켜고 중간·prod 브랜치와 다른 staging 브랜치를 지정한 뒤, ‘배포 방식’에서 staging을 선택하세요.")
+    if (in_milestone(t) or is_ms(t["gid"])) and feature_base(repo) and not staging_of(repo):
+        return f"마일스톤 브랜치의 작업을 계속하려면 {repo}의 배포 설정에서 staging 머지를 설정하세요."
     return None
 
 
 def base_for(t, repo: str | None) -> str | None:
     """Branch t's PR targets (and its worktree starts from): its milestone branch, else the repo's feature base."""
-    # A Notion relation fixes the required base even if the repo loses its staging settings before launch.
-    if t is not None and in_milestone(t) and (t["parent_gid"].startswith(("notion:", "gh:")) or staging_of(repo)):
+    # Keep an existing milestone's base even if staging merges are disabled before the next dispatch.
+    if t is not None and in_milestone(t) and (t["parent_gid"].startswith(("notion:", "gh:")) or feature_base(repo) or staging_of(repo)):
         return branch(t["parent_gid"])
     return feature_base(repo)
 
@@ -569,13 +571,16 @@ def _close_github_family(con, parent, children):
         if not closed and (err := complete_asana(con, gid, pr_url=url)):
             pending[gid] = url
             errors.append(f"{gid}: {err}")
-    if not errors and all_repos_live(con, parent) and (err := _close_parent(con, parent)):
+    ready = not errors and all_repos_live(con, parent)
+    if ready and (err := _close_parent(con, parent)):
         errors.append(f"parent: {err}")
-    if errors or parent in retries:
-        if errors:
+    # An undispatched child can leave the milestone before its repo ever gets an ms: ticket.
+    if not ready or errors:
+        if retries.get(parent) != pending:
             retries[parent] = pending
-        else:
-            del retries[parent]
+            meta_set(con, "github_milestone_close_retries", retries)
+    elif parent in retries:
+        del retries[parent]
         meta_set(con, "github_milestone_close_retries", retries)
     return errors
 
