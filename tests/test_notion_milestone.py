@@ -215,6 +215,21 @@ class NotionMilestones(NotionDashboard):
         self.assertIsNone(pipeline.latest_run(self.con, self.gid))
         self.assertFalse(self.ticket(self.gid)["assigned"])
 
+    def test_switch_to_task_db_during_worktree_discovery_prevents_adoption(self):
+        cli.main(["sync"])
+        gid = "notion:" + self.other["id"]
+        path = self.root / pipeline.slug(self.ticket(gid)["key"])
+        def discover(_repos):
+            self.use_task_db()
+            cli.main(["sync"])
+            return [{"repo": "app", "path": str(path)}]
+        with mock.patch.object(pipeline, "github_token", return_value="fixture"), \
+                mock.patch.object(pipeline.R, "worktrees", side_effect=discover), mock.patch.object(pipeline.R, "launch") as launch:
+            self.assertEqual(pipeline.dispatch(only=gid), [])
+        launch.assert_not_called()
+        self.assertIsNone(pipeline.latest_run(self.con, gid))
+        self.assertFalse(self.ticket(gid)["assigned"])
+
     def test_milestone_status_retry_preserves_resumed_tasks_status(self):
         self.use_task_db()
         self.cfg["stage_statuses"]["in_progress"] = "doing-id"

@@ -419,7 +419,8 @@ def queued_page(con, ticket, repo):
 
 
 def worktree_guard(con, ticket, repo):
-    if uses_milestone_kind(con, ticket):
+    # A separate source can switch to the task DB while worktree discovery or git fetch is running.
+    if ticket["gid"].startswith("notion:"):
         source = _dispatch_source(con, ticket["project_gid"], ticket["gid"])
 
         def check(*, lock=True):
