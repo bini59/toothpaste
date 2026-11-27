@@ -42,7 +42,7 @@
 ## 지표
 
 - **화면·API** — [App.tsx](../web/src/App.tsx)가 `#metrics`에서 [Metrics.tsx](../web/src/views/Metrics.tsx)를 불러오며, 기존 `#chat-compactions`는 지표의 채팅 압축 탭을 연다. 개요·주간 추이·시점 비교는 `GET /api/metrics`로 리포트를 읽고 `POST /api/metrics/mark`로 시점을 기록한다.
-- **처리** — [metrics_usage.py](../ticket_pilot/metrics_usage.py)가 작업·리뷰 실행을 기록하고 `tp tick`에서 에이전트 로그의 사용량을 수집한다. [metrics.py](../ticket_pilot/metrics.py)의 `report()`가 DB의 티켓, PR, 작업 기록을 기간별로 집계한다. [compactionData.ts](../web/src/views/metrics/compactionData.ts)는 압축 기록을 UTC 기준 일·주·월별로 묶는다. [MetricChart.tsx](../web/src/views/metrics/MetricChart.tsx)는 주간 추이와 압축 차트의 크기와 텍스트 값 표시를 관리한다.
+- **처리** — [metrics_usage.py](../ticket_pilot/metrics_usage.py)가 작업·리뷰 실행을 기록하고 `tp tick`에서 에이전트 로그의 사용량을 수집한다. [metrics.py](../ticket_pilot/metrics.py)의 `report()`가 DB의 티켓, PR, 작업 기록을 기간별로 집계한다. [compactionData.ts](../web/src/views/metrics/compactionData.ts)는 압축 기록을 UTC 기준 일·주·월별로 묶는다. [MetricChart.tsx](../web/src/views/metrics/MetricChart.tsx)는 차트 크기, 텍스트 값, 주간 차트의 시점선과 이름을 관리한다. [Metrics.tsx](../web/src/views/Metrics.tsx)가 차트와 선택 상자의 시점을 비교 탭에 전달한다.
 - **테스트** — [test_metrics.py](../tests/test_metrics.py), [compactionData.check.mjs](../web/src/views/metrics/compactionData.check.mjs)
 
 ## PR에서 코드 지도 갱신

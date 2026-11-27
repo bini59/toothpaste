@@ -66,7 +66,7 @@ export function MetricsDialog({ title, children, onClose }: {
       className="m-auto max-h-[calc(100dvh-2rem)] w-[min(37rem,calc(100vw-2rem))] overflow-y-auto rounded-xl border border-border bg-surface p-4 text-text-main shadow-xl backdrop:bg-grey-900 backdrop:opacity-40 sm:p-5">
       <div className="mb-4 flex items-start justify-between gap-3">
         <h2 id={titleId} className="min-w-0 text-base font-bold [overflow-wrap:anywhere]">{title}</h2>
-        <Button size="sm" variant="secondary" onClick={() => ref.current?.close()}>닫기</Button>
+        <Button size="sm" variant="secondary" className="shrink-0 whitespace-nowrap" onClick={() => ref.current?.close()}>닫기</Button>
       </div>
       {children}
     </dialog>

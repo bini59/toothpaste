@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { getJson, postJson } from "../api";
 import { Select } from "../components/Select";
 import { Button, Card, Input, cn } from "../ui";
@@ -60,6 +60,7 @@ function PipelineMetrics({ section }: { section: Exclude<Section, "chat-compacti
   const query = selected === null ? "" : `?marker=${selected}&days=${appliedDays}`;
   const request = `${query}#${reload}`;
   const activeResult = result?.request === request ? result : undefined;
+  const selectedMarker = report?.markers.find((m) => m.id === selected);
 
   useEffect(() => {
     let current = true;
@@ -83,11 +84,11 @@ function PipelineMetrics({ section }: { section: Exclude<Section, "chat-compacti
     setReload((value) => value + 1);
   }
 
-  function chooseMarker(value: string) {
-    setSelected(value ? Number(value) : null);
+  const chooseMarker = useCallback((id: number | null) => {
+    setSelected(id);
     const nextDays = Number(days);
     if (Number.isInteger(nextDays) && nextDays >= 1 && nextDays <= 90) setAppliedDays(nextDays);
-  }
+  }, [days]);
 
   async function mark(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -109,6 +110,16 @@ function PipelineMetrics({ section }: { section: Exclude<Section, "chat-compacti
     }
   }
 
+  const comparisonAction = (
+    <Button size="sm" variant="secondary" className="shrink-0 whitespace-nowrap" disabled={selected === null}
+      onClick={() => { location.hash = "#metrics/comparison"; }}>비교 열기</Button>
+  );
+  const markerDetails = selectedMarker && (
+    <p aria-live="polite" className="basis-full text-xs text-text-muted [overflow-wrap:anywhere]">
+      {markerLabel(selectedMarker)}
+    </p>
+  );
+
   return (
     <>
       <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
@@ -116,10 +127,12 @@ function PipelineMetrics({ section }: { section: Exclude<Section, "chat-compacti
           {section === "comparison" ? "시점 전후 비교 · UTC" : "최근 12주 · UTC 월요일 시작"}
         </p>
         <div className="flex flex-wrap gap-1.5">
+          {section === "overview" && !!report?.markers.length && comparisonAction}
           <Button size="sm" variant="secondary" onClick={() => setDialog("method")}>계산 방법</Button>
           <Button size="sm" variant="secondary" onClick={refresh}>새로고침</Button>
           <Button size="sm" onClick={() => { setMarkError(""); setDialog("mark"); }}>시점 기록</Button>
         </div>
+        {section === "overview" && markerDetails}
       </div>
       {reportError && <MetricsStatus error text={`지표를 불러오지 못했어요. ${reportError}`} />}
       {!report && !reportError && <MetricsStatus text="지표를 불러오는 중…" />}
@@ -149,7 +162,7 @@ function PipelineMetrics({ section }: { section: Exclude<Section, "chat-compacti
           <div className="grid min-h-[218px] min-w-0 flex-1 gap-3 sm:grid-cols-2">
             {charts.slice(0, production.length).map((chart, i) => (
               <div key={chart.title} className={cn("min-h-0 min-w-0 flex-col sm:flex", overviewIndex === i ? "flex" : "hidden")}>
-                <WeeklyChart chart={chart} report={report} />
+                <WeeklyChart chart={chart} report={report} selected={selected} onMarkerSelect={chooseMarker} />
               </div>
             ))}
           </div>
@@ -164,15 +177,15 @@ function PipelineMetrics({ section }: { section: Exclude<Section, "chat-compacti
             </Select>
             <div className="flex min-w-0 flex-1 gap-2">
               <MarkerSelect markers={report.markers} selected={selected} onChange={chooseMarker} />
-              <Button size="sm" variant="secondary" disabled={selected === null}
-                onClick={() => { location.hash = "#metrics/comparison"; }}>비교 열기</Button>
+              {comparisonAction}
             </div>
+            {markerDetails}
           </div>
           {charts[chartIndex].series.some((s) => s.key === "missing_ws_set") && (
             <p className="shrink-0 text-xs text-text-muted">과거 실행은 종료·시간 초과 이벤트가 남은 누락만 확인할 수 있어요.</p>
           )}
           <div className="flex min-h-[218px] min-w-0 flex-1 flex-col">
-            <WeeklyChart key={chartIndex} chart={charts[chartIndex]} report={report} selected={selected} />
+            <WeeklyChart key={chartIndex} chart={charts[chartIndex]} report={report} selected={selected} onMarkerSelect={chooseMarker} />
           </div>
         </>
       )}
@@ -217,23 +230,26 @@ function PipelineMetrics({ section }: { section: Exclude<Section, "chat-compacti
   );
 }
 
+function markerLabel(marker: Marker) {
+  return `${marker.kind === "version" ? "버전" : "수동"} · ${marker.label} · ${markerDate.format(new Date(marker.at))} UTC`;
+}
+
 function MarkerSelect({ markers, selected, onChange, id }: {
-  markers: Marker[]; selected: number | null; onChange: (value: string) => void; id?: string;
+  markers: Marker[]; selected: number | null; onChange: (value: number | null) => void; id?: string;
 }) {
   return (
     <Select id={id} aria-label={id ? undefined : "버전 또는 수동 시점"} size={id ? "md" : "sm"}
-      className={cn("w-full min-w-0", id && "mt-1")} value={selected ?? ""} onChange={(e) => onChange(e.target.value)}>
+      className={cn("w-full min-w-0", id && "mt-1")} value={selected ?? ""}
+      onChange={(e) => onChange(e.target.value ? Number(e.target.value) : null)}>
       <option value="">비교할 시점 선택</option>
-      {markers.map((m) => (
-        <option key={m.id} value={m.id}>
-          {m.kind === "version" ? "버전" : "수동"} · {m.label} · {markerDate.format(new Date(m.at))} UTC
-        </option>
-      ))}
+      {markers.map((m) => <option key={m.id} value={m.id}>{markerLabel(m)}</option>)}
     </Select>
   );
 }
 
-function WeeklyChart({ chart, report, selected }: { chart: Chart; report: Report; selected?: number | null }) {
+function WeeklyChart({ chart, report, selected, onMarkerSelect }: {
+  chart: Chart; report: Report; selected: number | null; onMarkerSelect: (id: number) => void;
+}) {
   const { weeks, markers } = report;
   const start = Date.parse(weeks[0].start);
   const end = Date.parse(weeks[weeks.length - 1].end);
@@ -246,14 +262,15 @@ function WeeklyChart({ chart, report, selected }: { chart: Chart; report: Report
     notes: chart.series.map((s) => sample(week, s)),
   })), [weeks, chart]);
   const markerLines = useMemo(() => markers.map((m) => ({
-    at: Date.parse(m.at), active: m.id === selected,
-  })).filter((m) => m.at >= start && m.at < end), [markers, selected, start, end]);
+    id: m.id, at: Date.parse(m.at), label: m.label, date: day(m.at), details: markerLabel(m),
+  })).filter((m) => m.at >= start && m.at < end), [markers, start, end]);
   const series = useMemo(() => chart.series.map((s) => ({
     label: s.label, format: (value: number | null) => display(value, s.unit) + (s.unit === "tokens" && value !== null ? " 토큰" : ""),
   })), [chart]);
   const axis = useMemo(() => (value: number) => display(value, unit, true), [unit]);
   return <MetricChart title={chart.title} start={start} end={end} points={points} series={series}
-    axis={axis} percent={unit === "percent"} integerTicks={unit === "count"} markers={markerLines} periodLabel="주간 값" />;
+    axis={axis} percent={unit === "percent"} integerTicks={unit === "count"} markers={markerLines}
+    selectedMarker={selected} onMarkerSelect={onMarkerSelect} periodLabel="주간 값" />;
 }
 
 function PeriodComparison({ comparison: { before, after, complete } }: { comparison: Comparison }) {
