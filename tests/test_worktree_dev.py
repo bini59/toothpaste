@@ -210,25 +210,34 @@ if (args.includes('build')) {
 
     @unittest.skipUnless(shutil.which("npm"), "npm required")
     def test_fixed_port_in_a_custom_package_script_is_replaced_before_wait(self):
-        command = f'{shlex.quote(sys.executable)} serve.py --port {self.port} & wait'
-        (self.wt / "package.json").write_text(json.dumps({"scripts": {"predev": "touch prepared", "dev": command}}))
         (self.wt / "package-lock.json").touch()
         (self.wt / "serve.py").write_text(
             "import http.server, os, pathlib, socketserver, sys\n"
             "assert pathlib.Path('prepared').exists()\n"
-            "assert sys.argv[1:] == ['--port', os.environ['PORT']]\n"
+            "assert sys.argv[1:] == ['--port', os.environ['PORT']], (sys.argv, os.environ['PORT'])\n"
             "socketserver.TCPServer(('127.0.0.1', int(sys.argv[2])), http.server.SimpleHTTPRequestHandler)"
             ".serve_forever()\n")
         self.cmd = "npm run dev"
-        with socket.socket() as foreign:
-            foreign.bind(("127.0.0.1", self.port))
-            foreign.listen()
-            server = dev.start(self.con, self.wt)
-            self.assertNotEqual(server["port"], self.port)
-            with urlopen(server["url"], timeout=2) as response:
-                self.assertEqual(response.read(), b"ticket preview")
-            self.stop()
-            self.assertTrue(devserver.port_open(self.port))
+        for listening in (True, False):
+            with self.subTest(listening=listening), socket.socket() as foreign:
+                foreign.bind(("127.0.0.1", 0))
+                self.port = foreign.getsockname()[1]
+                if listening:
+                    foreign.listen()
+                command = f"{shlex.quote(sys.executable)} serve.py --port {self.port} & wait"
+                scripts = {"predev": "touch prepared", "dev": command}
+                (self.wt / "package.json").write_text(json.dumps({"scripts": scripts}))
+                try:
+                    server = dev.start(self.con, self.wt)
+                except devserver.DevError as exc:
+                    logs = [p.read_text() for p in (self.root / "logs").glob("*.log")]
+                    self.fail(f"{exc}\n" + "\n".join(logs))
+                self.assertNotEqual(server["port"], self.port)
+                with urlopen(server["url"], timeout=2) as response:
+                    self.assertEqual(response.read(), b"ticket preview")
+                self.stop()
+                foreign.listen()
+                self.assertTrue(devserver.port_open(self.port))
 
     def test_stop_rechecks_the_group_when_signalling_is_denied(self):
         log = self.root / "server.log"

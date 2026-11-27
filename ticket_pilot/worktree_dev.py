@@ -3,10 +3,12 @@ Waiting clients share the registered launch and release the lock while it starts
 """
 from __future__ import annotations
 
+import errno
 import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -119,14 +121,32 @@ def reserved_ports(con) -> dict[int, str]:
     return {r["port"]: path for path, r in (meta_get(con, KEY) or {}).items() if managed_pid(r)}
 
 
+def _port_available(port: int, *, reuse: bool = True) -> bool:
+    # A connected client or a bound but not yet listening socket can also prevent the server from binding.
+    for family, host in ((socket.AF_INET, "0.0.0.0"), (socket.AF_INET6, "::")):
+        try:
+            with socket.socket(family, socket.SOCK_STREAM) as probe:
+                # Dev servers normally reuse a recently stopped listener's TIME_WAIT port.
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, int(reuse))
+                probe.bind((host, port))
+        except OSError as exc:
+            if family == socket.AF_INET6 and exc.errno in (errno.EAFNOSUPPORT, errno.EADDRNOTAVAIL,
+                                                           errno.EPROTONOSUPPORT):
+                continue
+            return False
+    return not D.listeners(port)
+
+
 def _state(rec: dict | None) -> str:
     pid = managed_pid(rec)
     if not pid:
         return "stopped"
-    if D.port_open(rec["port"]):
-        listeners = D.listeners(rec["port"])
-        if listeners:
-            return "running" if all(in_session(p["pid"], pid) for p in listeners) else "port-in-use"
+    listeners = D.listeners(rec["port"])
+    if listeners:
+        if not all(in_session(p["pid"], pid) for p in listeners):
+            return "port-in-use"
+        if D.port_open(rec["port"]):
+            return "running"
     return "starting"
 
 
@@ -150,8 +170,8 @@ def _launch(con, wt: Path, port: int | None) -> dict:
     if not 1024 <= port <= 65535:
         raise D.DevError("포트는 1024-65535 사이여야 해요")
     used = D._used_ports(con, "") | reserved_ports(con).keys()
-    if port in used or D.port_open(port) or D.listeners(port):
-        port = D.free_port(port, used)
+    if port in used or not _port_available(port):
+        port = D.free_port(port, used, available=_port_available)
     cmd = detected["cmd"].replace("{port}", str(port))
     log = D.LOGS / f"{wt.name[:64]}-{uuid4().hex}.log"
     root = row["path"] if row and row["path"] else str(wt)
@@ -232,7 +252,7 @@ def _start_or_reuse(con, wt: Path, port: int | None) -> tuple[dict, bool]:
 def start(con, path: Path, port: int | None = None) -> dict:
     wt = path.resolve()
     deadline = None
-    for _ in range(2):  # a foreign process can bind between port selection and the child's listen()
+    for attempt in range(2):  # a foreign process can bind between port selection and the child's listen()
         rec, reused = _start_or_reuse(con, wt, port)
         if deadline is None:
             deadline = time.monotonic() + READY_TIMEOUT
@@ -242,10 +262,11 @@ def start(con, path: Path, port: int | None = None) -> dict:
             return {**rec, "status": state, "url": f"http://localhost:{rec['port']}", "reused": reused}
         if not stop(con, wt, expected=rec):
             break  # an explicit stop or a newer launch won
-        if state == "stopped" and D.port_open(rec["port"]):
+        if state == "stopped" and not _port_available(rec["port"], reuse=False):
             state = "port-in-use"  # the child may have already exited with EADDRINUSE
-        if state != "port-in-use" or time.monotonic() >= deadline:
+        if state != "port-in-use" or attempt == 1 or time.monotonic() >= deadline:
             break
+        port = D.free_port(rec["port"], available=_port_available)
     why = {"stopped": "서버가 종료됐어요", "port-in-use": "다른 프로세스가 포트를 사용 중이에요"}.get(
         state, f"{READY_TIMEOUT}초 안에 포트가 열리지 않았어요")
     raise D.DevError(f"{why} (포트 {rec['port']}). 로그: {rec['log']}")

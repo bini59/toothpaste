@@ -282,10 +282,14 @@ def listeners(port: int) -> list[dict]:
     return out
 
 
-def free_port(start: int, skip: set[int] = frozenset()) -> int:
+def _no_listener(port: int) -> bool:
+    return not port_open(port) and not listeners(port)
+
+
+def free_port(start: int, skip: set[int] = frozenset(), *, available=_no_listener) -> int:
     for offset in range(1, 200):
         p = 1024 + (start - 1024 + offset) % (65536 - 1024)
-        if p not in skip and not port_open(p) and not listeners(p):
+        if p not in skip and available(p):
             return p
     raise DevError(f"{start} 다음으로 빈 포트를 못 찾았어요")
 
