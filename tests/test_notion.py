@@ -14,6 +14,7 @@ from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
 from ticket_pilot import cli, core, mode, notion, pipeline, release, server
+from ticket_pilot.storage import connection
 
 
 def uid(n):
@@ -232,7 +233,7 @@ class NotionDashboard(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
         self.addCleanup(mock.patch.stopall)
-        for patch in (mock.patch.object(core, "DB_PATH", self.root / "tp.db"), mock.patch.object(core, "_CON", None),
+        for patch in (mock.patch.object(core, "DB_PATH", self.root / "tp.db"), mock.patch.object(connection, "_main_connections", {}),
                       mock.patch.object(core, "KEYCHAIN", False), mock.patch.object(core, "SECRETS_FILE", self.root / "keys" / "secrets.json"),
                       mock.patch.dict(os.environ, TP_MODE="", TP_PUBLIC_URL="")):
             patch.start()

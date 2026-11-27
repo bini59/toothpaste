@@ -7,7 +7,8 @@
 - **CLI** — [bin/tp](../bin/tp)와 `python3 -m ticket_pilot.cli`는 [cli.py](../ticket_pilot/cli.py)의 `main()`으로 들어간다. 여기서 argparse 명령을 등록하고 인자를 넘기며, `tp precheck-*`의 결과를 종료 코드와 출력으로 변환한다.
 - **대시보드 서버** — `tp serve`와 Docker의 `tp run`은 [server.py](../ticket_pilot/server.py)의 `serve()`를 호출한다. `tp run`은 [tick.py](../ticket_pilot/tick.py)의 `run_loop()`로 매분 tick 프로세스를 시작한다. HTTP 핸들러의 `do_GET()`과 `do_POST()`가 API를 처리하고, 서버는 빌드된 React 앱을 `web/dist`에서 제공한다.
 - **대시보드 화면** — [index.html](../web/index.html)에서 [main.tsx](../web/src/main.tsx)로 진입한다. [App.tsx](../web/src/App.tsx)가 주소의 해시로 화면을 선택하고, [api.ts](../web/src/api.ts)와 [types.ts](../web/src/types.ts)가 API 호출과 응답 타입을 공유한다.
-- **공용 저장소** — [core.py](../ticket_pilot/core.py)의 `db()`가 SQLite 연결과 스키마 초기화·마이그레이션을 담당한다.
+- **공용 저장소** — [core.py](../ticket_pilot/core.py)의 `db()`는 `TP_DB` 경로와 설정 이관에 필요한 함수를 [storage/connection.py](../ticket_pilot/storage/connection.py)에 전달한다. 연결은 프로세스의 메인 스레드에서 재사용한다. 요청 스레드는 호출마다 연결을 열고 사용 후 닫는다. fork된 자식은 `db()`로 새 연결을 연다.
+- **SQLite 초기화** — [storage/schema.py](../ticket_pilot/storage/schema.py)의 기본 테이블을 만든 뒤 [storage/migrations.py](../ticket_pilot/storage/migrations.py)가 이벤트의 `actor` 열을 준비하고, 프로젝트 키를 이관한 다음, 누락된 열을 추가하고 기존 행의 값을 채운다. 열 추가와 값 보정은 함께 커밋하거나 롤백한다. 이후 레거시 JSON, 작업 경로, Asana 태그 순으로 처리하며 `meta`의 `config_imported`, `roots_pinned`, `tags_pinned`로 완료 여부를 확인한다. [test_storage.py](../tests/test_storage.py)와 [test_config.py](../tests/test_config.py)가 연결과 이관을 검증한다.
 
 ## 자동화 tick과 사전 점검
 
@@ -38,7 +39,7 @@
 ## 프로젝트와 저장소 설정
 
 - **화면·API** — [Projects.tsx](../web/src/views/Projects.tsx)가 프로젝트별 탭을 구성한다. [Onboard.tsx](../web/src/views/Onboard.tsx)는 프로젝트·저장소 추가, [Settings.tsx](../web/src/views/Settings.tsx)는 프로젝트·저장소·전역 설정 편집, [NotionSource.tsx](../web/src/views/NotionSource.tsx)는 Notion 소스 설정을 담당한다. 관련 API는 `GET /api/projects`, `GET /api/config`, `POST /api/config`, `/api/onboard/*`, `/api/notion/*`이다.
-- **처리** — [config.py](../ticket_pilot/config.py)가 `tp config`와 대시보드의 설정 검증, 저장, 변경 이력을 공유한다. [core.py](../ticket_pilot/core.py)가 DB에서 설정을 읽고 기본값과 합치며, [onboard.py](../ticket_pilot/onboard.py)가 저장소 탐색과 복제를 처리한다.
+- **처리** — [config.py](../ticket_pilot/config.py)가 `tp config`와 대시보드의 설정 검증, 저장, 변경 이력을 공유한다. [core.py](../ticket_pilot/core.py)가 DB에서 설정을 읽고 기본값과 합친다. 설정 저장과 레거시 설정 이관은 [storage/settings_backup.py](../ticket_pilot/storage/settings_backup.py)로 같은 형식의 백업을 남긴다. [onboard.py](../ticket_pilot/onboard.py)가 저장소 탐색과 복제를 처리한다.
 - **테스트** — [test_config.py](../tests/test_config.py), [test_onboard.py](../tests/test_onboard.py), [test_notion.py](../tests/test_notion.py), [settings.check.mjs](../web/src/views/settings.check.mjs)
 
 ## 프로젝트 채팅과 압축

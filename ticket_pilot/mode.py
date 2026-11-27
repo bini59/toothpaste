@@ -401,8 +401,7 @@ def _steps_docker(j: dict) -> list:
             _stop_services()
         con = core.db()
         again = migrate.busy(con)  # the last tick may have started one
-        con.close()
-        core._CON = None  # nothing below writes the host DB
+        core.close_db(con)  # nothing below writes the host DB
         if again:
             raise RuntimeError("그 사이에 시작된 작업이 있어요: " + ", ".join(again))
 

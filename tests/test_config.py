@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 from ticket_pilot import checks as K, config as G, core, pipeline as P
+from ticket_pilot.storage import migrations
 
 
 def mem_db():
@@ -91,8 +92,7 @@ class ConfigTest(unittest.TestCase):
     def setUp(self):
         self.con = mem_db()
         self.tmp = Path(tempfile.mkdtemp())
-        self.p = use_db(self.con) + [mock.patch.object(core, "CONFIG", self.tmp),
-                                     mock.patch.object(G, "backup_dir", lambda: self.tmp / "backups")]
+        self.p = use_db(self.con) + [mock.patch.object(G, "backup_dir", lambda: self.tmp / "backups")]
         for p in self.p[2:]:
             p.start()
 
@@ -103,53 +103,56 @@ class ConfigTest(unittest.TestCase):
         self.con.close()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
+    def import_json(self):
+        return migrations.import_legacy_json(self.con, self.tmp, core.write_config, G.backup)
+
     def imported(self):
         st, pm = legacy(self.tmp)
-        self.assertTrue(core.import_legacy_json(self.con))
+        self.assertTrue(self.import_json())
         return st, pm
 
     # TP-121: the default worktree / clone roots moved under ~/tp-work; an install from before keeps what it used
     def test_new_db_uses_tp_work_roots(self):
-        self.assertFalse(core.pin_legacy_roots(self.con))
+        self.assertFalse(migrations.pin_legacy_roots(self.con, core.config_cache_clear))
         self.assertEqual(G.get("global.worktree_root"), "~/tp-work/worktrees")
         self.assertEqual(G.get("global.clone_root"), "~/tp-work/repos")
         # still a new install after its first settings are saved: the mark stops a later pin
         self.con.execute("INSERT INTO config_global(ns,k,v,pos) VALUES('settings','agent','\"claude\"',0)")
-        self.assertFalse(core.pin_legacy_roots(self.con))
+        self.assertFalse(migrations.pin_legacy_roots(self.con, core.config_cache_clear))
         core.config_cache_clear()
         self.assertEqual(G.get("global.worktree_root"), "~/tp-work/worktrees")
 
     # TP-184: new installs use the tp / tp-milestone tags; an install from before keeps orca / orca-milestone
     def test_default_tags(self):
-        self.assertFalse(core.pin_legacy_tags(self.con))  # new DB
+        self.assertFalse(migrations.pin_legacy_tags(self.con, core.config_cache_clear))  # new DB
         self.assertEqual((G.get("global.asana_tag"), G.get("global.milestone_tag")), ("tp", "tp-milestone"))
 
     def test_existing_db_keeps_its_tags(self):
         self.con.execute("INSERT INTO config_global(ns,k,v,pos) VALUES('settings','asana_tag','\"mine\"',0)")
-        self.assertTrue(core.pin_legacy_tags(self.con))  # stored tag stays; the unstored milestone tag keeps the old default
+        self.assertTrue(migrations.pin_legacy_tags(self.con, core.config_cache_clear))  # stored tag stays; the unstored milestone tag keeps the old default
         self.assertEqual((G.get("global.asana_tag"), G.get("global.milestone_tag")), ("mine", "orca-milestone"))
-        self.assertFalse(core.pin_legacy_tags(self.con))
+        self.assertFalse(migrations.pin_legacy_tags(self.con, core.config_cache_clear))
 
     def test_existing_db_keeps_stored_roots(self):
         for i, (k, v) in enumerate({"worktree_root": "~/ticket-pilot/worktrees", "clone_root": "~/somewhere"}.items()):
             self.con.execute("INSERT INTO config_global(ns,k,v,pos) VALUES('settings',?,?,?)", (k, json.dumps(v), i))
-        self.assertFalse(core.pin_legacy_roots(self.con))
+        self.assertFalse(migrations.pin_legacy_roots(self.con, core.config_cache_clear))
         self.assertEqual(G.get("global.worktree_root"), "~/ticket-pilot/worktrees")
         self.assertEqual(G.get("global.clone_root"), "~/somewhere")
 
     def test_existing_db_without_stored_roots_keeps_old_defaults(self):
         self.imported()  # the legacy files have neither key: this install has been using the old code defaults
-        self.assertTrue(core.pin_legacy_roots(self.con))
+        self.assertTrue(migrations.pin_legacy_roots(self.con, core.config_cache_clear))
         self.assertEqual(G.get("global.worktree_root"), "~/ticket-pilot/worktrees")
         self.assertEqual(G.get("global.clone_root"), "~/Desktop/07_Project")
-        self.assertFalse(core.pin_legacy_roots(self.con))
+        self.assertFalse(migrations.pin_legacy_roots(self.con, core.config_cache_clear))
 
     def history(self):
         return [dict(r) for r in self.con.execute("SELECT scope,key,old,new,actor FROM settings_history ORDER BY id")]
 
     # ------------------------------------------------------------ defaults and import
     def test_defaults_without_db_values_or_files(self):
-        self.assertFalse(core.import_legacy_json(self.con))
+        self.assertFalse(self.import_json())
         st = core.settings()
         self.assertEqual(st["max_active_runs"], 3)
         self.assertEqual(st["review"]["max_rework_rounds"], 3)
@@ -167,12 +170,12 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(self.con.execute("SELECT count(*) c FROM events WHERE kind='config'").fetchone()["c"], 1)
         self.assertEqual(len(list((self.tmp / "backups").glob("config-*.json"))), 1)
         (self.tmp / "settings.json").write_text(json.dumps({**st, "max_active_runs": 9}))
-        self.assertFalse(core.import_legacy_json(self.con))
+        self.assertFalse(self.import_json())
         core.config_cache_clear()
         self.assertEqual(core.settings()["max_active_runs"], 2)
 
     def test_missing_files_are_imported_once_they_appear(self):
-        self.assertFalse(core.import_legacy_json(self.con))  # e.g. the deploy restored them a moment later
+        self.assertFalse(self.import_json())  # e.g. the deploy restored them a moment later
         self.imported()
         self.assertEqual(core.settings()["max_active_runs"], 2)
 
@@ -439,7 +442,7 @@ class ConfigTest(unittest.TestCase):
                          {("main-site", "site", "fe", 1), ("main-site", "shop", "be", 0), ("asana-12", "shop", "be", 1)})
         self.assertEqual(dict(con.execute("SELECT id, project_id FROM chat_conversations").fetchall()),
                          {"c1": "main-site", "c2": "main-site", "c3": core.UNSORTED})
-        self.assertIn("project_id", core._cols(con, "project_map"))
+        self.assertIn("project_id", {r["name"] for r in con.execute("PRAGMA table_info(project_map)")})
         core._migrate(con)  # runs once
         self.assertEqual(con.execute("SELECT count(*) FROM config_projects").fetchone()[0], 3)
 

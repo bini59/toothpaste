@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from ticket_pilot import asana_write, cli, core, milestone, notion, pipeline, release
+from ticket_pilot.storage import connection
 
 
 def command(*args, status=0):
@@ -32,7 +33,7 @@ class TicketWriteTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.db = Path(tmp.name) / "tp.db"
         self.enterContext(mock.patch.object(core, "DB_PATH", self.db))
-        self.enterContext(mock.patch.object(core, "_CON", None))
+        self.enterContext(mock.patch.object(connection, "_main_connections", {}))
         self.enterContext(mock.patch.dict(os.environ, TP_AGENT="chat-app"))
         self.con = core.db()
         self.addCleanup(self.con.close)
