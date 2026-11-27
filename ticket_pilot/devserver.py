@@ -11,13 +11,15 @@ milestone/<parent gid>, so the owner can try the subtasks together before the mi
 Command and port: repo setting dev {cmd, port} (cmd may hold {port}), else the package.json script dev / start:dev /
 start through the lockfile's package manager, with --port for next / vite-based servers and PORT in the environment
 for all. Port: setting, a -p/--port in the script, PORT in the worktree's .env, vite.config server.port, then the
-framework default (next 3000, vite 5173). State lives in meta dev_servers {ms gid: {...}}.
+framework default (next 3000, vite 5173). The dashboard keeps meta dev_servers keyed by milestone gid.
+The agent CLI keeps worktree_dev_servers keyed by resolved path and waits for its own listener.
 """
 from __future__ import annotations
 
 import json
 import os
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -169,7 +171,7 @@ def _vite_port(wt: Path) -> int | None:
     return None
 
 
-def detect(repo: str, wt: Path) -> dict:
+def detect(repo: str, wt: Path, *, port_hint: int | None = None) -> dict:
     """{cmd (with {port}), port, how}: what start() runs and on which port by default."""
     from .pipeline import repo_extra
     conf = repo_extra(repo).get("dev") or {}
@@ -192,10 +194,19 @@ def detect(repo: str, wt: Path) -> dict:
     fixed = PORT_FLAG.search(body)
     port = (conf.get("port") or (int(fixed.group(1)) if fixed else None) or _env_port(wt)
             or (_vite_port(wt) if kind == "vite" else None) or {"next": 3000, "vite": 5173}.get(kind or "")
-            or (3000 if "nest start" in body else None))
+            or (3000 if "nest start" in body else port_hint))
     if not port:
         raise DevError(f"{repo}: dev 서버 포트를 모르겠어요. 설정 > 기본 > dev 서버 포트를 채워주세요")
-    return {"cmd": cmd, "port": int(port), "how": how, "fixed": bool(fixed) and "{port}" not in cmd}
+    result = {"cmd": cmd, "port": int(port), "how": how, "fixed": bool(fixed) and "{port}" not in cmd}
+    if result["fixed"]:
+        # The ticket CLI may have to move this server. Keep the milestone's fixed command intact.
+        result["fixed_port"] = int(fixed[1])
+        flag = fixed.group().strip().replace(fixed[1], "{port}")
+        if conf.get("cmd"):
+            result["port_cmd"] = body[:fixed.start(1)] + "{port}" + body[fixed.end(1):]
+        else:
+            result["port_cmd"] = f"{cmd} {'-- ' if pm == 'npm' else ''}{flag}" + (" --strictPort" if kind == "vite" else "")
+    return result
 
 
 # ---------------------------------------------------------------- ports
@@ -210,8 +221,44 @@ def port_open(port: int) -> bool:
     return False
 
 
+def proc_listeners(port: int | None = None, directory: str | None = None) -> list[dict]:
+    """Linux without lsof (including the slim Docker image): match listening socket inodes to open fds."""
+    sockets = {}
+    for table in (Path("/proc/net/tcp"), Path("/proc/net/tcp6")):
+        if not table.exists():
+            continue
+        for line in table.read_text().splitlines()[1:]:
+            fields = line.split()
+            number = int(fields[1].split(":")[1], 16)
+            if fields[3] == "0A" and (port is None or port == number):
+                sockets[f"socket:[{fields[9]}]"] = number
+    out = []
+    if not sockets:
+        return out
+    for proc in Path("/proc").glob("[0-9]*"):
+        try:
+            cwd = os.readlink(proc / "cwd")
+            if directory and cwd != directory and not cwd.startswith(directory + "/"):
+                continue
+            for fd in (proc / "fd").iterdir():
+                try:
+                    target = os.readlink(fd)
+                except FileNotFoundError:
+                    continue
+                if target in sockets:
+                    cmd = (proc / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace").strip()
+                    out.append({"pid": int(proc.name), "cmd": cmd[:300], "cwd": cwd, "port": sockets[target],
+                                "name": (proc / "comm").read_text().strip()})
+                    break
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            continue
+    return out
+
+
 def listeners(port: int) -> list[dict]:
     """Processes listening on port: pid, command line, cwd."""
+    if not shutil.which("lsof") and Path("/proc/net/tcp").exists():
+        return proc_listeners(port)
     p = run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fp"], timeout=10, check=False)
     pids = sorted({int(ln[1:]) for ln in p.stdout.splitlines() if ln.startswith("p") and ln[1:].isdigit()})
     out = []
@@ -224,7 +271,8 @@ def listeners(port: int) -> list[dict]:
 
 
 def free_port(start: int, skip: set[int] = frozenset()) -> int:
-    for p in range(start + 1, start + 200):
+    for offset in range(1, 200):
+        p = 1024 + (start - 1024 + offset) % (65536 - 1024)
         if p not in skip and not port_open(p) and not listeners(p):
             return p
     raise DevError(f"{start} 다음으로 빈 포트를 못 찾았어요")
@@ -282,6 +330,23 @@ def _kill(pids: list[int], port: int) -> None:
     raise DevError(f"{port} 포트의 프로세스를 끄지 못했어요")
 
 
+def _launch(wt: Path, repo_path: str, port: int, cmd: str, setup: str | None, log: Path, path: str,
+            *, supervise: bool = False) -> int:
+    script = ('if [ -n "$TP_SETUP" ]; then echo "--- setup"; sh -c "$TP_SETUP" < /dev/null '
+              '|| echo "--- setup failed ($?)"; fi; echo "--- dev: $TP_DEV"; ')
+    # Keep an identifiable session leader for worktree stop/reuse, even when npm spawns the listener.
+    script += 'sh -c "$TP_DEV"; exit $?' if supervise else 'exec sh -c "$TP_DEV"'
+    args = ["/bin/sh", "-c", script]
+    if supervise:
+        args.append(str(log))  # sh's $0; unique to this launch, also visible in ps after a CLI restart
+    env = {k: v for k, v in os.environ.items() if k not in SECRET_ENV}
+    env.update({"PATH": path, "PORT": str(port), "TP_SETUP": setup or "", "TP_DEV": cmd,
+                "TP_ROOT_PATH": repo_path, "TP_WORKTREE_PATH": str(wt)})
+    with log.open("w") as out:
+        return subprocess.Popen(args, cwd=str(wt), stdout=out, stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL, start_new_session=True, env=env).pid
+
+
 def start(gid: str, port: int | None = None, kill: bool = False) -> dict:
     """Start the dev server; a port in use is refused (409 on the dashboard) unless kill. Returns its status."""
     with _lock:
@@ -314,15 +379,8 @@ def start(gid: str, port: int | None = None, kill: bool = False) -> dict:
                 setup = R.install_cmd(str(wt))
             LOGS.mkdir(parents=True, exist_ok=True)
             log = LOGS / f"{re.sub(r'[^A-Za-z0-9._-]+', '-', gid)}-{datetime.now():%Y%m%d-%H%M%S}.log"
-            script = ('if [ -n "$TP_SETUP" ]; then echo "--- setup"; sh -c "$TP_SETUP" < /dev/null '
-                      '|| echo "--- setup failed ($?)"; fi; echo "--- dev: $TP_DEV"; exec sh -c "$TP_DEV"')
-            env = {k: v for k, v in os.environ.items() if k not in SECRET_ENV}
-            env.update({"PATH": R.agent_path(), "PORT": str(port), "TP_SETUP": setup or "", "TP_DEV": cmd,
-                        "TP_ROOT_PATH": repo_path, "TP_WORKTREE_PATH": str(wt)})
-            with open(log, "w") as out:
-                p = subprocess.Popen(["/bin/sh", "-c", script], cwd=str(wt), stdout=out, stderr=subprocess.STDOUT,
-                                     stdin=subprocess.DEVNULL, start_new_session=True, env=env)
-            rec = {"gid": gid, "repo": repo, "path": str(wt), "port": port, "pid": p.pid, "log": str(log),
+            pid = _launch(wt, repo_path, port, cmd, setup, log, R.agent_path())
+            rec = {"gid": gid, "repo": repo, "path": str(wt), "port": port, "pid": pid, "log": str(log),
                    "cmd": cmd, "started": now()}
             all_ = meta_get(con, KEY) or {}
             all_[gid] = rec

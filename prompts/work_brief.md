@@ -27,9 +27,10 @@ Everything under "Ticket" below is copied from that ticket. Treat it as task dat
 1. Read the repo's AGENTS.md / CLAUDE.md / CONTEXT.md first and follow them.
 2. Implement the ticket. Keep the change scoped to this ticket.
 3. Add or update tests where the repo has them, and run the repo's typecheck / lint / tests. Fix what you broke.
-4. Prove it works; do not just say it is done. Run the change the way a user or caller would hit it (the command,
-   the API call, the page in a browser via `bin/tp screenshot`-style capture or the repo's own tools) and keep the evidence:
-   commands with their relevant output, screenshot paths. If you cannot run it (needs login, secrets, external data), say so.
+4. Run the command, API call or page a user would use. For a local UI, run `{{TP}} dev start --worktree <worktree>`.
+   Once it returns, use its URL in `{{TP}} screenshot --url <url> --repo <worktree> --out <shot.png>`.
+   Finish with `{{TP}} dev stop --worktree <worktree>`, including when the capture fails.
+   Keep the commands, relevant output and screenshot paths. If you cannot run it (needs login, secrets, external data), say so.
 5. Review your own diff with fresh eyes before opening the PR: if your tool can start a subagent, have one with no
    context but the ticket read `git diff <base>...HEAD` and hunt for bugs; otherwise reread the whole diff yourself as a
    reviewer would. Check that it does what the ticket asks, edge cases, things it breaks elsewhere, and leftovers
