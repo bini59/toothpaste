@@ -401,6 +401,20 @@ def release_tick(log=print, force: bool = False) -> str:
     return "done for today"
 
 
+def _open_pr(gh, base, head, title, body) -> str:
+    if (gh, base, head) == (PUBLIC_REPOSITORY, "main", "staging"):
+        # Qualify the head by owner so a fork PR with a branch named staging is never reused.
+        owner = gh.split("/", 1)[0]
+        existing = gh_json(["api", f"repos/{gh}/pulls?state=open&base=main&head={owner}%3Astaging",
+                            "--jq", "map({url: .html_url})"])
+    else:
+        existing = gh_json(["pr", "list", "--repo", gh, "--base", base, "--head", head, "--state", "open", "--json", "url"])
+    if existing:
+        return existing[0]["url"]
+    return _gh(["pr", "create", "--repo", gh, "--base", base, "--head", head, "--title", title[:200],
+                "--body", body]).stdout.strip().splitlines()[-1]
+
+
 def _start(con, rel, log) -> str:
     rc = repo_rules(rel["repo"]) or {}
     gh = rel["github"]
@@ -452,9 +466,7 @@ def _start(con, rel, log) -> str:
         title = f"Release {rel['day']}: " + ", ".join((p["title"] or p["key"]).split(" ")[0] for p in prs)
         body = "Weekday release train (ticket-pilot).\n\n" + "\n".join(
             f"- #{p['number']} {p['title']} ({p['key']})" for p in prs) + f"\n\nTickets: {keys}\n"
-        existing = gh_json(["pr", "list", "--repo", gh, "--base", main, "--head", stg, "--state", "open", "--json", "url"])
-        url = existing[0]["url"] if existing else _gh(["pr", "create", "--repo", gh, "--base", main, "--head", stg,
-                                                       "--title", title[:200], "--body", body]).stdout.strip().splitlines()[-1]
+        url = _open_pr(gh, main, stg, title, body)
         try:
             sha = merge_deployment_pr(gh, url.rsplit("/", 1)[-1], base=main, method="merge", approved_head=approved_head)
         except StagingAdvanced as error:

@@ -320,10 +320,10 @@ staging 열차 레포와 `pr_into_staging` 레포는 티켓 브랜치를 staging
 
 첫 배포 PR은 보호 규칙을 설정할 때까지 초안으로 유지합니다. `deployment-tests-passed`가 통과하면 GitHub **Settings → Branches**에서
 `main`에 브랜치 보호 규칙을 추가합니다.
-PR을 통한 머지와 **GitHub Actions**의 `deployment-tests-passed`를 필수로 설정하고, 최신 브랜치 조건과 관리자 우회 금지를 켜세요.
-우회 허용 목록은 비워 두고 배포 PR에는 머지 커밋 방식을 사용합니다. 배포 화면과 열차는 보호 규칙과 테스트 결과를 확인하고 검사한 `staging`
-SHA를 지정해 GitHub PR 머지 API를 호출합니다. 머지 후 `main` 대상과 결과를 다시 확인합니다. 이 API에는 대상을 고정하는 입력이 없으므로
-배포가 진행되는 동안 PR 대상을 유지하세요.
+PR을 통한 머지와 **GitHub Actions**의 `deployment-tests-passed`를 필수로 설정하고 관리자 우회 금지를 켜세요. 우회 허용 목록은
+비워 두고 배포 PR에는 머지 커밋 방식을 사용합니다. 배포할 때마다 `staging`을 갱신할 필요가 없도록 최신 브랜치 조건은 끕니다.
+배포 화면과 열차는 보호 규칙과 현재 머지 후보의 테스트를 확인하고 검사한 `staging` SHA를 지정해 GitHub PR 머지 API를 호출합니다.
+이 API는 head만 고정하므로 배포가 진행되는 동안 PR 대상을 유지하세요. 머지 후 `main` 대상과 실제 파일 트리를 다시 확인합니다.
 
 머지 이벤트를 받으면 같은 PR의 최종 커밋에서 전체 테스트가 머지 전에 성공했고, 테스트한 파일 트리가 머지 결과와 일치하는지
 확인합니다. 확인을 통과하면 실제 `main` 머지 커밋으로 태그, GitHub Release, 웹 빌드와 Docker 이미지를 발행합니다.

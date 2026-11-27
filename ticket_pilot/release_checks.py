@@ -90,8 +90,8 @@ def require_main_protection():
         ref(qualifiedName: "refs/heads/main") {
           branchProtectionRule {
             isAdminEnforced
+            requiresApprovingReviews
             requiresStatusChecks
-            requiresStrictStatusChecks
             bypassPullRequestAllowances(first: 1) { totalCount }
             requiredStatusChecks { context app { slug } }
           }
@@ -102,12 +102,13 @@ def require_main_protection():
     result = run(["gh", "api", "graphql", "-f", f"query={query}", "-f", f"owner={owner}", "-f", f"name={name}"],
                  timeout=30)
     rule = json.loads(result.stdout)["data"]["repository"]["ref"]["branchProtectionRule"]
-    if (not rule or not rule["isAdminEnforced"] or not rule["requiresStatusChecks"] or not rule["requiresStrictStatusChecks"]
+    # GitHub represents the PR requirement with requiresApprovingReviews even with zero required approvals.
+    if (not rule or not rule["isAdminEnforced"] or not rule["requiresApprovingReviews"] or not rule["requiresStatusChecks"]
             or rule["bypassPullRequestAllowances"]["totalCount"] != 0
             or not any(check["context"] == DEPLOYMENT_CHECK and (check["app"] or {}).get("slug") == "github-actions"
                        for check in rule["requiredStatusChecks"])):
-        raise AwaitingTests(f"Waiting for main branch protection to require {DEPLOYMENT_CHECK} from GitHub Actions "
-                            "on up-to-date pull requests with no bypass.")
+        raise AwaitingTests(f"Waiting for main branch protection to require pull requests and {DEPLOYMENT_CHECK} "
+                            "from GitHub Actions with no bypass.")
 
 
 def verify_merge_commit(api_get, api, merge_sha, tested, run_id):
@@ -132,9 +133,7 @@ def merge_deployment_pr(repository, number, *, base, method, approved_head=None)
     if pr["base"]["ref"] != base:
         raise ValueError(f"PR #{number} no longer targets {base}.")
     if not is_deployment_pr(pr, repository):
-        if approved_head is not None:
-            raise ValueError(f"PR #{number} is not the same-repository staging -> main PR.")
-        return None
+        raise ValueError(f"PR #{number} is not the same-repository staging -> main PR.")
     if pr["state"] != "open":
         raise ValueError(f"PR #{number} is no longer open.")
     if pr["draft"] or pr["mergeable"] is not True:

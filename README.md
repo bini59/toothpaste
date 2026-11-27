@@ -488,14 +488,13 @@ opens, reopens, receives a new commit, or is retargeted to `main`. Title and des
 architecture map check runs on all PRs, including milestone subtasks.
 
 Keep the first deployment PR in draft until protection is set up. Once `deployment-tests-passed` succeeds, add a branch
-protection rule for `main` in GitHub **Settings → Branches**. Require a pull request, require `deployment-tests-passed`
-from **GitHub Actions**, enable **Require branches to be up to date before merging** and **Do not allow bypassing the
-above settings**, and leave the bypass list empty. Allow merge commits for deployment PRs. The dashboard and release
-train wait for this protection and the latest passing test result, then call the GitHub PR merge API with the tested
-`staging` SHA. GitHub checks that the
-PR can still merge and applies the protection to its current base. The host confirms the PR merged into `main` and
-that the actual commit has the tested file tree. The merge API does not accept an expected target branch,
-so leave the PR target unchanged while a deployment is in progress.
+protection rule for `main` in GitHub **Settings → Branches**. Require a pull request and `deployment-tests-passed` from
+**GitHub Actions**. Use loose status checks so `staging` can keep its own history between releases. Enable **Do not
+allow bypassing the above settings**, leave the bypass list empty, and allow merge commits. The dashboard and release
+train wait for this protection and a test of the current merge candidate, then call the GitHub PR merge API with the
+tested `staging` SHA. GitHub checks that the PR can still merge and applies the protection to its current base. The host
+confirms the PR merged into `main` and that the actual commit has the tested file tree. Keep the PR target unchanged
+while a deployment is in progress because the merge API pins only the head.
 
 When GitHub marks the PR merged, `.github/workflows/release.yml` independently verifies that the latest `test` run for
 that PR's final head passed before the merge and that its tested file tree matches the commit on `main`.

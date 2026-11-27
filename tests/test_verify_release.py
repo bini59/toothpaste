@@ -16,13 +16,14 @@ JOBS = ["oss-check", "unit (ubuntu-latest)", "unit (macos-latest)", "docker", "m
 
 
 class MainProtectionTest(unittest.TestCase):
-    def test_requires_the_strict_actions_check_without_bypass(self):
+    def test_requires_the_actions_check_without_bypass(self):
         rule = {
-            "isAdminEnforced": True, "requiresStatusChecks": True, "requiresStrictStatusChecks": True,
+            "isAdminEnforced": True, "requiresApprovingReviews": True, "requiresStatusChecks": True,
             "bypassPullRequestAllowances": {"totalCount": 0},
             "requiredStatusChecks": [{"context": "deployment-tests-passed", "app": {"slug": "github-actions"}}],
         }
-        for configured in (rule, None, dict(rule, isAdminEnforced=False), dict(rule, requiresStrictStatusChecks=False),
+        for configured in (rule, None, dict(rule, isAdminEnforced=False), dict(rule, requiresApprovingReviews=False),
+                           dict(rule, requiresStatusChecks=False),
                            dict(rule, requiredStatusChecks=[]), dict(rule, bypassPullRequestAllowances={"totalCount": 1}),
                            dict(rule, requiredStatusChecks=[{"context": "deployment-tests-passed", "app": None}])):
             data = {"data": {"repository": {"ref": {"branchProtectionRule": configured}}}}
@@ -195,10 +196,11 @@ class HostMergeTest(ReleaseFixture):
         mutation.assert_called_once()
         self.assertIs(self.responses["pulls/54"], self.open_pr)
 
-    def test_host_uses_normal_merge_for_other_prs(self):
+    def test_host_refuses_fork_release_pr_and_leaves_other_repositories_to_the_caller(self):
         self.responses["pulls/54"]["head"] = {"ref": "staging", "repo": {"full_name": "fork/toothpaste"}}
         with patch("ticket_pilot.core.run") as mutation:
-            self.assertIsNone(merge_deployment_pr(REPO, 54, base="main", method="merge"))
+            with self.assertRaisesRegex(ValueError, "same-repository"):
+                merge_deployment_pr(REPO, 54, base="main", method="merge")
             self.assertIsNone(merge_deployment_pr("other/repo", 54, base="main", method="merge"))
         mutation.assert_not_called()
 
@@ -222,7 +224,8 @@ class HostMergeTest(ReleaseFixture):
 
     def dashboard_merge(self, **pr_fields):
         info = {"state": "OPEN", "baseRefName": "main", "number": 54, "mergeable": "MERGEABLE",
-                "isDraft": False, "statusCheckRollup": [], **pr_fields}
+                "headRefName": "staging", "isCrossRepository": False, "isDraft": False,
+                "statusCheckRollup": [], **pr_fields}
         rel = {"id": 1, "github": REPO, "repo": "toothpaste", "reason": None, "ticket_gid": None}
         state = {"pr": PR_URL, "into": "main", "method": "merge", "since": "2099-01-01T00:00:00+00:00"}
         save = Mock()
@@ -254,6 +257,13 @@ class HostMergeTest(ReleaseFixture):
             github.assert_any_call(["api", f"repos/{REPO}/compare/main...{HEAD}"])
             release._gh.assert_not_called()
         return result, con, finish
+
+    def test_deployment_pr_lookup_qualifies_staging_by_repository_owner(self):
+        owner = REPO.split("/", 1)[0]
+        with patch.object(release, "gh_json", return_value=[{"url": PR_URL}]) as github:
+            self.assertEqual(deploy._open_pr(REPO, "main", "staging", "title", "body"), PR_URL)
+            github.assert_called_once_with(["api", f"repos/{REPO}/pulls?state=open&base=main&head={owner}%3Astaging",
+                                           "--jq", "map({url: .html_url})"])
 
     def test_dashboard_waits_if_github_has_not_listed_test_jobs(self):
         self.runs.clear()
@@ -291,6 +301,10 @@ class HostMergeTest(ReleaseFixture):
         with self.assertRaisesRegex(RuntimeError, "base가 other"):
             self.dashboard_merge(state="MERGED", baseRefName="other", mergeCommit={"oid": MERGED})
 
+    def test_dashboard_rejects_a_fork_even_if_already_merged(self):
+        with self.assertRaisesRegex(ValueError, "same-repository"):
+            self.dashboard_merge(state="MERGED", isCrossRepository=True, mergeCommit={"oid": MERGED})
+
     def test_host_only_recovers_a_timeout_for_a_confirmed_pr_merge(self):
         for confirmed in (False, True):
             def lose_response(command, **kwargs):
@@ -316,9 +330,14 @@ class HostMergeTest(ReleaseFixture):
             with self.assertRaisesRegex(ValueError, "no longer the same-repository"):
                 merge_deployment_pr(REPO, 54, base="main", method="merge")
 
-    def test_host_rejects_api_success_for_an_unexpected_merge_tree(self):
+    def test_host_rejects_api_success_when_main_advances_and_alters_the_merge_tree(self):
+        def merge_after_main_advances(*args, **kwargs):
+            result = self.github_merge(*args, **kwargs)
+            self.responses["pulls/54"]["base"] = dict(self.pr["base"], sha=ADVANCED)
+            return result
+
         self.merged["tree"]["sha"] = ADVANCED
-        with patch("ticket_pilot.core.run", side_effect=self.github_merge):
+        with patch("ticket_pilot.core.run", side_effect=merge_after_main_advances):
             with self.assertRaisesRegex(ValueError, "did not test the merged contents"):
                 self.dashboard_merge()
             self.responses["pulls/54"] = self.open_pr
@@ -327,7 +346,7 @@ class HostMergeTest(ReleaseFixture):
         self.assertIn("did not test the merged contents", finish.call_args.args[-1])
         self.assertFalse(any("status='deploying'" in call.args[0] for call in con.execute.call_args_list))
 
-    def test_host_paths_wait_if_main_advances_after_validation(self):
+    def test_host_paths_wait_if_github_declines_to_merge_after_main_advances(self):
         def advance_main(command, **kwargs):
             self.responses["pulls/54"] = dict(self.open_pr, base=dict(self.pr["base"], sha=ADVANCED),
                                               merge_commit_sha=MERGED)

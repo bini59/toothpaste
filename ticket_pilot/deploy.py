@@ -31,9 +31,9 @@ from pathlib import Path
 from . import milestone as M
 from .core import db, event, gh_json, now, repo_rules, run
 from .pipeline import latest_run, restage, run_pr, slug
-from .release import (_execution_for, _finish, _gh, _today, deploy_timeout_min, expire_stale_train,
+from .release import (_execution_for, _finish, _gh, _open_pr, _today, deploy_timeout_min, expire_stale_train,
                       request_approval, staged_by_repo, staging_branch, verify_deploy)
-from .release_checks import AwaitingTests, merge_deployment_pr
+from .release_checks import AwaitingTests, PUBLIC_REPOSITORY, merge_deployment_pr
 
 MODES = {
     "staging": "티켓 → staging",
@@ -407,13 +407,16 @@ def _ready_for_merge(con, rel, url, info, *, source_base=None):
 
 def _merge(con, rel, rr, st, log) -> str:
     url, into = st["pr"], st["into"]
-    fields = "state,isDraft,mergeable,statusCheckRollup,mergeCommit,baseRefName,number"
+    fields = "state,isDraft,mergeable,statusCheckRollup,mergeCommit,baseRefName,number,headRefName,isCrossRepository"
     deadline = datetime.fromisoformat(st["since"]) + timedelta(minutes=deploy_timeout_min())
     t0 = time.time()
     while True:
         info = gh_json(["pr", "view", url, "--json", fields])
         if info["baseRefName"] != into:
             raise RuntimeError(f"PR #{info['number']} base가 {info['baseRefName']}로 바뀌었어요 ({into}여야 해요)")
+        if ((rel["github"], into) == (PUBLIC_REPOSITORY, "main")
+                and (info["headRefName"] != "staging" or info["isCrossRepository"])):
+            raise ValueError(f"PR #{info['number']} is not the same-repository staging -> main PR.")
         if info["state"] == "MERGED":
             sha = info["mergeCommit"]["oid"]
             break
@@ -575,13 +578,6 @@ def _release_branch(repo_path, gh, base, name, picks=(), merge_ref=None, bump=Fa
         return name, new, old
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-
-
-def _open_pr(gh, base, head, title, body) -> str:
-    existing = gh_json(["pr", "list", "--repo", gh, "--base", base, "--head", head, "--state", "open", "--json", "url"])
-    if existing:
-        return existing[0]["url"]
-    return _gh(["pr", "create", "--repo", gh, "--base", base, "--head", head, "--title", title[:200], "--body", body]).stdout.strip().splitlines()[-1]
 
 
 def _title(rr, version, what) -> str:
