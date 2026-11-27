@@ -481,12 +481,31 @@ folder>` exports HEAD for the public repository (`git archive`; `.gitattributes`
 
 ### Versions and `tp update` (`ticket_pilot/update.py`, TP-140)
 
-A version is a git tag `vX.Y.Z` with a GitHub Release; no version file is committed (`web/package.json`'s `version`
-is unused). After each push to `main` whose `test` run passed, `.github/workflows/release.yml` (GitHub's runner) builds
-`web/dist` and tags the commit; in the private repository the `release` job of `deploy.yml` does it after the deploy. Bumped
-from the last `v*` tag by the merged PR's label: none = patch, **`minor`** = minor, **`major`** = major (a direct push
-= patch; first tag `v0.4.0`; release.yml's workflow_dispatch can set the version, e.g. `v0.5.0`). A commit that already
-has a tag is skipped, and a failed release job leaves the deploy green. Put the label on the PR before merging it.
+A version is a git tag `vX.Y.Z` with a GitHub Release (`web/package.json`'s `version` is unused). The full Actions suite
+(OSS, Linux and macOS unit and web checks, Docker, and mode switching) runs when a same-repository `staging → main` PR
+opens, reopens, receives a new commit, or is retargeted to `main`. Title and description edits leave the test run alone.
+`deployment-tests-passed` requires every job in the suite to pass on deployment PRs. On other PRs targeting `main`,
+GitHub accepts the skipped `deployment-tests-passed` job as satisfying the required check. The lightweight
+architecture map check runs on all PRs, including milestone subtasks.
+
+Keep the first deployment PR in draft until protection is set up. Once `deployment-tests-passed` succeeds, add a branch
+protection rule for `main` in GitHub **Settings → Branches**. Require a pull request and `deployment-tests-passed` from
+**GitHub Actions**. Use loose status checks so `staging` can keep its own history between releases. Enable **Do not
+allow bypassing the above settings**, leave the bypass list empty, and allow merge commits. The dashboard and release
+train wait for this protection and a test of the current merge candidate, then call the GitHub PR merge API with the
+tested `staging` SHA. GitHub checks that the PR can still merge and applies the protection to its current base. The host
+confirms the PR merged into `main` and that the actual commit has the tested file tree. Keep the PR target unchanged
+while a deployment is in progress because the merge API pins only the head.
+
+When GitHub marks the PR merged, `.github/workflows/release.yml` independently verifies that the latest `test` run for
+that PR's final head passed before the merge and that its tested file tree matches the commit on `main`.
+It uses the actual `main` merge commit to tag, publish the GitHub Release and its `web-dist.tar.gz` asset, and publish
+the Docker image. A `main` push alone triggers neither the full tests nor an automatic release. If `main` changes the
+deployment PR's merge candidate, update `staging` to produce a new test result. To publish other `main` changes manually,
+select `main` in the release workflow's **Run workflow** menu and optionally enter a version.
+
+The private repository's `deploy.yml` release job tags after its deploy. Put a `minor` or `major` label on the PR
+before merging for that version bump. The default is a patch bump, and a commit that already has a version tag is skipped.
 
 To update another Mac's checkout (on `main`, no modified tracked files): `bin/tp update` (or `--to <tag|sha>`). It
 fetches the tags, fast-forwards to the latest release tag and, when `web/` changed, replaces `web/dist` with the

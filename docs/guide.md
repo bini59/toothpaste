@@ -331,6 +331,24 @@ staging 열차 레포와 `pr_into_staging` 레포는 티켓 브랜치를 staging
 확인합니다. 무엇으로 확인할지는 레포 설정 → 배포의 **반영 확인**에서 골라요: CodePipeline, GitHub Actions workflow, 또는
 **최신 GitHub Release에 포함**(`prod.release: true`, 릴리즈를 받아 업데이트하는 toothpaste 자신처럼). 완료된 티켓의 worktree와 로컬 브랜치는 자동으로 지워집니다(원격 브랜치와 PR은 남음).
 
+**공개 toothpaste 릴리스**는 같은 저장소의 `staging → main` PR을 열거나 다시 열 때, 새 커밋을 올릴 때, 또는 PR 대상을 `main`으로
+바꿀 때 전체 테스트를 실행합니다. 배포 PR에서 `deployment-tests-passed`는 전체 작업이 성공해야 통과합니다. 그 외 `main` 대상 PR에서는
+이 작업을 건너뛰며 GitHub는 이를 필수 검사 충족으로 처리합니다. 제목이나 본문만 편집하면 기존 테스트가 계속됩니다.
+일반 PR과 마일스톤 하위 PR에도 가벼운 코드 지도 검사가 실행됩니다.
+
+첫 배포 PR은 보호 규칙을 설정할 때까지 초안으로 유지합니다. `deployment-tests-passed`가 통과하면 GitHub **Settings → Branches**에서
+`main`에 브랜치 보호 규칙을 추가합니다.
+PR을 통한 머지와 **GitHub Actions**의 `deployment-tests-passed`를 필수로 설정하고 관리자 우회 금지를 켜세요. 우회 허용 목록은
+비워 두고 배포 PR에는 머지 커밋 방식을 사용합니다. 배포할 때마다 `staging`을 갱신할 필요가 없도록 최신 브랜치 조건은 끕니다.
+배포 화면과 열차는 보호 규칙과 현재 머지 후보의 테스트를 확인하고 검사한 `staging` SHA를 지정해 GitHub PR 머지 API를 호출합니다.
+이 API는 head만 고정하므로 배포가 진행되는 동안 PR 대상을 유지하세요. 머지 후 `main` 대상과 실제 파일 트리를 다시 확인합니다.
+
+머지 이벤트를 받으면 같은 PR의 최종 커밋에서 전체 테스트가 머지 전에 성공했고, 테스트한 파일 트리가 머지 결과와 일치하는지
+확인합니다. 확인을 통과하면 실제 `main` 머지 커밋으로 태그, GitHub Release, 웹 빌드와 Docker 이미지를 발행합니다.
+`main` push 자체로는 전체 테스트나 자동 릴리스가 실행되지 않습니다.
+`main`이 바뀌어 배포 PR의 머지 결과가 달라지면 `staging`을 갱신해 새 테스트 결과를 받으세요. 다른 `main` 변경을
+수동으로 발행하려면 GitHub Actions의 **release → Run workflow**에서 `main`을 선택하세요. 버전은 선택 입력입니다.
+
 ## agent · 에이전트 규칙
 에이전트(티켓, 채팅)가 해도 되는 것과 안 되는 것.
 
