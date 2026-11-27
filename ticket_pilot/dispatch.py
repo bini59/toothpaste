@@ -1,8 +1,8 @@
 """Select queued work and start or resume its agent."""
 from __future__ import annotations
 
-import fcntl
 from http.client import HTTPException
+from itertools import count
 from pathlib import Path
 from subprocess import TimeoutExpired
 
@@ -11,7 +11,7 @@ from . import notion, notion_tickets, review
 from . import runner as R
 from .briefs import render_agent_brief, slug
 from .core import (
-    ROOT, GitHubNotConnected, asana_comments, db, event, gh_json,
+    ROOT, GitHubNotConnected, asana_comments, db, dispatch_lock, event, gh_json,
     github_token, meta_get, meta_set, repo_rules, repos_for_project, settings,
 )
 from .pr_tracking import latest_run, repo_paths
@@ -123,13 +123,39 @@ def dispatch(dry_run=False, log=print, only: str | None = None) -> list[str]:
     """Run a dispatch pass and return the ticket keys it handled."""
     con = db()
     # Serialize manual and scheduled dispatch from slot selection through run registration.
-    # Take a separate lock so sync can still update tickets during worktree and page reads.
-    db_path = con.execute("PRAGMA database_list").fetchone()[2]
-    if dry_run or not db_path:
+    if dry_run:
         return _dispatch(con, dry_run, log, only)
-    with Path(db_path + ".dispatch.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with dispatch_lock(con):
         return _dispatch(con, dry_run, log, only)
+
+
+def _worktree_for(con, t, repo, name, base, existing):
+    """Return the worktree name, checkout (if any), and whether to retry its start."""
+    retry_prefix = f"{name}--retry-"
+    matches = {n: w for w in existing if w["repo"] == repo["repo"]
+               and ((n := Path(w["path"]).name) == name or n.startswith(retry_prefix))}
+    reservations = {n: meta_get(con, f"dispatch_pending:{w['path']}") for n, w in matches.items()}
+    for n, pending in reservations.items():
+        if (pending and pending["ticket_gid"] == t["gid"] and pending["base"] == base
+                and pending.get("repo", repo["repo"]) == repo["repo"]
+                and pending["branch"] == matches[n]["branch"]):
+            return n, matches[n], True
+    clash = matches.get(name)
+    if not clash:
+        return name, None, False
+    pending = reservations[name]
+    if not pending:
+        return name, clash, False  # adopt the existing worktree as usual
+    if (pending["ticket_gid"] != t["gid"] and pending["branch"] == clash["branch"]
+            and pending.get("repo", repo["repo"]) == repo["repo"]):
+        owner = con.execute("SELECT * FROM tickets WHERE gid=?", (pending["ticket_gid"],)).fetchone()
+        if owner and not owner["skip"] and (owner_repo := chosen_repo(con, owner)) and owner_repo["repo"] == repo["repo"]:
+            owner_base = M.base_for(owner, repo["repo"]) or R.worktree_base(repo["repo"])
+            if pending["base"] == owner_base:
+                raise RuntimeError("다른 작업이 이 워크트리에서 시작을 재시도할 예정이에요")
+    # Keep the previous checkout and its local work. A later retry can reuse the new reservation.
+    replacement = next(n for i in count(1) if (n := f"{retry_prefix}{i}") not in matches)
+    return replacement, None, False
 
 
 def _dispatch(con, dry_run, log, only):
@@ -220,28 +246,23 @@ def _dispatch(con, dry_run, log, only):
             continue
         if existing is None:
             existing = R.worktrees(repo_paths(con))
-        clash = next((w for w in existing if w["repo"] == repo["repo"] and w["path"].rstrip("/").endswith("/" + name)), None)
-        pending = meta_get(con, f"dispatch_pending:{clash['path']}") if clash else None
-        retry = pending and pending["ticket_gid"] == t["gid"]
-        adopt = clash and not retry
         wt = None
         try:
+            worktree_name, clash, retry = _worktree_for(con, t, repo, name, base, existing)
+            adopt = clash and not retry
             guard(lock=bool(clash))
             if clash and con.execute("SELECT 1 FROM runs WHERE state='active' AND removed_at IS NULL AND worktree_path=?",
                                      (clash["path"],)).fetchone():
                 raise RuntimeError("다른 작업이 이미 이 워크트리를 사용 중이에요")
-            if pending and not retry:
-                raise RuntimeError("다른 작업이 이 워크트리에서 시작을 재시도할 예정이에요")
             if not adopt:
                 if retry:
-                    if (pending["base"], pending["branch"]) != (base, clash["branch"]):
-                        raise RuntimeError("시작에 실패한 워크트리의 기준 브랜치 또는 작업 브랜치가 바뀌었어요")
                     wt = clash
                 else:
                     if (pr_base or "").startswith(M.PREFIX):
                         M.ensure(con, t, repo["repo"])  # created on the first subtask
                         con.commit()  # release milestone.ensure's writes before the remote fetch
-                    wt = R.create(repo["repo"], repo["path"], name, base, before_add=guard)
+                    wt = R.create(repo["repo"], repo["path"], worktree_name, base, before_add=guard)
+                    existing.append(wt)
                 (ROOT / "data" / "briefs").mkdir(parents=True, exist_ok=True)
                 (ROOT / "data" / "briefs" / f"{name}.md").write_text(brief)
                 setup, prep = prepare_worktree(repo["repo"], repo["path"], wt["path"])
@@ -257,7 +278,7 @@ def _dispatch(con, dry_run, log, only):
             if wt:
                 # Keep a worktree created by dispatch eligible for launch on the next attempt.
                 meta_set(con, f"dispatch_pending:{wt['path']}", {
-                    "ticket_gid": t["gid"], "branch": wt["branch"], "base": base,
+                    "ticket_gid": t["gid"], "repo": repo["repo"], "branch": wt["branch"], "base": base,
                 })
             event(con, "error", f"{t['key']}: worktree {'start' if wt else 'create'} failed: {e}", t["gid"])
             con.commit()
@@ -270,12 +291,12 @@ def _dispatch(con, dry_run, log, only):
             _insert_run(con, t, repo, wt | {"workspaceStatus": "in-progress", "comment": f"{t['key']} {t['name']}"[:120]},
                         handle, "dispatch")
             con.execute("DELETE FROM meta WHERE k=?", (f"dispatch_pending:{wt['path']}",))
-            event(con, "dispatch", f"{t['key']} -> {repo['repo']}/{name} ({description}, "
+            event(con, "dispatch", f"{t['key']} -> {repo['repo']}/{worktree_name} ({description}, "
                                    f"{wt['branch']}{'; ' + prep if prep else ''})", t["gid"])
         restage(con, ticket_gid=t["gid"])
         con.commit()
         if not adopt:
-            log(f"dispatched {t['key']} -> {repo['repo']}/{name} agent={handle}")
+            log(f"dispatched {t['key']} -> {repo['repo']}/{worktree_name} agent={handle}")
         done.append(t["key"])
         slots -= 1
     if not dry_run:

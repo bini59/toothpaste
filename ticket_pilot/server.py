@@ -33,7 +33,7 @@ from . import lan as L
 from . import metrics as MET
 from . import milestone as MS
 from . import notifications as N
-from . import notion, notion_tickets, ticket_sync
+from . import notion, notion_tickets
 from . import onboard as OB
 from . import pipeline as P
 from . import release as R
@@ -1069,7 +1069,7 @@ class H(BaseHTTPRequestHandler):
                 if not _sync_lock.acquire(blocking=False):
                     return self._send(409, {"error": "already running"})
                 try:
-                    ticket_sync.sync(log=lambda *_: None)
+                    P.sync(log=lambda *_: None)
                     P.scan(log=lambda *_: None)
                 finally:
                     _sync_lock.release()

@@ -753,6 +753,18 @@ def meta_get(con, k: str, default=None):
     return json.loads(r["v"]) if r else default
 
 
+@contextmanager
+def dispatch_lock(con):
+    """Serialize dispatch and cleanup of failed starts without blocking ticket sync."""
+    db_path = con.execute("PRAGMA database_list").fetchone()[2]
+    if not db_path:
+        yield
+        return
+    with Path(db_path + ".dispatch.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
 def load_map(con, m: dict | None = None):
     """Copy the repo map into the repos / project_map tables (derived copies the queries join on)."""
     m = m or project_map()

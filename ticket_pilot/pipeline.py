@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 
 from .core import (
-    ROOT, db, event,
+    ROOT, db, dispatch_lock, event,
     meta_get, meta_set, now, project_map, repo_rules, repos_for_project, run, settings,
     feature_base,
 )
@@ -234,18 +234,20 @@ def _insert_run(con, t, repo, wt: dict, handle, origin, raw=None):
 
 def adopt(ticket_ref: str, worktree_ref: str, repo_name: str | None = None):
     con = db()
-    t = find_ticket(con, ticket_ref)
-    ref = os.path.realpath(worktree_ref) if os.path.exists(worktree_ref) else worktree_ref
-    wt = next((w for w in R.worktrees(repo_paths(con)) if w["path"] == ref or w["displayName"] == worktree_ref), None)
-    if not wt:
-        raise SystemExit(f"worktree not found: {worktree_ref}")
-    r = con.execute("SELECT * FROM repos WHERE name=?", (repo_name or wt["repo"],)).fetchone()
-    if not r:
-        raise SystemExit("worktree repo is not in the repo settings (tp config get repo)")
-    _insert_run(con, t, dict(r) | {"repo": r["name"]}, wt, None, "adopt")
-    event(con, "adopt", f"{t['key']}: adopted worktree {wt.get('displayName')}", t["gid"])
-    restage(con)
-    con.commit()
+    with dispatch_lock(con):
+        t = find_ticket(con, ticket_ref)
+        ref = os.path.realpath(worktree_ref) if os.path.exists(worktree_ref) else worktree_ref
+        wt = next((w for w in R.worktrees(repo_paths(con)) if w["path"] == ref or w["displayName"] == worktree_ref), None)
+        if not wt:
+            raise SystemExit(f"worktree not found: {worktree_ref}")
+        r = con.execute("SELECT * FROM repos WHERE name=?", (repo_name or wt["repo"],)).fetchone()
+        if not r:
+            raise SystemExit("worktree repo is not in the repo settings (tp config get repo)")
+        _insert_run(con, t, dict(r) | {"repo": r["name"]}, wt, None, "adopt")
+        con.execute("DELETE FROM meta WHERE k=?", (f"dispatch_pending:{wt['path']}",))
+        event(con, "adopt", f"{t['key']}: adopted worktree {wt.get('displayName')}", t["gid"])
+        restage(con)
+        con.commit()
     print(f"adopted {t['key']} -> {r['name']}/{wt.get('displayName')}")
 
 

@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from ticket_pilot import core, dispatch as D, milestone, pipeline as P, runner
+from ticket_pilot import cleanup, core, dispatch as D, milestone, pipeline as P, runner
 
 
 class DispatchTest(unittest.TestCase):
@@ -102,6 +102,47 @@ class DispatchTest(unittest.TestCase):
         self.assertEqual([tuple(r) for r in self.con.execute("SELECT origin, terminal FROM runs")], [("dispatch", "fixture")])
         self.assertIsNone(core.meta_get(self.con, f"dispatch_pending:{self.existing[0]['path']}"))
 
+    def test_start_failure_recovers_when_the_staging_base_changes(self):
+        self.ticket("APP-9", gid="gh:owner/app#9")
+        self.launch.side_effect = [OSError("start failed"), OSError("start failed again"), "fixture"]
+        self.assertEqual(self.run_dispatch(), [])
+        core.write_config(self.con, {"settings": {"max_active_runs": 1, "deploy": {"repos": {
+            "app": {"train": True, "modes": ["staging"], "staging": {"branch": "next"}, "prod": {"branch": "main"}},
+        }}}, "project_map": {}})
+
+        self.assertEqual(self.run_dispatch(), [])
+        self.assertEqual(self.run_dispatch(), ["APP-9"])
+        self.assertEqual(self.run_dispatch(), [])
+        self.assertEqual([c.args[3] for c in self.create.call_args_list], ["dev", "next"])
+        old, new = self.existing
+        self.assertNotEqual(old["path"], new["path"])
+        self.assertEqual([c.args[0] for c in self.launch.call_args_list], [old["path"], new["path"], new["path"]])
+        self.assertIn("--base next", self.launch.call_args.args[1])
+        self.assertEqual(P.latest_run(self.con, "gh:owner/app#9")["worktree_path"], new["path"])
+        self.assertIsNone(core.meta_get(self.con, f"dispatch_pending:{new['path']}"))
+
+    def test_start_failure_recovers_when_the_milestone_changes(self):
+        gid = "gh:owner/app#9"
+        self.ticket("APP-9", gid=gid, parent="gh:owner/other#7")
+        self.launch.side_effect = [OSError("start failed"), "fixture"]
+        with mock.patch.object(milestone, "ensure"):
+            self.assertEqual(self.run_dispatch(), [])
+            self.con.execute("UPDATE tickets SET parent_gid='gh:owner/other#8' WHERE gid=?", (gid,))
+            self.con.commit()
+            self.assertEqual(self.run_dispatch(), ["APP-9"])
+        self.assertEqual([c.args[3] for c in self.create.call_args_list],
+                         [milestone.branch("gh:owner/other#7"), milestone.branch("gh:owner/other#8")])
+        self.assertNotEqual(*[c.args[0] for c in self.launch.call_args_list])
+
+    def test_start_failure_recovers_when_the_checkout_branch_changes(self):
+        self.ticket("A")
+        self.launch.side_effect = [OSError("start failed"), "fixture"]
+        self.assertEqual(self.run_dispatch(), [])
+        self.existing[0]["branch"] = "manual-branch"
+        self.assertEqual(self.run_dispatch(), ["A"])
+        self.assertEqual(self.create.call_count, 2)
+        self.assertNotEqual(*[c.args[0] for c in self.launch.call_args_list])
+
     def test_ticket_closed_during_fetch_does_not_start(self):
         self.ticket("APP-9", gid="gh:owner/app#9")
 
@@ -169,3 +210,47 @@ class DispatchTest(unittest.TestCase):
         self.assertEqual(self.run_dispatch(only="A-B"), ["A-B"])
         self.create.assert_called_once()
         self.assertEqual(self.launch.call_count, 2)
+
+    def test_cleanup_releases_a_skipped_reservation_after_the_server_stops(self):
+        self.ticket("A-B")
+        self.ticket("A B")
+        self.launch.side_effect = [OSError("start failed"), "fixture"]
+        self.assertEqual(self.run_dispatch(only="A-B"), [])
+        path = self.existing[0]["path"]
+        # The original reservation format did not record the repo.
+        core.meta_set(self.con, f"dispatch_pending:{path}", {"ticket_gid": "A-B", "branch": "tp/a-b", "base": "dev"})
+        P.set_skip("A-B", True)
+        with mock.patch.object(runner, "root", return_value=self.root), \
+                mock.patch.object(cleanup, "_ps_entries", return_value={}), \
+                mock.patch.object(cleanup, "_listening_in", return_value=["test server"]) as listeners, \
+                mock.patch.object(cleanup, "docker_prune"), \
+                mock.patch.object(cleanup, "remove", return_value="removed") as remove:
+            scan = lambda: cleanup.cleanup_scan(log=lambda *_: None)
+            self.assertEqual(scan()["kept"], 1)
+            self.assertIsNotNone(core.meta_get(self.con, f"dispatch_pending:{path}"))
+            remove.assert_not_called()
+
+            listeners.return_value = []
+            self.assertEqual(scan()["removed"], 1)
+            remove.assert_called_once_with(self.con, path, str(self.root), "tp/a-b", force=True)
+            self.existing.clear()  # cleanup removed the checkout
+            self.assertEqual(scan()["removed"], 0)
+
+        self.assertIsNone(core.meta_get(self.con, f"dispatch_pending:{path}"))
+        self.assertIsNone(P.latest_run(self.con, "A-B"))
+        self.assertEqual(self.run_dispatch(only="A B"), ["A B"])
+        self.assertEqual(self.launch.call_args.args[0], path)
+
+    def test_skipped_reservation_with_a_different_checkout_branch_is_left_alone(self):
+        self.ticket("A-B")
+        self.ticket("A B")
+        self.launch.side_effect = [OSError("start failed"), "fixture"]
+        self.assertEqual(self.run_dispatch(only="A-B"), [])
+        self.existing[0]["branch"] = "manual-branch"
+        P.set_skip("A-B", True)
+        with mock.patch.object(cleanup, "_ps_entries", return_value={}), \
+                mock.patch.object(cleanup, "docker_prune"), mock.patch.object(cleanup, "remove") as remove:
+            self.assertEqual(cleanup.cleanup_scan(log=lambda *_: None)["removed"], 0)
+            remove.assert_not_called()
+        self.assertEqual(self.run_dispatch(only="A B"), ["A B"])
+        self.assertNotEqual(*[c.args[0] for c in self.launch.call_args_list])
