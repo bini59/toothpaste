@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { FolderGit2, LayoutDashboard, List, MessageSquare, Milestone, Plus, Settings as SettingsIcon, Star } from "lucide-react";
 import { Badge, Button, Card, cn } from "../ui";
+import { SECTIONS, parseProjectSub, projectHref, type ProjectSection } from "../app/navigation";
 import { ago, type Index } from "../lib";
 import type { Project, State } from "../types";
 import { Board, type BoardActions } from "./Board";
@@ -10,19 +11,7 @@ import { ProjectChat } from "./ProjectChat";
 import { ProjectSettings, RepoSettings, SOURCE_LABEL } from "./Settings";
 import { Tickets } from "./Tickets";
 
-/** #projects/<project id>/<chat|board|milestones|tickets|settings>/<conversation id | repo (settings)>/<section of the repo's settings>: one project's chat
- * with an agent, its ticket board, its milestones, all its tickets (완료 포함) and its settings (TP-91: a project has 1..N repos) */
-export const SECTIONS = { chat: "채팅", board: "보드", milestones: "마일스톤", tickets: "전체 티켓", settings: "설정" } as const;
-type Section = keyof typeof SECTIONS;
-export const parseProjectSub = (sub: string) => {
-  const [id = "", section = "", conv = "", part = ""] = sub.split("/");
-  return { id, section: Object.hasOwn(SECTIONS, section) ? (section as Section) : ("chat" as const), conv, part };
-};
-export const projectHref = (id: string, section: Section = "chat", conv = "", part = "") =>
-  `#projects/${encodeURIComponent(id)}/${section}${conv ? `/${encodeURIComponent(conv)}${part ? `/${part}` : ""}` : ""}`;
-/** before TP-91 the address held a repo name: the project with that repo (a real one before 미분류) */
-export const projectOfRepo = (list: Project[], repo: string) =>
-  [...list].sort((a, b) => +a.unsorted - +b.unsorted).find((p) => p.repos.some((r) => r.name === repo));
+export { SECTIONS, parseProjectSub, projectHref, projectOfRepo } from "../app/navigation";
 
 function Meta({ p }: { p: Project }) {
   return (
@@ -61,13 +50,7 @@ export function Projects({ s, I, sub, onChanged, actions, list, error, onReload:
   const [adding, setAdding] = useState<"" | "project" | "repo">("");
   useEffect(() => setAdding(""), [id, section]); // leaving through a project link closes the forms
   const cur = list?.find((p) => p.id === id);
-  const old = list && id && !cur ? projectOfRepo(list, id) : undefined;
-  useEffect(() => {
-    // an old #projects/<repo>/... address (bookmark, the 레포 추가 wizard): same page of that repo's project
-    if (old) location.replace(projectHref(old.id, section, section === "settings" ? id : conv));
-  }, [old, id, section, conv]);
   if (!list) return <p className="text-sm text-text-muted">{error ? `프로젝트를 불러오지 못했어요: ${error}` : "불러오는 중…"}</p>;
-  if (old) return null;
 
   // 프로젝트 추가 wizard (TP-93): a new project, or only its 레포 step for an existing project / 미분류
   const saved = async (pid: string) => { await load(); setAdding(""); onChanged(); location.hash = projectHref(pid, "settings"); };
@@ -121,7 +104,7 @@ export function Projects({ s, I, sub, onChanged, actions, list, error, onReload:
     );
   }
 
-  const tab = (k: Section, Icon: typeof MessageSquare) => (
+  const tab = (k: ProjectSection, Icon: typeof MessageSquare) => (
     <a href={projectHref(cur.id, k)} aria-current={section === k ? "page" : undefined}
       className={cn("-mb-px inline-flex items-center gap-1.5 border-b-2 px-3 pb-2 text-sm transition-colors",
         section === k ? "border-primary font-semibold text-primary-700" : "border-transparent text-text-muted hover:text-text-main")}>

@@ -1,8 +1,8 @@
 import type { AutomationsResponse, ConfigChange, ConfigState, DevCheck, DevConflict, DevServer, State, SystemJobLog, SystemJobsResponse } from "./types";
 
-export async function fetchState(): Promise<State> {
-  const r = await fetch("/api/state");
-  if (r.status === 401) location.reload(); // 로컬망 공유 session ended (TP-152): back to the login screen
+export async function fetchState(signal?: AbortSignal): Promise<State> {
+  const r = await fetch("/api/state", { signal });
+  if (r.status === 401 && !signal?.aborted) location.reload(); // 로컬망 공유 session ended (TP-152): back to the login screen
   if (!r.ok) throw new Error(`state ${r.status}`);
   return r.json();
 }

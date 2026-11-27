@@ -23,7 +23,7 @@ export function Inbox({ onChanged }: { onChanged: () => void }) {
   const [alerts, setAlerts] = useState<InboxNotification[]>([]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  // browser notifications (TP-134, App's notifyNew); undefined: this browser has none
+  // Browser notification permission (TP-134). The app checks for new alerts across all screens.
   const [perm, setPerm] = useState(() => (typeof Notification === "undefined" ? undefined : Notification.permission));
   const load = useCallback(() => getJson<{ items: InboxItem[]; notifications: InboxNotification[] }>("/api/chat/inbox")
     .then((r) => { setItems(r.items); setAlerts(r.notifications); setError(""); }).catch((e) => setError(String(e))), []);

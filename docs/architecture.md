@@ -6,7 +6,7 @@
 
 - **CLI** — [bin/tp](../bin/tp)와 `python3 -m ticket_pilot.cli`는 [cli.py](../ticket_pilot/cli.py)의 `main()`으로 들어간다. 여기서 argparse 명령을 등록하고 인자를 넘기며, `tp precheck-*`의 결과를 종료 코드와 출력으로 변환한다.
 - **대시보드 서버** — `tp serve`와 Docker의 `tp run`은 [server.py](../ticket_pilot/server.py)의 `serve()`를 호출한다. `tp run`은 [tick.py](../ticket_pilot/tick.py)의 `run_loop()`로 매분 tick 프로세스를 시작한다. HTTP 핸들러의 `do_GET()`과 `do_POST()`가 API를 처리하고, 서버는 빌드된 React 앱을 `web/dist`에서 제공한다.
-- **대시보드 화면** — [index.html](../web/index.html)에서 [main.tsx](../web/src/main.tsx)로 진입한다. [App.tsx](../web/src/App.tsx)가 주소의 해시로 화면을 선택하고, [api.ts](../web/src/api.ts)와 [types.ts](../web/src/types.ts)가 API 호출과 응답 타입을 공유한다.
+- **대시보드 화면** — [index.html](../web/index.html)에서 [main.tsx](../web/src/main.tsx)로 진입해 로그인과 Notion 콜백을 처리한다. [App.tsx](../web/src/App.tsx)는 [탐색 훅](../web/src/app/useNavigation.ts)이 해석한 탭과 하위 경로로 화면을 렌더링하고 [공통 데이터 훅](../web/src/app/useDashboardData.ts)의 응답을 각 화면에 전달한다. [api.ts](../web/src/api.ts)와 [types.ts](../web/src/types.ts)가 API 호출과 응답 타입을 공유한다.
 - **공용 저장소** — [core.py](../ticket_pilot/core.py)의 `db()`가 SQLite 연결과 스키마 초기화·마이그레이션을 담당한다.
 
 ## 자동화 tick과 사전 점검
@@ -57,7 +57,8 @@
 
 ## 대시보드 탐색과 모니터링
 
-- [App.tsx](../web/src/App.tsx)의 `TABS`가 해시 주소, 검색 항목, 모니터링 목록을 정의한다. [Sidebar.tsx](../web/src/ui/Sidebar.tsx)는 데스크톱 메뉴와 모바일 메뉴에 모니터링 링크를 표시하고, [UsageCard.tsx](../web/src/components/UsageCard.tsx)는 하단에 에이전트 사용량과 한도 초기화 시각을 표시한다.
+- [navigation.ts](../web/src/app/navigation.ts)가 탭·검색·모니터링 목록과 프로젝트 하위 탭 주소를 정의한다. 기존 채팅 압축, 저장소 이름 기반 프로젝트, 설정 이력 링크도 여기서 해석한다. [useNavigation.ts](../web/src/app/useNavigation.ts)는 해시 변경과 스크롤 위치, `POST /api/view`, Cmd/Ctrl+K를 처리한다. [Sidebar.tsx](../web/src/ui/Sidebar.tsx)는 데스크톱 메뉴와 모바일 메뉴에 모니터링 링크를 표시한다.
+- [useDashboardData.ts](../web/src/app/useDashboardData.ts)는 `GET /api/state`를 60초마다(작업실은 15초) 읽고 `POST /api/refresh` 뒤 다시 조회한다. `GET /api/projects`와 읽지 않은 브라우저 알림은 15초마다 확인하고, [UsageCard.tsx](../web/src/components/UsageCard.tsx)의 사용량은 60초마다 또는 창에 포커스가 돌아올 때 갱신한다. [usePolling.ts](../web/src/app/usePolling.ts)는 조회에 30초 제한을 두고 갱신 타이머와 진행 중인 요청을 정리한다.
 - `#monitoring`의 [Monitoring.tsx](../web/src/views/Monitoring.tsx)에서 각 상세 화면의 기존 해시 주소로 이동한다. [useMonitoringData.ts](../web/src/views/useMonitoringData.ts)는 자동화 로그와 리뷰 화면에서 사용하는 `GET /api/events`와 `GET /api/reviews` 응답을 개별적으로 불러온다.
 - `npm run check`는 [monitoring.check.mjs](../web/src/monitoring.check.mjs)의 탐색 검사와 [usage-card.check.mjs](../web/src/components/usage-card.check.mjs)의 한도 초기화 시각 검사를 실행한다.
 

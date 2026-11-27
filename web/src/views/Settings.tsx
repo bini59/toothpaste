@@ -1178,8 +1178,6 @@ function GlobalEditor({ c, section, onReload }: { c: ConfigState; section: strin
     getJson<AgentAccounts>("/api/agents/accounts").then((x) => { setAccounts(x); setAccErr(""); }, (e) => setAccErr(String(e)));
   }, []);
   useEffect(() => loadAccounts(), [loadAccounts]);
-  // 이력 moved to 모니터링 > 설정 이력 (TP-168)
-  useEffect(() => { if (section === "history") location.replace("#history"); }, [section]);
   const role = (r: Role, title: string, desc: React.ReactNode, children: React.ReactNode) => (
     <Section title={title} desc={desc}>
       <AgentFields key={r + (d.agents?.[r]?.tool || d.agent)} a={d.agents?.[r] || {}} c={c} accounts={accounts} inherit={{ label: "기본 도구", tool: d.agent }}
