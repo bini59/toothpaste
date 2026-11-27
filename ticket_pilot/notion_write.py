@@ -181,16 +181,20 @@ class ProjectPages:
             raise notion.NotionError(f"마일스톤 DB에 '{task_col['name']}' 열이나 하나의 상태 열이 필요해요")
         return matches[0], option["name"]
 
-    def status_change(self, page, value, *, by_id=False):
+    def status_target(self, value, *, by_id=False):
         if self.source == self.cfg["data_source_id"]:
             col = self.column("status")
         else:
             col, value = self._milestone_status(value)
             by_id = False
-        choice = _option(col, value, by_id=by_id)
+        return col, _option(col, value, by_id=by_id)
+
+    def status_change(self, page, value, *, by_id=False, milestone_kinds=(), milestone=False):
+        col, choice = self.status_target(value, by_id=by_id)
         current = self.current(page, col)
         if current and current["id"] == choice["id"]:
             return {}
+        notion_tickets.validate_stage_target(milestone_kinds, col["id"], choice["id"], milestone=milestone)
         return {col["id"]: {col["type"]: choice}}
 
     def tag_change(self, page, value, remove):

@@ -64,9 +64,7 @@ def validate(cfg, *, con=None, previous=None):
             or any(not isinstance(v, str) or not v for v in stages.values())
             or (stages and not cfg.get("status_property"))):
         raise notion.NotionError("단계별로 반영할 Notion 상태 열과 선택지를 골라 주세요")
-    if (source == cfg["data_source_id"] and cfg["milestone_kind_property"] == cfg.get("status_property")
-            and ("done" in stages or cfg["milestone_kind_option"] in stages.values())):
-        raise notion.NotionError("단계별 상태를 쓰면 마일스톤 태그가 바뀌어요. 상태 열과 마일스톤 판별 열을 따로 골라 주세요")
+    validate_stage_statuses(cfg, milestone_kinds([cfg]))
 
 
 def project_config(con, pid):
@@ -74,16 +72,30 @@ def project_config(con, pid):
     return json.loads(row["extra"])["notion"] if row else None
 
 
-def milestone_kinds(configs):
+def milestone_kinds(configs, source=None):
     return {(cfg["milestone_kind_property"], cfg["milestone_kind_option"])
-            for cfg in configs if cfg.get("milestone_kind_property")}
+            for cfg in configs if cfg.get("milestone_kind_property")
+            and (source is None or cfg["data_source_id"] == source)}
+
+
+def validate_stage_target(kinds, prop, option, *, milestone=False):
+    if (prop, option) in kinds:
+        raise notion.NotionError("이 DB의 마일스톤 태그를 작업 단계의 상태값으로 쓸 수 없어요. 다른 상태값을 골라 주세요")
+    if milestone and any(column == prop for column, _ in kinds):
+        raise notion.NotionError("운영 배포 확인 상태가 마일스톤 태그를 지울 수 있어요. 상태 열과 마일스톤 판별 열을 따로 골라 주세요")
+
+
+def validate_stage_statuses(cfg, kinds):
+    for stage, option in cfg.get("stage_statuses", {}).items():
+        writes_parent = stage == "done" and cfg.get("milestone_data_source_id") == cfg["data_source_id"]
+        validate_stage_target(kinds, cfg["status_property"], option, milestone=writes_parent)
 
 
 def saved_milestone_kinds(con, source):
     """Dispatch and status workers need the current rules even between syncs."""
     rows = con.execute("SELECT extra FROM config_projects WHERE source='notion'")
     configs = (json.loads(row[0])["notion"] for row in rows)
-    return milestone_kinds(cfg for cfg in configs if cfg["data_source_id"] == source)
+    return milestone_kinds(configs, source)
 
 
 def uses_milestone_kind(con, ticket):
