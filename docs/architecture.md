@@ -5,7 +5,8 @@
 ## 진입점
 
 - **CLI** — [bin/tp](../bin/tp)와 `python3 -m ticket_pilot.cli`는 [cli.py](../ticket_pilot/cli.py)의 `main()`으로 들어간다. 여기서 argparse 명령을 등록하고 인자를 넘기며, `tp precheck-*`의 결과를 종료 코드와 출력으로 변환한다.
-- **대시보드 서버** — `tp serve`와 Docker의 `tp run`은 [server.py](../ticket_pilot/server.py)의 `serve()`를 호출한다. `tp run`은 [tick.py](../ticket_pilot/tick.py)의 `run_loop()`로 매분 tick 프로세스를 시작한다. HTTP 핸들러의 `do_GET()`과 `do_POST()`가 API를 처리하고, 서버는 빌드된 React 앱을 `web/dist`에서 제공한다.
+- **대시보드 서버** — `tp serve`와 Docker의 `tp run`은 [server.py](../ticket_pilot/server.py)의 `serve()`를 호출한다. `tp run`은 [tick.py](../ticket_pilot/tick.py)의 `run_loop()`로 매분 tick 프로세스를 시작한다. 서버는 세션·Origin 검사, 요청 파싱, 공통 오류 응답과 요청 actor 정리를 처리하고 빌드된 React 앱을 `web/dist`에서 제공한다.
+- **대시보드 HTTP API** — [routes.py](../ticket_pilot/http_api/routes.py)에서 메서드별 URL, 쿼리 매칭, 공개·관리자 경로를 확인할 수 있다. 경로 표가 [채팅·첨부](../ticket_pilot/http_api/chat.py), [프로젝트·설정·Notion](../ticket_pilot/http_api/settings.py), [로그인·계정 연결](../ticket_pilot/http_api/connections.py), [티켓·리뷰·배포](../ticket_pilot/http_api/tickets.py), [운영·모니터링](../ticket_pilot/http_api/operations.py)의 핸들러를 지정한다. [test_http_api.py](../tests/test_http_api.py)는 임시 서버에 요청해 기능별 GET·POST, 다운로드, 정적 파일과 actor 정리를 검증한다. 로그인·권한은 [test_lan.py](../tests/test_lan.py), [test_docker.py](../tests/test_docker.py), OAuth 콜백은 [test_notion.py](../tests/test_notion.py)에서도 검증한다.
 - **대시보드 화면** — [index.html](../web/index.html)에서 [main.tsx](../web/src/main.tsx)로 진입해 로그인과 Notion 콜백을 처리한다. [App.tsx](../web/src/App.tsx)는 [탐색 훅](../web/src/app/useNavigation.ts)이 해석한 탭과 하위 경로로 화면을 렌더링하고 [공통 데이터 훅](../web/src/app/useDashboardData.ts)의 응답을 각 화면에 전달한다. [api.ts](../web/src/api.ts)와 [types.ts](../web/src/types.ts)가 API 호출과 응답 타입을 공유한다.
 - **공용 저장소** — [core.py](../ticket_pilot/core.py)의 `db()`가 SQLite 연결과 스키마 초기화·마이그레이션을 담당한다.
 
@@ -64,7 +65,7 @@
 
 ## 호스트 서비스 설치와 업데이트
 
-- **호출 경로** — `tp setup`의 [setup.py](../ticket_pilot/setup.py), `tp update`의 [update.py](../ticket_pilot/update.py), `POST /api/lan/share`의 [server.py](../ticket_pilot/server.py), `tp mode host`의 [mode.py](../ticket_pilot/mode.py), `tp migrate`의 [migrate.py](../ticket_pilot/migrate.py)가 [launchd/install.sh](../launchd/install.sh)를 실행한다. Linux에서는 이 스크립트가 [systemd/install.sh](../systemd/install.sh)로 넘긴다.
+- **호출 경로** — `tp setup`의 [setup.py](../ticket_pilot/setup.py), `tp update`의 [update.py](../ticket_pilot/update.py), `POST /api/lan/share`의 [connections.py](../ticket_pilot/http_api/connections.py), `tp mode host`의 [mode.py](../ticket_pilot/mode.py), `tp migrate`의 [migrate.py](../ticket_pilot/migrate.py)가 [launchd/install.sh](../launchd/install.sh)를 실행한다. Linux에서는 이 스크립트가 [systemd/install.sh](../systemd/install.sh)로 넘긴다.
 - **처리** — 각 설치 스크립트가 Python과 서비스 경로를 선택하고 사용자 서비스를 등록·재시작한다. 두 스크립트가 읽는 [service-install.sh](../scripts/service-install.sh)는 [core.py](../ticket_pilot/core.py)의 `settings()`로 `dashboard_port`와 `lan_share`를 읽고, 각 플랫폼의 템플릿을 렌더링하고, 루프백 주소의 `/api/state` 응답을 기다린다.
 - **운영** — 공개 저장소의 [release.yml](../.github/workflows/release.yml)이 GitHub Release와 웹 자산, Docker 이미지를 발행한다. 호스트는 `tp update`로 릴리스를 적용한다. 별도의 레거시 설치 저장소에서 쓰는 `deploy.yml`은 호스트의 `tp update --to <sha>`를 호출한다. Docker에서는 [compose.yaml](../docker/compose.yaml)의 `tp run`이 `tp-data` 볼륨의 DB를 쓰고, 호스트의 [docker_update_manager.py](../ticket_pilot/docker_update_manager.py)가 배포 이미지를 교체한다.
 - **테스트** — [test_install.py](../tests/test_install.py), [test_setup.py](../tests/test_setup.py), [test_update.py](../tests/test_update.py), [test_mode.py](../tests/test_mode.py), [test_lan.py](../tests/test_lan.py)

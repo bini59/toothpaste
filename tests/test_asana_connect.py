@@ -12,6 +12,7 @@ from unittest import mock
 
 from ticket_pilot import config as G, core, onboard as OB, pipeline as P
 from ticket_pilot import server as S
+from ticket_pilot.http_api import connections
 
 # built at runtime so secret scanners do not take the fake fixture for a real Asana PAT
 PAT = "2/1200000000000001/" + "1200000000000002:" + "0123456789abcdef" * 2
@@ -42,7 +43,7 @@ class AsanaConnectTest(unittest.TestCase):
         self.kc = {}  # (service, account) -> token, stands in for the keychain
         mock.patch.object(core, "KEYCHAIN", True).start()  # the macOS path on every OS; `security` is faked below
         mock.patch.object(core, "secret_get", side_effect=lambda s, a=None: self.kc.get((s, a or "asana"))).start()
-        self.sp = mock.patch.object(S.subprocess, "run", side_effect=self._security).start()
+        self.sp = mock.patch.object(connections.subprocess, "run", side_effect=self._security).start()
         self.srv = ThreadingHTTPServer(("127.0.0.1", 0), S.H)
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
         self.addCleanup(self.srv.server_close)
@@ -66,7 +67,7 @@ class AsanaConnectTest(unittest.TestCase):
         return r.status, r.read().decode()
 
     def test_save_checks_then_stores_via_stdin(self):
-        with mock.patch.object(S.urllib.request, "urlopen", return_value=_resp(ME)) as op:
+        with mock.patch.object(connections.urllib.request, "urlopen", return_value=_resp(ME)) as op:
             me = S.asana_save(PAT)
         self.assertEqual(me, {"connected": True, "name": "Alex", "email": "alex@example.com", "workspaces": WS1,
                               "workspace": "77"})
@@ -79,7 +80,7 @@ class AsanaConnectTest(unittest.TestCase):
     def test_rejected_pat_keeps_old_token(self):
         self.kc[("ticket-pilot-asana", "asana")] = "old"
         err = urllib.error.HTTPError("u", 401, "Unauthorized", {}, None)
-        with mock.patch.object(S.urllib.request, "urlopen", side_effect=err):
+        with mock.patch.object(connections.urllib.request, "urlopen", side_effect=err):
             with self.assertRaisesRegex(RuntimeError, "거절") as e:
                 S.asana_save(PAT)
         self.assertNotIn(PAT, str(e.exception))
@@ -87,7 +88,7 @@ class AsanaConnectTest(unittest.TestCase):
         self.sp.assert_not_called()
 
     def test_rejects_odd_characters_before_any_call(self):
-        with mock.patch.object(S.urllib.request, "urlopen") as op:
+        with mock.patch.object(connections.urllib.request, "urlopen") as op:
             for bad in ("", None, 123, "short", PAT + " -s x", PAT + "\nadd-generic-password", "-" + PAT, "a'" + PAT):
                 with self.assertRaisesRegex(RuntimeError, "형식"):
                     S.asana_save(bad)
@@ -95,7 +96,7 @@ class AsanaConnectTest(unittest.TestCase):
         self.sp.assert_not_called()
 
     def test_routes(self):
-        with mock.patch.object(S.urllib.request, "urlopen", return_value=_resp(ME)):
+        with mock.patch.object(connections.urllib.request, "urlopen", return_value=_resp(ME)):
             self.assertEqual(json.loads(self._call("GET", "/api/asana/status")[1]), {"connected": False})
             code, out = self._call("POST", "/api/asana/token", {"token": PAT}, origin="http://127.0.0.1:3032")
             self.assertEqual((code, json.loads(out)["name"]), (200, "Alex"))
@@ -113,7 +114,7 @@ class AsanaConnectTest(unittest.TestCase):
         return core.settings()["asana_workspace_gid"]
 
     def test_one_workspace_is_chosen_when_empty(self):
-        with mock.patch.object(S.urllib.request, "urlopen", return_value=_resp(ME)):
+        with mock.patch.object(connections.urllib.request, "urlopen", return_value=_resp(ME)):
             S.asana_save(PAT)
         self.assertEqual(self._ws(), "77")
         con = core.db()
@@ -122,12 +123,12 @@ class AsanaConnectTest(unittest.TestCase):
 
     def test_chosen_workspace_is_kept(self):
         G.update("global", {"asana_workspace_gid": "55"}, actor="cli")
-        with mock.patch.object(S.urllib.request, "urlopen", return_value=_resp(ME)):
+        with mock.patch.object(connections.urllib.request, "urlopen", return_value=_resp(ME)):
             self.assertEqual(S.asana_save(PAT)["workspace"], "55")
         self.assertEqual(self._ws(), "55")
 
     def test_several_workspaces_are_listed_not_chosen(self):
-        with mock.patch.object(S.urllib.request, "urlopen", return_value=_resp(ME2)):
+        with mock.patch.object(connections.urllib.request, "urlopen", return_value=_resp(ME2)):
             S.asana_save(PAT)
             st = S.asana_status()
         self.assertEqual(self._ws(), "")
@@ -144,7 +145,7 @@ class AsanaConnectTest(unittest.TestCase):
 
     def test_name_saved_after_pat_keeps_workspace(self):
         # 시작하기 order: PAT (auto-picks 77), then 이름 저장 sends only owner_name (Start.tsx saveName)
-        with mock.patch.object(S.urllib.request, "urlopen", return_value=_resp(ME)):
+        with mock.patch.object(connections.urllib.request, "urlopen", return_value=_resp(ME)):
             S.asana_save(PAT)
         code, _ = self._call("POST", "/api/config", {"scope": "global", "value": {"owner_name": "Alex"}},
                              origin="http://127.0.0.1:3032")
