@@ -38,7 +38,9 @@
 
 ## 프로젝트와 저장소 설정
 
-- **화면·API** — [Projects.tsx](../web/src/views/Projects.tsx)가 프로젝트별 탭을 구성한다. [Onboard.tsx](../web/src/views/Onboard.tsx)는 프로젝트·저장소 추가, [Settings.tsx](../web/src/views/Settings.tsx)는 프로젝트·저장소·전역 설정 편집, [NotionSource.tsx](../web/src/views/NotionSource.tsx)는 Notion 소스 설정을 담당한다. 관련 API는 `GET /api/projects`, `GET /api/config`, `POST /api/config`, `/api/onboard/*`, `/api/notion/*`이다.
+- **화면** — [Settings.tsx](../web/src/views/Settings.tsx)는 [전역 편집기](../web/src/views/settings/GlobalSettings.tsx)로 연결한다. [Projects.tsx](../web/src/views/Projects.tsx)는 프로젝트별 탭에서 [프로젝트 편집기](../web/src/views/settings/ProjectSettings.tsx)와 [저장소 편집기](../web/src/views/settings/RepoSettings.tsx)를 연다. [Onboard.tsx](../web/src/views/Onboard.tsx)는 프로젝트·저장소 추가를 맡는다. [NotionSource.tsx](../web/src/views/NotionSource.tsx)는 프로젝트 편집기와 온보딩에 Notion 출처 설정과 티켓 미리보기를 제공한다.
+- **조회와 저장** — 프로젝트 목록은 `GET /api/projects`에서 읽는다. 세 편집기는 [useConfig.tsx](../web/src/views/settings/useConfig.tsx)에서 `GET /api/config` 응답과 편집 초안을 관리한다. 검사 시험 실행 중에는 이 훅이 설정 응답을 주기적으로 갱신한다. 각 편집기가 `POST /api/config`에 보낼 범위와 값을 정하고 [SaveBar.tsx](../web/src/views/settings/SaveBar.tsx)가 검증 요청, 변경 확인, 저장과 오류 표시를 처리한다. 레포 추가는 `/api/onboard/*`, Notion 계정·출처 설정과 미리보기는 `/api/notion/*`를 사용한다.
+- **공용 UI** — [Form.tsx](../web/src/views/settings/Form.tsx)는 설정 폼의 행과 섹션을 제공한다. [Start.tsx](../web/src/views/Start.tsx)와 전역 편집기는 [GitHub 연결](../web/src/views/settings/GitHubConnect.tsx), [Asana 연결](../web/src/views/settings/AsanaConnect.tsx), [에이전트 계정](../web/src/views/settings/Accounts.tsx) 카드를 공유한다.
 - **처리** — [config.py](../ticket_pilot/config.py)가 `tp config`와 대시보드의 설정 검증, 저장, 변경 이력을 공유한다. [core.py](../ticket_pilot/core.py)가 DB에서 설정을 읽고 기본값과 합치며, [onboard.py](../ticket_pilot/onboard.py)가 저장소 탐색과 복제를 처리한다.
 - **테스트** — [test_config.py](../tests/test_config.py), [test_onboard.py](../tests/test_onboard.py), [test_notion.py](../tests/test_notion.py), [settings.check.mjs](../web/src/views/settings.check.mjs)
 

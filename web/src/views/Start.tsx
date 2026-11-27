@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { ArrowRight } from "lucide-react";
 import { Badge, Button, Card, Input } from "../ui";
-import { ConfigError, fetchConfig, getJson, postConfig } from "../api";
-import type { AgentAccounts, GlobalConf, Project } from "../types";
-import { Accounts, AsanaConnect, GitHubConnect, Row, Section } from "./Settings";
+import { ConfigError, fetchConfig, postConfig } from "../api";
+import type { GlobalConf, Project } from "../types";
+import { Accounts, useAgentAccounts } from "./settings/Accounts";
+import { AsanaConnect } from "./settings/AsanaConnect";
+import { Row, Section } from "./settings/Form";
+import { GitHubConnect } from "./settings/GitHubConnect";
 
 const DEFAULT_OWNER = "the user"; // core.DEFAULT_SETTINGS owner_name
 
@@ -15,13 +18,7 @@ export function Start({ projects, onChanged }: { projects: Project[] | null; onC
   const [name, setName] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
-  const [agents, setAgents] = useState<AgentAccounts | null>(null);
-  const [agentErr, setAgentErr] = useState("");
-  const loadAgents = useCallback(() => {
-    setAgents(null);
-    getJson<AgentAccounts>("/api/agents/accounts").then((x) => { setAgents(x); setAgentErr(""); }, (e) => setAgentErr(String(e)));
-  }, []);
-  useEffect(loadAgents, [loadAgents]);
+  const { accounts: agents, error: agentErr, reload: loadAgents } = useAgentAccounts();
   useEffect(() => {
     fetchConfig().then((c) => { setG(c.config.global); setName(c.config.global.owner_name === DEFAULT_OWNER ? "" : String(c.config.global.owner_name)); },
       (e) => setErr(String(e)));

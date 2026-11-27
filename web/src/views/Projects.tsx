@@ -8,7 +8,9 @@ import { Board, type BoardActions } from "./Board";
 import { List as MilestoneList } from "./Milestones";
 import { Onboard } from "./Onboard";
 import { ProjectChat } from "./ProjectChat";
-import { ProjectSettings, RepoSettings, SOURCE_LABEL } from "./Settings";
+import { ProjectSettings } from "./settings/ProjectSettings";
+import { RepoSettings } from "./settings/RepoSettings";
+import { SOURCE_LABEL } from "./settings/projectFields";
 import { Tickets } from "./Tickets";
 
 export { SECTIONS, parseProjectSub, projectHref, projectOfRepo } from "../app/navigation";
