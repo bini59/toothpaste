@@ -94,10 +94,14 @@ def managed_pid(rec: dict | None) -> int | None:
         if args.endswith(" " + log):
             return pid
     # A shell script may leave a child serving after its leader exits. Check both the group and its unique log.
+    if not Path(log).is_file():
+        return None
     try:
         os.killpg(pid, 0)
-    except (ProcessLookupError, PermissionError):
+    except ProcessLookupError:
         return None
+    except PermissionError:
+        pass  # The group may still have our log open even if we cannot signal it.
     if Path("/proc/self/fd").is_dir():
         for proc in Path("/proc").glob("[0-9]*"):
             if in_group(int(proc.name), pid):
@@ -162,27 +166,42 @@ def _launch(con, wt: Path, port: int | None) -> dict:
     return {"pid": pid, "port": port, "log": str(log)}
 
 
+def _live_children(group: int) -> set[int]:
+    """Children may redirect every log fd. Zombies have already released their sockets and files."""
+    rows = run(["ps", "-A", "-o", "pid=,pgid=,stat="]).stdout.strip().splitlines()
+    return {int(pid) for pid, pgid, state in (row.split() for row in rows)
+            if pgid == str(group) and pid != pgid and not state.startswith("Z")}
+
+
 def _terminate(rec: dict):
-    pid = managed_pid(rec)
-    if pid:
-        if not R.stop(f"{pid} {rec['log']}"):
-            try:
-                os.killpg(pid, signal.SIGTERM)  # only children of the original session leader remain
-            except ProcessLookupError:
-                return
-            deadline = time.monotonic() + 5
-            while managed_pid(rec) and time.monotonic() < deadline:
-                time.sleep(0.1)
-        # A child may ignore TERM even after its parent exits.
+    group = rec["pid"]
+    children = _live_children(group)
+    if managed_pid(rec) is None:
+        return
+
+    def still_running() -> bool:
+        if children and not children.isdisjoint(_live_children(group)):
+            return True
+        return managed_pid(rec) is not None
+
+    for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
-            os.killpg(pid, signal.SIGKILL)
+            os.killpg(group, sig)
         except ProcessLookupError:
             return
+        except PermissionError:
+            # macOS can report EPERM when the last live member exits between the check and the signal.
+            if still_running():
+                raise
+            return
         deadline = time.monotonic() + 5
-        while D.port_open(rec["port"]) and any(in_group(p["pid"], pid) for p in D.listeners(rec["port"])):
+        while still_running():
             if time.monotonic() >= deadline:
-                raise RuntimeError(f"{rec['port']} 포트의 dev 서버를 종료하지 못했어요")
-            time.sleep(0.05)
+                break
+            time.sleep(0.1)
+        else:
+            return
+    raise RuntimeError(f"{rec['port']} 포트의 dev 서버를 종료하지 못했어요")
 
 
 def stop(con, path: Path | str, expected: dict | None = None) -> bool:

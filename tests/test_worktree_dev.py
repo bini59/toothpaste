@@ -109,15 +109,15 @@ class WorktreeDevTest(unittest.TestCase):
         self.assertTrue(Path(started["log"]).is_file())
 
     def test_stale_pid_and_foreign_port_are_never_adopted_or_stopped(self):
-        with socket.socket() as foreign:
+        # Keep the unrelated group leader alive until this test closes its stdin, even on a slow runner.
+        with socket.socket() as foreign, \
+                subprocess.Popen(["cat"], stdin=subprocess.PIPE, start_new_session=True) as proc:
             foreign.bind(("127.0.0.1", self.port))
             foreign.listen(10)
-            # Simulate a recycled PID, including a live process group leader.
-            proc = subprocess.Popen(["sleep", "30"], start_new_session=True)
-            self.addCleanup(proc.wait)
-            self.addCleanup(proc.terminate)
             stale = {"pid": proc.pid, "port": self.port, "log": str(self.root / "old.log")}
             core.meta_set(self.con, dev.KEY, {str(self.wt): stale})
+            self.assertEqual(dev.status(self.con, self.wt)["status"], "stopped")
+            Path(stale["log"]).touch()  # a retained log alone is no proof of ownership either
             result = dev.start(self.con, self.wt)
             self.assertNotEqual(result["port"], self.port)
             self.assertFalse(result["reused"])
@@ -126,7 +126,8 @@ class WorktreeDevTest(unittest.TestCase):
             self.assertIsNone(proc.poll())
 
     def test_exit_and_timeout_report_log_and_release_the_registration(self):
-        for command, message in [("exit 7", "종료"), ("sleep 30", "포트가 열리지")]:
+        idle = f"exec {shlex.quote(sys.executable)} -c 'import signal; signal.pause()'"
+        for command, message in [("exit 7", "종료"), (idle, "포트가 열리지")]:
             with self.subTest(command=command), mock.patch.object(dev, "READY_TIMEOUT", 0.4):
                 self.cmd = command
                 with self.assertRaisesRegex(devserver.DevError, message) as err:
@@ -153,6 +154,45 @@ class WorktreeDevTest(unittest.TestCase):
         self.cmd = self.cmd.removeprefix("exec ") + " >app.log 2>&1 &"
         server = dev.start(self.con, self.wt)
         self.assertEqual(dev.start(self.con, self.wt)["pid"], server["pid"])
+        self.stop()
+        self.assertFalse(devserver.port_open(server["port"]))
+
+    def test_stop_rechecks_the_group_when_signalling_is_denied(self):
+        log = self.root / "server.log"
+        log.touch()
+        with subprocess.Popen(["/bin/sh", "-c", "read -r line", str(log)], stdin=subprocess.PIPE,
+                              start_new_session=True) as proc:
+            rec = {"pid": proc.pid, "port": self.port, "log": str(log)}
+            core.meta_set(self.con, dev.KEY, {str(self.wt): rec})
+            with mock.patch.object(os, "killpg", side_effect=PermissionError), self.assertRaises(PermissionError):
+                self.stop()
+            self.assertEqual(dev.record(self.con, self.wt), rec)
+
+            # Darwin can return EPERM if the group exits just before killpg().
+            killpg = os.killpg
+
+            def exit_before_signal(group, sig):
+                if sig == 0:
+                    return killpg(group, 0)
+                proc.stdin.close()
+                proc.wait(timeout=5)
+                raise PermissionError
+
+            with mock.patch.object(os, "killpg", side_effect=exit_before_signal):
+                self.stop()
+            self.assertIsNone(dev.record(self.con, self.wt))
+
+    def test_stop_kills_a_child_that_ignores_term_and_closes_the_log(self):
+        (self.wt / "serve.py").write_text(
+            "import os, signal, socket, time\n"
+            "os.closerange(3, 1024)\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "s = socket.socket()\n"
+            "s.bind(('127.0.0.1', int(os.environ['PORT'])))\n"
+            "s.listen()\n"
+            "while os.path.exists(__file__): time.sleep(0.1)\n")
+        self.cmd = f"{shlex.quote(sys.executable)} serve.py >app.log 2>&1 &"
+        server = dev.start(self.con, self.wt)
         self.stop()
         self.assertFalse(devserver.port_open(server["port"]))
 
