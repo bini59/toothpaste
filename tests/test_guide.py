@@ -16,7 +16,7 @@ from ticket_pilot import server as S
 ROOT = Path(__file__).resolve().parent.parent
 TP = str(ROOT / "bin" / "tp")
 LINE = f"`{TP} guide`로 주제를 보고 `{TP} guide <주제>`로 읽으세요."
-TOPICS = ["start", "ticket", "milestone", "review", "blocked", "deploy", "agent", "update", "lan", "theme"]
+TOPICS = ["start", "metrics", "ticket", "milestone", "review", "blocked", "deploy", "agent", "update", "lan", "theme"]
 
 
 def tp(*args):

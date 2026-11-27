@@ -39,12 +39,13 @@ def _total(calls) -> tuple:
     return (*map(sum, zip(*calls)), sum(calls[-1][:3]))
 
 
-def transcript(cwd: str, session: str, start: float, end: float | None) -> tuple:
+def transcript(cwd: str, session: str, start: float, end: float | None, *,
+               on_call=None, on_tool=None, config_dir=None) -> tuple:
     """Sum each API message once. Claude can write several blocks with the same message id."""
     if not re.fullmatch(r"[A-Za-z0-9-]+", session):
         return _total(())
     cwd_path = Path(cwd).resolve()
-    projects = cwd_path / Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "projects"
+    projects = cwd_path / Path(config_dir or os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "projects"
     folder = re.sub(r"[^A-Za-z0-9]", "-", str(cwd_path))
     path = projects / folder / f"{session}.jsonl"
     calls = {}
@@ -70,10 +71,19 @@ def transcript(cwd: str, session: str, start: float, end: float | None) -> tuple
                 counts = _counts(_object(message.get("usage")))
                 ident = message.get("id") or row.get("requestId") or row.get("uuid")
                 if isinstance(ident, str) and any(counts):
-                    calls[ident] = tuple(map(max, zip(calls.get(ident, counts), counts)))
+                    first, previous = calls.get(ident, (ts, counts))
+                    calls[ident] = (first, tuple(map(max, zip(previous, counts))))
+                content = message.get("content")
+                if on_tool and isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") in ("tool_use", "server_tool_use", "mcp_tool_use"):
+                            on_tool(block.get("id"), block.get("name"), block.get("input"))
     except OSError:
         pass
-    return _total(calls.values())
+    if on_call:
+        for ts, counts in calls.values():
+            on_call(ts, counts)
+    return _total(counts for _, counts in calls.values())
 
 
 def compaction(log: Path) -> tuple:

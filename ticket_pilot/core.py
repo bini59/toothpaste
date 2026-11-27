@@ -463,6 +463,25 @@ CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts TEXT, kind TEXT, ticket_gid TEXT, message TEXT
 );
+CREATE TABLE IF NOT EXISTS metric_markers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at REAL NOT NULL, label TEXT NOT NULL, kind TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS metric_agent_runs (
+  log TEXT PRIMARY KEY, handle TEXT, kind TEXT NOT NULL, ticket_gid TEXT,
+  started_at REAL, finished_at REAL, has_ws_set INTEGER, exit_event INTEGER,
+  tool TEXT, tokens INTEGER, tool_calls INTEGER,
+  help_calls INTEGER, dev_calls INTEGER, wait_calls INTEGER
+);
+CREATE INDEX IF NOT EXISTS metric_agent_pending ON metric_agent_runs(finished_at,started_at DESC);
+CREATE TABLE IF NOT EXISTS metric_review_starts (
+  log TEXT NOT NULL, at REAL NOT NULL, ticket_gid TEXT NOT NULL,
+  PRIMARY KEY (log, at)
+);
+CREATE TABLE IF NOT EXISTS metric_review_tokens (
+  log TEXT NOT NULL, ticket_gid TEXT NOT NULL, started_at REAL NOT NULL, tokens INTEGER,
+  PRIMARY KEY (log, ticket_gid)
+);
 -- TP-105 수신함 alerts the owner has to look at (events is the log): kind review | ms_ready; read_at NULL = unread
 CREATE TABLE IF NOT EXISTS notifications (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -579,7 +598,7 @@ def db() -> sqlite3.Connection:
 _COLUMNS = {
     "notion_status_queue": {"next_attempt_at": "REAL NOT NULL DEFAULT 0"},
     # source: NULL = AI review, 'check' = tp check failure sent back to the agent through the same rework flow
-    "reviews": {"rework_at": "TEXT", "source": "TEXT"},
+    "reviews": {"rework_at": "TEXT", "source": "TEXT", "manual": "INTEGER", "agent_log": "TEXT"},
     # attempt: checks.py reruns a head once when tp could not run its checks (error)
     "checks": {"attempt": "INTEGER"},
     # cleanup.py: when the ticket worktree was removed after its change was seen in production

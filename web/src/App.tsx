@@ -1,5 +1,5 @@
 import { forwardRef, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Armchair, CircleHelp, Flag, ArrowUpCircle, Brush, Inbox as InboxIcon, ClipboardList, FolderGit2, GitPullRequest, History as HistoryIcon, LayoutDashboard, ListChecks, Milestone, Minimize2, type LucideIcon, type LucideProps, LayoutGrid, Package, RefreshCw, Rocket, ScrollText, Search, Settings as SettingsIcon, Star, Timer, Workflow } from "lucide-react";
+import { Armchair, ChartNoAxesCombined, CircleHelp, Flag, ArrowUpCircle, Brush, Inbox as InboxIcon, ClipboardList, FolderGit2, GitPullRequest, History as HistoryIcon, LayoutDashboard, ListChecks, Milestone, Minimize2, type LucideIcon, type LucideProps, LayoutGrid, Package, RefreshCw, Rocket, ScrollText, Search, Settings as SettingsIcon, Star, Timer, Workflow } from "lucide-react";
 import { Button, Header, Sidebar, cn, type BreadcrumbItem, type SidebarEntry } from "./ui";
 import { fetchState, getJson, post, postJson } from "./api";
 import { CommandPalette } from "./components/CommandPalette";
@@ -12,6 +12,7 @@ import { Help } from "./views/Help";
 import { Inbox } from "./views/Inbox";
 import { logout } from "./views/Lan";
 import { Log } from "./views/Log";
+import { Metrics } from "./views/Metrics";
 import { Milestones } from "./views/Milestones";
 import { Office } from "./views/Office";
 import { Projects, SECTIONS, parseProjectSub, projectHref, projectOfRepo } from "./views/Projects";
@@ -40,6 +41,7 @@ const TABS = {
   cleanup: { label: ROLES.cleanup.label, icon: Brush, group: "모니터링" },
   log: { label: "전체 로그", icon: ScrollText, group: "모니터링" },
   jobs: { label: "시스템 자동화", icon: Timer, group: "모니터링" },
+  metrics: { label: "지표", icon: ChartNoAxesCombined, group: "모니터링" },
   history: { label: "설정 이력", icon: HistoryIcon, group: "모니터링" },
   "chat-compactions": { label: "채팅 압축", icon: Minimize2, group: "모니터링" },
   settings: { label: "설정", icon: SettingsIcon, group: null },
@@ -245,7 +247,7 @@ export default function App({ me }: { me: LanMe }) {
     { ...leaf("release"), label: nReady ? `배포 · ${nReady}` : "배포" },
     { label: "프로젝트", items: projectItems },
     { label: "티켓", items: [leaf("tickets"), leaf("map")] },
-    { label: "모니터링", items: [leaf("dispatch"), leaf("reviews"), leaf("deploy"), leaf("cleanup"), leaf("log"), leaf("jobs"), leaf("history"), leaf("chat-compactions")] },
+    { label: "모니터링", items: [leaf("metrics"), leaf("dispatch"), leaf("reviews"), leaf("deploy"), leaf("cleanup"), leaf("log"), leaf("jobs"), leaf("history"), leaf("chat-compactions")] },
     leaf("settings"),
     leaf("help"),
     // until the first project exists (afterwards 설정 and the ⌘K palette still open it)
@@ -342,6 +344,8 @@ export default function App({ me }: { me: LanMe }) {
             <Update onDone={load} />
           ) : tab === "jobs" ? (
             <SystemJobs sub={sub} />
+          ) : tab === "metrics" ? (
+            <Metrics />
           ) : tab === "history" ? (
             <SettingsHistory sub={sub} />
           ) : tab === "chat-compactions" ? (
