@@ -29,6 +29,8 @@ jobs:
         run: |
           if [ "$GITHUB_HEAD_REF" = staging ] && [ "$GITHUB_BASE_REF" = main ]; then
             echo "eligible=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
           fi
   oss-check:
     needs: deployment-pr
@@ -144,7 +146,11 @@ jobs:
   deployment-tests-passed:
     # Metadata-only edits must not replace the required check for this commit.
     name: ${{ (github.event.action != 'edited' || github.event.changes.base.ref.from) && 'deployment-tests-passed' || 'deployment-tests-metadata-edit' }}
-    if: always() && (github.event.action != 'edited' || github.event.changes.base.ref.from)
+    # GitHub accepts a skipped job as a required check. Skip only for PRs outside the deployment scope.
+    if: >-
+      always() && (github.event.action != 'edited' || github.event.changes.base.ref.from) &&
+      needs.deployment-pr.result != 'skipped' &&
+      (needs.deployment-pr.result != 'success' || needs.deployment-pr.outputs.eligible != 'false')
     needs: [deployment-pr, oss-check, unit, docker, mode]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -153,12 +159,12 @@ jobs:
     steps:
       - name: Require every deployment test to pass
         env:
-          ELIGIBLE: ${{ needs.deployment-pr.outputs.eligible }}
+          ELIGIBLE: ${{ needs.deployment-pr.result == 'success' && needs.deployment-pr.outputs.eligible }}
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           if [ "$ELIGIBLE" != true ]; then
-            echo '::error::The deployment check requires a same-repository staging branch targeting main.'
+            echo '::error::Could not confirm deployment PR eligibility.'
             exit 1
           fi
           # Check both matrix jobs individually. Keep successful jobs from earlier attempts when rerunning failures.

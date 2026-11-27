@@ -484,7 +484,8 @@ folder>` exports HEAD for the public repository (`git archive`; `.gitattributes`
 A version is a git tag `vX.Y.Z` with a GitHub Release (`web/package.json`'s `version` is unused). The full Actions suite
 (OSS, Linux and macOS unit and web checks, Docker, and mode switching) runs when a same-repository `staging → main` PR
 opens, reopens, receives a new commit, or is retargeted to `main`. Title and description edits leave the test run alone.
-`deployment-tests-passed` succeeds only for an eligible PR after every job in the suite passes. The lightweight
+`deployment-tests-passed` requires every job in the suite to pass on deployment PRs. On other PRs targeting `main`,
+GitHub accepts the skipped `deployment-tests-passed` job as satisfying the required check. The lightweight
 architecture map check runs on all PRs, including milestone subtasks.
 
 Keep the first deployment PR in draft until protection is set up. Once `deployment-tests-passed` succeeds, add a branch

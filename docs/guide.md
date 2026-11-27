@@ -315,8 +315,9 @@ staging 열차 레포와 `pr_into_staging` 레포는 티켓 브랜치를 staging
 **최신 GitHub Release에 포함**(`prod.release: true`, 릴리즈를 받아 업데이트하는 toothpaste 자신처럼). 완료된 티켓의 worktree와 로컬 브랜치는 자동으로 지워집니다(원격 브랜치와 PR은 남음).
 
 **공개 toothpaste 릴리스**는 같은 저장소의 `staging → main` PR을 열거나 다시 열 때, 새 커밋을 올릴 때, 또는 PR 대상을 `main`으로
-바꿀 때 전체 테스트를 실행합니다. `deployment-tests-passed`는 이 PR에서 전체 작업이 성공해야 통과합니다. 제목이나 본문만 편집하면
-기존 테스트가 계속됩니다. 일반 PR과 마일스톤 하위 PR에도 가벼운 코드 지도 검사가 실행됩니다.
+바꿀 때 전체 테스트를 실행합니다. 배포 PR에서 `deployment-tests-passed`는 전체 작업이 성공해야 통과합니다. 그 외 `main` 대상 PR에서는
+이 작업을 건너뛰며 GitHub는 이를 필수 검사 충족으로 처리합니다. 제목이나 본문만 편집하면 기존 테스트가 계속됩니다.
+일반 PR과 마일스톤 하위 PR에도 가벼운 코드 지도 검사가 실행됩니다.
 
 첫 배포 PR은 보호 규칙을 설정할 때까지 초안으로 유지합니다. `deployment-tests-passed`가 통과하면 GitHub **Settings → Branches**에서
 `main`에 브랜치 보호 규칙을 추가합니다.
