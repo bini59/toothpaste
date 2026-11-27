@@ -6,6 +6,7 @@ from unittest import mock
 
 from ticket_pilot import core
 from ticket_pilot import pipeline as P
+from ticket_pilot.storage import migrations
 
 
 class DoneAtTest(unittest.TestCase):
@@ -51,7 +52,7 @@ class DoneAtTest(unittest.TestCase):
             con.execute("INSERT INTO tickets(gid,stage,asana_modified_at) VALUES (?,?,?)", (gid, stage, mod))
         con.execute("INSERT INTO prs(url,ticket_gid,number,merged_at,prod_at) VALUES ('a','prod',1,'2026-09-01','2026-09-02')")
         con.execute("INSERT INTO prs(url,ticket_gid,number,merged_at) VALUES ('b','merged',2,'2026-09-05')")
-        with mock.patch.object(core, "now", lambda: "2026-11-06T00:00:00+00:00"):
+        with mock.patch.object(migrations, "now", lambda: "2026-11-06T00:00:00+00:00"):
             core._migrate(con)
         got = {r["gid"]: r["done_at"] for r in con.execute("SELECT gid, done_at FROM tickets")}
         self.assertEqual(got, {"prod": "2026-09-02", "merged": "2026-09-05", "asana": "2026-10-03T00:00:00Z",

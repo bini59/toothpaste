@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from ticket_pilot import automation, cli, core, precheck, tick
+from ticket_pilot.storage import connection
 
 
 AT = datetime(2026, 10, 21, 9, 0, tzinfo=timezone.utc)
@@ -93,13 +94,13 @@ class CliTest(unittest.TestCase):
     def setUp(self):
         self.data = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.enterContext(mock.patch.object(core, "DB_PATH", self.data / "tp.db"))
-        self.enterContext(mock.patch.object(core, "_CON", None))
+        self.enterContext(mock.patch.object(connection, "_main_connections", {}))
         self.enterContext(mock.patch.object(tick, "DATA", self.data))
         self.enterContext(mock.patch.dict(os.environ, {"TP_MODE": ""}))
 
     def db(self):
         con = core.db()
-        self.addCleanup(con.close)
+        self.addCleanup(core.close_db, con)
         return con
 
     def precheck_exit(self, aid):

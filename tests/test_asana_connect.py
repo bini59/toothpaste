@@ -11,6 +11,7 @@ from http.server import ThreadingHTTPServer
 from unittest import mock
 
 from ticket_pilot import config as G, core, onboard as OB, pipeline as P
+from ticket_pilot.storage import connection
 from ticket_pilot import server as S
 from ticket_pilot.http_api import connections
 
@@ -35,7 +36,7 @@ class AsanaConnectTest(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         mock.patch.object(core, "DB_PATH", core.Path(tmp.name) / "tp.db").start()
-        mock.patch.object(core, "_CON", None).start()
+        mock.patch.object(connection, "_main_connections", {}).start()
         core.config_cache_clear()
         self.addCleanup(core.config_cache_clear)
         mock.patch.dict(os.environ).start()

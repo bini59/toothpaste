@@ -21,6 +21,7 @@ from unittest import mock
 from ticket_pilot import config as G, core, lan as L, release as R
 from ticket_pilot import server as S, setup as SU, usage
 from ticket_pilot.http_api import connections
+from ticket_pilot.storage import connection
 
 ROOT = Path(__file__).resolve().parent.parent
 LAN_IP = "192.168.0.23"
@@ -37,7 +38,7 @@ class LanTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.tmp = Path(tmp.name)
         mock.patch.object(core, "DB_PATH", self.tmp / "tp.db").start()
-        mock.patch.object(core, "_CON", None).start()
+        mock.patch.object(connection, "_main_connections", {}).start()
         # /api/state would start a real claude/codex usage fetch in a thread that outlives the test and writes to
         # whatever DB a later test has patched in (it recreated test_migrate's moved data/tp.db)
         mock.patch.object(usage, "cached", lambda con, key="claude_usage", fn=None: core.meta_get(con, key)).start()

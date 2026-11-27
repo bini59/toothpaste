@@ -14,12 +14,19 @@ from pathlib import Path
 from unittest import mock
 
 from ticket_pilot import core, mode as M, server as S
+from ticket_pilot.storage import connection
 
 TOKEN = "ghp_SECRETvalue123"
 
 
 def done(cmd, out=""):
     return subprocess.CompletedProcess(cmd, 0, out, "")
+
+
+def _close_test_connection():
+    con = connection._main_connections.get(os.getpid())
+    if con is not None:
+        core.close_db(con)
 
 
 class FakeDocker:
@@ -73,7 +80,7 @@ class ModeTest(unittest.TestCase):
         self.db = t / "app" / "data" / "tp.db"
         self.docker = FakeDocker(vol)
         self.addCleanup(mock.patch.stopall)
-        for p in (mock.patch.object(core, "DB_PATH", self.db), mock.patch.object(core, "_CON", None),
+        for p in (mock.patch.object(core, "DB_PATH", self.db), mock.patch.object(connection, "_main_connections", {}),
                   mock.patch.dict(os.environ, {"HOME": str(self.home), "TP_MODE": "", "TP_LOG_DIR": str(t / "logs")}),
                   mock.patch.object(core, "KEYCHAIN", False),
                   mock.patch.object(core, "SECRETS_FILE", self.home / ".config" / "ticket-pilot" / "secrets.json"),
@@ -87,7 +94,7 @@ class ModeTest(unittest.TestCase):
         self.stop = mock.patch.object(M, "_stop_services").start()
         self.install = mock.patch.object(M, "_install").start()
         self.check = mock.patch.object(M, "check", return_value=[{"id": "docker", "title": "docker", "ok": True}]).start()
-        self.addCleanup(lambda: core._CON and core._CON.close())  # runs first
+        self.addCleanup(_close_test_connection)  # runs first
         core.config_cache_clear()
         self.addCleanup(core.config_cache_clear)
         con = core.db()

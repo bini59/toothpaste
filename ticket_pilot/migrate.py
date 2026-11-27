@@ -406,8 +406,7 @@ def migrate(to: str, apply: bool = False, confirm=input):
         if again:
             raise RuntimeError("그 사이에 시작된 작업이 있어요: " + ", ".join(again))
         step("backup", "DB 백업", backup)
-        con.close()
-        core._CON = None  # never core.db() after the move: it would create an empty data/tp.db at the old path
+        core.close_db(con)  # never core.db() after the move: it would create an empty data/tp.db at the old path
         for o, n in moves:
             if o in j["copied"]:
                 shutil.rmtree(o, ignore_errors=True)  # the copy is complete; finish deleting the original

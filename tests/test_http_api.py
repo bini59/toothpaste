@@ -14,6 +14,7 @@ from urllib.parse import urlencode
 
 from ticket_pilot import chat, config, core, server
 from ticket_pilot.http_api import operations
+from ticket_pilot.storage import connection
 
 
 class DashboardHTTPTest(unittest.TestCase):
@@ -21,7 +22,7 @@ class DashboardHTTPTest(unittest.TestCase):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.enterContext(mock.patch.dict(os.environ, TP_MODE="host"))
         self.enterContext(mock.patch.object(core, "DB_PATH", self.root / "tp.db"))
-        self.enterContext(mock.patch.object(core, "_CON", None))
+        self.enterContext(mock.patch.object(connection, "_main_connections", {}))
         self.enterContext(mock.patch.object(server, "ROOT", self.root))
         self.enterContext(mock.patch.object(operations, "ROOT", self.root))
         self.enterContext(mock.patch.object(chat, "DATA", self.root))
@@ -35,7 +36,7 @@ class DashboardHTTPTest(unittest.TestCase):
                                                "repos": [{"repo": "dashboard", "role": "app"}]}},
         ], actor="cli")
         self.con = core.db()
-        self.addCleanup(self.con.close)
+        self.addCleanup(core.close_db, self.con)
 
         self.actors = queue.Queue()
         actors = self.actors
