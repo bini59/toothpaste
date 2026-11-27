@@ -125,6 +125,9 @@ class NotionFixture:
                 return 404, {}
             self.created += 1
             row = page(1000 + self.created, "", [], [], "할 일")
+            for name, col in self.props_by_source.get(source, self.props).items():
+                kind = col["type"]
+                row["properties"].setdefault(name, {"type": kind, kind: [] if kind in ("relation", "multi_select") else None})
             self.apply_properties(row, body["properties"], source)
             self.pages[source].append(row)
             self.markdown[row["id"]] = (200, {"markdown": body.get("markdown", "")})

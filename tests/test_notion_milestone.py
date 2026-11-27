@@ -2,7 +2,8 @@
 import json
 from unittest import mock
 
-from test_notion import DOCS_DB, HOME_DB, MEMBER, TEAM_DB, NotionDashboard, uid
+from test_notion import DOCS_DB, HOME_DB, MEMBER, OWNER, TEAM_DB, NotionDashboard, uid
+from test_ticket_write import command
 from ticket_pilot import cli, core, deploy, milestone, notion, notion_stages, notion_tickets, pipeline, release, server
 
 
@@ -70,6 +71,44 @@ class NotionMilestones(NotionDashboard):
         starts = [s for s in self.dispatch_log() if "would create" in s]
         self.assertEqual(len(starts), 1)
         self.assertIn(f"--base milestone/{self.parent['id']}", starts[0])
+
+    def test_project_commands_create_related_pages_then_sync(self):
+        self.cfg["parent_property"] = "parent-rel"
+        self.fixture.props["부모"] = {"id": "parent-rel", "type": "relation", "relation": {"data_source_id": TEAM_DB}}
+        self.save_project()
+        task = command("ticket", "create", "--project", "example", "--title", "Task", "--body", "Notes",
+                       "--assignee", "me", "--tag", "tp")
+        self.assertEqual((task["source"], task["gid"], task["ok"]), ("notion", "notion:" + uid(1001), True))
+        sub = command("ticket", "create", "--project", "example", "--title", "Child", "--parent", task["gid"])
+        self.assertEqual(self.fixture.pages[TEAM_DB][-1]["properties"]["부모"], relation(uid(1001)))
+        self.assertEqual(sub["key"], notion_tickets.ticket_key(uid(1002)))
+        self.assertEqual(command("ticket", "create", "--project", "example", "--title", "Wrong DB",
+                                 "--milestone", task["key"], status=4)["code"], "parent_not_found")
+
+        result = command("milestone", "create", "--project", "example", "--title", "Release", "--body", "Ship it",
+                         "--assignee", "me", "--subtask", "a", "--subtask", "b")
+        parent = self.fixture.pages[DOCS_DB][-1]
+        self.assertEqual(result["gid"], "notion:" + parent["id"])
+        self.assertEqual((parent["properties"]["개발 담당"]["people"], self.fixture.markdown[parent["id"]][1]["markdown"]),
+                         ([{"id": OWNER}], "Ship it"))
+        self.assertIsNone(self.ticket(result["gid"]))
+        pipeline.sync()
+        for i, sub in enumerate(result["subtasks"]):
+            row = pipeline.find_ticket(self.con, sub["key"])
+            self.assertEqual((row["name"], row["stage"], row["parent_gid"], row["in_milestone"]),
+                             ("ab"[i], "queued", result["gid"], 1))
+            self.assertEqual(milestone.base_for(row, "app"), "milestone/" + parent["id"])
+
+    def test_create_same_db_milestone_sets_its_discriminator(self):
+        self.use_task_db("multi_select")
+        result = command("milestone", "create", "--project", "example", "--title", "Release", "--subtask", "a")
+        self.assertEqual(self.fixture.pages[TEAM_DB][-2]["properties"]["유형"]["multi_select"][0]["id"], "milestone-id")
+        pipeline.sync()
+        self.assertIsNone(self.ticket(result["gid"]))
+        sub = pipeline.find_ticket(self.con, result["subtasks"][0]["key"])
+        self.assertEqual((sub["in_milestone"], sub["parent_gid"]), (1, result["gid"]))
+        self.assertEqual(command("ticket", "create", "--project", "example", "--title", "b", "--milestone",
+                                 sub["key"], status=4)["code"], "parent_not_found")
 
     def test_shared_stage_mapping_is_validated_in_both_save_orders(self):
         self.use_task_db()

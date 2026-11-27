@@ -1,0 +1,221 @@
+"""Project-routed ticket and milestone creation. Sync and dispatch own the local milestone lifecycle."""
+from __future__ import annotations
+
+import argparse
+import http.client
+import json
+import re
+import sqlite3
+import subprocess
+import sys
+import uuid
+
+from . import asana_write, core, milestone, notion, notion_write, pipeline
+
+
+class CreateError(Exception):
+    def __init__(self, code, message, **details):
+        super().__init__(message)
+        self.result = {"code": code, "message": message, **details}
+
+    def exit(self):
+        print(json.dumps({"ok": False, **self.result}, ensure_ascii=False), file=sys.stderr)
+        raise SystemExit(5 if self.result["code"] == "upstream_error" else 4)
+
+
+class CreateParser(argparse.ArgumentParser):
+    def error(self, message):
+        CreateError("invalid_argument", message).exit()
+
+
+def _parent_gid(con, ref, *, for_milestone):
+    """Board keys (including ms: tickets) and native IDs both work before the next sync."""
+    rows = con.execute("SELECT gid FROM tickets WHERE gid=? OR key=? COLLATE NOCASE", (ref, ref)).fetchall()
+    if len(rows) > 1:
+        raise CreateError("parent_not_found", f"티켓 키가 여러 개 일치해요. 부모 gid를 지정하세요: {ref}")
+    gid = rows[0][0] if rows else ref
+    if for_milestone and milestone.is_ms(gid) and ":" in gid[3:]:
+        gid, _ = milestone.parse(gid)
+    return gid
+
+
+def _asana_create(con, project, args, parent, is_milestone):
+    st = core.settings()
+    pg = project.get("asana_gid")
+    if not pg or not st.get("asana_enabled"):
+        raise CreateError("source_unsupported", "프로젝트의 Asana 연결을 확인하세요")
+    tags, assignee = list(args.tag or []), args.assignee
+    if parent:
+        parent = re.sub(r"^AS-", "", parent, flags=re.I)
+        if not parent.isdigit():
+            raise CreateError("parent_not_found", f"Asana 부모 티켓을 찾을 수 없어요: {parent}")
+        try:
+            task = core.asana("GET", f"/tasks/{parent}", {"opt_fields": "tags.name"})["data"]
+        except core.AsanaError as e:
+            if e.status == 404:
+                raise CreateError("parent_not_found", str(e)) from e
+            raise
+        if args.milestone and not milestone.has_tag([t["name"] for t in task["tags"]]):
+            raise CreateError("parent_not_found", f"Asana 태스크 {parent}에 마일스톤 태그가 없어요")
+    if is_milestone:
+        tags = [st["milestone_tag"]]
+    elif args.milestone:
+        tags.append(st["asana_tag"])
+        assignee = assignee or "me"
+    if tags and not st.get("asana_workspace_gid"):
+        raise CreateError("invalid_argument", core.NO_WORKSPACE)
+    task = asana_write.create(pg, args.title, args.body, assignee, tags, parent, log=None)
+    gid = task["gid"]
+    key = pipeline.field(task, "ID") or f"AS-{gid}"
+    url = task.get("permalink_url") or f"https://app.asana.com/0/{pg}/{gid}"
+    # A custom Asana key cannot be decoded. Keep it resolvable for a second create before sync.
+    if key != f"AS-{gid}":
+        ts = core.now()
+        with con:
+            con.execute("""INSERT INTO tickets(gid,key,name,url,project_gid,assigned,first_seen,last_seen)
+                           VALUES(?,?,?,?,?,0,?,?) ON CONFLICT(gid) DO NOTHING""", (gid, key, args.title, url, pg, ts, ts))
+    return {"key": key, "gid": gid, "url": url}
+
+
+def _notion_create(project, args, parent, is_milestone):
+    cfg = project.get("notion") or {}
+    if not cfg.get("data_source_id") or not cfg.get("connection_id"):
+        raise CreateError("source_unsupported", "프로젝트에 Notion 작업 DB를 연결하세요")
+    if parent:
+        try:
+            parent = str(uuid.UUID(parent[3:] if parent[:3].upper() == "NT-" else parent.removeprefix("notion:")))
+        except ValueError:
+            raise CreateError("parent_not_found", f"Notion 부모 티켓을 찾을 수 없어요: {parent}") from None
+    assignee, tags, status = args.assignee, args.tag, None
+    if args.milestone:
+        if not assignee and cfg.get("assignee", "me") != "all":
+            assignee = cfg.get("assignee", "me")
+        if not tags and cfg.get("tag_property"):
+            tags = [cfg.get("tag_option") or core.settings()["asana_tag"]]
+        status = cfg.get("status_option") or None
+    values = argparse.Namespace(op="create", project=project["id"], title=args.title, body=args.body, assignee=assignee,
+                                tag=tags, status=status, due=None, parent=parent if args.parent else None)
+    return notion_write.run(values, milestone=parent if args.milestone else None, milestone_parent=is_milestone)
+
+
+def _github_create(con, project, args, parent, is_milestone, actor):
+    repo = core.default_repo(project)
+    gh = core.project_map()["repos"].get(repo, {}).get("github")
+    if not gh:
+        raise CreateError("source_unsupported", "프로젝트의 기본 레포에 GitHub 저장소를 설정하세요")
+    prefix = pipeline.issue_repos()[repo][0]
+    tags = [core.settings()["milestone_tag"]] if is_milestone else [pipeline.ISSUE_LABEL, *(args.tag or [])]
+    body = {"title": args.title, "body": args.body or "", "labels": list(dict.fromkeys(tags))}
+    if parent:
+        match = re.fullmatch(r"gh:([\w.-]+/[\w.-]+)#([1-9]\d*)", parent)
+        if match:
+            parent_repo, number = match.groups()
+        elif match := re.fullmatch(re.escape(prefix) + r"-([1-9]\d*)", parent, re.I):
+            parent_repo, number = gh, match[1]  # a key returned just before sync
+        else:
+            raise CreateError("parent_not_found", f"GitHub 부모 이슈를 찾을 수 없어요: {parent}")
+        if parent_repo.split("/")[0].lower() != gh.split("/")[0].lower():
+            raise CreateError("invalid_argument", "GitHub 하위 이슈는 부모와 같은 소유자의 레포에 만들어야 해요")
+        try:
+            issue = pipeline.gh_api("GET", f"repos/{parent_repo}/issues/{number}")
+        except RuntimeError as e:
+            if "(HTTP 404)" in str(e):
+                raise CreateError("parent_not_found", f"GitHub 부모 이슈를 찾을 수 없어요: {parent}") from e
+            raise
+        if "pull_request" in issue or (args.milestone and not milestone.has_tag([lb["name"] for lb in issue["labels"]])):
+            raise CreateError("parent_not_found", f"요청한 GitHub 부모 이슈를 찾을 수 없어요: {parent}")
+        body["parent_issue_id"] = issue["id"]  # GitHub sets the sub-issue relationship in the create request
+    if args.assignee:
+        body["assignees"] = [pipeline.gh_api("GET", "user")["login"]]
+    issue = pipeline.gh_api("POST", f"repos/{gh}/issues", body)
+    number = issue["number"]
+    result = {"key": f"{prefix}-{number}", "gid": f"gh:{gh}#{number}", "url": issue["html_url"]}
+    with con:
+        core.event(con, "ticket_write", f"{actor} · {project['id']} · {result['key']} · create", result["gid"])
+    # GitHub can silently drop labels or assignees when the caller has insufficient repository permissions.
+    if (not {t.lower() for t in tags} <= {lb["name"].lower() for lb in issue["labels"]}
+            or not set(body.get("assignees", [])) <= {u["login"] for u in issue.get("assignees", [])}):
+        raise CreateError("upstream_error", "이슈는 생성됐어요. GitHub에서 라벨과 담당자 권한을 확인하세요", created=result)
+    return result
+
+
+def create(project, args, *, is_milestone=False):
+    try:
+        actor = asana_write.write_actor(agents_only=False)
+    except asana_write.WriteDisabled as e:
+        raise CreateError("write_disabled", str(e)) from e
+    if is_milestone or args.milestone is not None:
+        supported, reason = milestone.supported(project)
+        if not supported:
+            raise CreateError("milestone_unsupported", reason)
+    ref = args.parent if args.parent is not None else args.milestone
+    if not args.title.strip() or any(not t.strip() for t in args.tag or []) or (ref is not None and not ref.strip()):
+        raise CreateError("invalid_argument", "제목, 태그와 부모 티켓 값은 비워 둘 수 없어요")
+    source = project["source"]
+    if source not in ("asana", "notion", "github"):
+        raise CreateError("source_unsupported", "이 프로젝트에 티켓 출처를 설정하세요")
+    con = core.db()
+    parent = _parent_gid(con, ref, for_milestone=bool(args.milestone)) if ref else None
+    try:
+        if source == "asana":
+            return _asana_create(con, project, args, parent, is_milestone)
+        if source == "notion":
+            return _notion_create(project, args, parent, is_milestone)
+        return _github_create(con, project, args, parent, is_milestone, actor)
+    except notion.PageNotFound as e:
+        raise CreateError("parent_not_found", str(e)) from e
+    except notion_write.InvalidFields as e:
+        raise CreateError("invalid_argument", str(e)) from e
+    except asana_write.WriteDisabled as e:
+        raise CreateError("write_disabled", str(e)) from e
+    except SystemExit as e:
+        raise CreateError("invalid_argument", str(e)) from e
+    except (OSError, RuntimeError, http.client.HTTPException, subprocess.SubprocessError, sqlite3.Error, KeyError, ValueError) as e:
+        raise CreateError("upstream_error", str(e)) from e
+
+
+def run(args):
+    project = next((p for p in core.project_map()["projects"] if p["id"] == args.project), None)
+    if not project:
+        raise CreateError("project_not_found", f"프로젝트를 찾을 수 없어요: {args.project}")
+    is_milestone = args.cmd == "milestone"
+    result = {"source": project["source"], **create(project, args, is_milestone=is_milestone)}
+    if is_milestone:
+        result["subtasks"] = []
+        failed = []
+        for title in args.subtask or []:
+            child = argparse.Namespace(**{**vars(args), "title": title, "body": None, "assignee": None, "milestone": result["gid"]})
+            try:
+                created = create(project, child)
+                result["subtasks"].append({"key": created["key"], "url": created["url"]})
+            except CreateError as e:
+                failed.append({"title": title, **e.result})
+        if failed:
+            code = next((e["code"] for e in failed if e["code"] == "upstream_error"), failed[0]["code"])
+            raise CreateError(code, f"마일스톤을 만들었고 하위 티켓 {len(failed)}개가 실패했어요", **result, failed=failed)
+    return {"ok": True, **result}
+
+
+def command(args):
+    try:
+        print(json.dumps(run(args), ensure_ascii=False))
+    except CreateError as e:
+        e.exit()
+
+
+def register(parsers):
+    for name in ("ticket", "milestone"):
+        group = parsers.add_parser(name, help="프로젝트 설정에 따라 티켓 또는 마일스톤 생성")
+        p = group.add_subparsers(required=True).add_parser("create")
+        p.set_defaults(fn=command, parent=None, milestone=None, tag=None)
+        p.add_argument("--project", required=True, help="프로젝트 설정의 ID")
+        p.add_argument("--title", required=True)
+        p.add_argument("--body")
+        p.add_argument("--assignee", choices=["me"])
+        if name == "milestone":
+            p.add_argument("--subtask", action="append", help="생성할 하위 티켓 제목 (반복 가능)")
+        else:
+            p.add_argument("--tag", action="append")
+            parent = p.add_mutually_exclusive_group()
+            parent.add_argument("--parent", help="부모 티켓 키 또는 gid")
+            parent.add_argument("--milestone", help="마일스톤 키 또는 gid")

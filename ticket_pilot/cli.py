@@ -26,7 +26,7 @@ from . import guide as GD
 from . import migrate as M
 from . import mode as MO
 from . import milestone as MS
-from . import notion, notion_stages, notion_write
+from . import notion, notion_stages, notion_write, ticket_write
 from . import pipeline as P
 from . import release as R
 from . import setup as S
@@ -366,7 +366,9 @@ def cmd_notion_app(a):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="tp", description="toothpaste (치약), tp = ToothPaste. 사용법: tp guide [주제]")
+    argv = sys.argv[1:] if argv is None else argv
+    parser = ticket_write.CreateParser if argv and argv[0] in ("ticket", "milestone") else argparse.ArgumentParser
+    ap = parser(prog="tp", description="toothpaste (치약), tp = ToothPaste. 사용법: tp guide [주제]")
     sp = ap.add_subparsers(dest="cmd", required=True)
     gd = sp.add_parser("guide", help="사용 설명서 docs/guide.md: 주제 목록, 또는 한 주제 (milestone, deploy, ...)")
     gd.add_argument("topic", nargs="?")
@@ -375,6 +377,7 @@ def main(argv=None):
     na.add_argument("--client-id", required=True, help="Notion OAuth 클라이언트 ID")
     na.set_defaults(fn=cmd_notion_app)
     notion_write.register(sp)
+    ticket_write.register(sp)
     sp.add_parser("sync").set_defaults(fn=_log_errors(lambda a: P.sync()))
     d = sp.add_parser("dispatch")
     d.add_argument("--dry-run", action="store_true")
@@ -509,7 +512,7 @@ def main(argv=None):
     ap_.set_defaults(fn=lambda a: R.request_approval(a.ticket, cancel=a.cancel, override=a.override,
                                                       override_review=a.override_review))
     md = sp.add_parser("milestone-done", help="마일스톤 작업 완료 (same as the 마일스톤 page button): open its milestone PRs")
-    md.add_argument("parent", help="Milestone parent gid (Asana gid or notion:<page id>)")
+    md.add_argument("parent", help="Milestone parent gid (Asana gid, notion:<page id>, gh:<owner/repo>#<number>)")
     md.add_argument("--cancel", action="store_true")
     md.set_defaults(fn=lambda a: MS.mark_done(a.parent, cancel=a.cancel))
     co = sp.add_parser("check-override", help="ignore the tp checks of a ticket's open PR head (sends it to the AI review)")

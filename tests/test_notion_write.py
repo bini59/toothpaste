@@ -167,7 +167,7 @@ class NotionWrites(NotionDashboard):
         pipeline.sync()
         with self.fake_agent() as launch:
             self.assertEqual(pipeline.dispatch(only=self.key), [self.key])
-            self.assertIn("notion create --project example", launch.call_args.args[1])
+            self.assertIn("ticket create --project example", launch.call_args.args[1])
         return pipeline.latest_run(self.con, self.gid)["id"]
 
     def merged_pr(self, run_id):
@@ -324,7 +324,8 @@ class NotionWrites(NotionDashboard):
                 self.assertIn("Notion 상태 반영", migrate.busy(self.con))
                 with self.fake_agent() as launch, mock.patch.object(cli, "_release_steps"), \
                         mock.patch.object(pipeline, "issue_repos", return_value={"app": ("GH", None)}), \
-                        mock.patch.object(pipeline, "_gh_issue_json", side_effect=[[issue], {"comments": []}]), \
+                        mock.patch.object(pipeline, "_open_issues", return_value=[issue]), \
+                        mock.patch.object(pipeline, "_gh_issue_json", return_value={"comments": []}), \
                         self.assertRaises(SystemExit) as exit_status:
                     cli.main(["precheck-dispatch"])
                 self.assertEqual(exit_status.exception.code, 1)  # deterministic dispatch finished, no AI triage
@@ -350,5 +351,5 @@ class NotionWrites(NotionDashboard):
         pipeline.sync()
         self.assertEqual(self.fixture.writes, [])
         prompt = chat.prompt(chat._project("example"), "버그 티켓을 만들어 줘")
-        self.assertIn("notion create --project example", prompt)
+        self.assertIn("ticket create --project example", prompt)
         self.assertIn("notion comment --project example", prompt)

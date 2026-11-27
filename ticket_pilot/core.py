@@ -285,6 +285,11 @@ def project_map() -> dict:
     return json.loads(json.dumps(config()["project_map"]))
 
 
+def default_repo(project: dict) -> str | None:
+    links = project.get("repos") or []
+    return next((r["repo"] for r in links if r.get("default")), links[0]["repo"] if links else None)
+
+
 def import_legacy_json(con) -> bool:
     """First run after TP-49: copy config/settings.json + config/project_map.json into a DB that has no settings.
     Runs at most once per DB (meta config_imported); JSON files are never read after that."""
@@ -765,7 +770,9 @@ def repos_for_project(con, project_gid: str | None):
 # ---------------------------------------------------------------- Asana
 
 class AsanaError(RuntimeError):
-    pass
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
 
 
 NO_WORKSPACE = "Asana 워크스페이스가 비어 있어요. 설정 → Asana 연결에서 워크스페이스를 고르세요"
@@ -828,7 +835,7 @@ def asana(method: str, path: str, params: dict | None = None, body: dict | None 
         with urllib.request.urlopen(req, timeout=60) as r:
             return json.loads(r.read())
     except urllib.error.HTTPError as e:  # type: ignore[attr-defined]
-        raise AsanaError(f"{method} {path} -> {e.code}: {e.read()[:400]!r}") from None
+        raise AsanaError(f"{method} {path} -> {e.code}: {e.read()[:400]!r}", e.code) from None
 
 
 def asana_all(path: str, params: dict) -> list[dict]:

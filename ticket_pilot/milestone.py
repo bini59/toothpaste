@@ -1,4 +1,4 @@
-"""An Asana parent tagged with milestone_tag or a related Notion milestone page collects its
+"""An Asana task or GitHub issue tagged with milestone_tag, or a related Notion milestone page, collects its
 subtasks on a branch per repo and ships to staging once, as one ticket.
 
   subtask (tagged asana_tag, parent tagged milestone_tag)
@@ -23,7 +23,7 @@ import json
 import os
 import re
 
-from .core import db, event, feature_base, meta_get, meta_set, now, repo_rules, run, settings
+from .core import db, default_repo, event, feature_base, meta_get, meta_set, now, project_map, repo_rules, run, settings
 from . import notifications as N
 from . import runner as R
 from . import notion_stages, notion_tickets
@@ -34,7 +34,8 @@ FINISHED = {"milestone", "done", "closed", "skipped", "staged", "merged", "deplo
 # A merged Notion PR travels with its actual branch even if its task's relation changes later.
 _MERGED_SUBTASKS = """ FROM prs p JOIN tickets s ON s.gid=p.ticket_gid
     WHERE p.repo=:repo AND p.base=:base AND p.state='MERGED'
-      AND (s.parent_gid=:parent OR (:parent LIKE 'notion:%' AND s.gid LIKE 'notion:%')) """
+      AND (s.parent_gid=:parent OR (:parent LIKE 'notion:%' AND s.gid LIKE 'notion:%')
+                               OR (:parent LIKE 'gh:%' AND s.gid LIKE 'gh:%')) """
 # The current run's landed PR fixes its release destination even if the editable relation moves.
 LANDED_NOTION = """SELECT p.ticket_gid, ms.parent_gid, ms.parent_name, ms.url FROM prs p
     JOIN tickets ms ON ms.gid='ms:notion:' || substr(p.base, length('milestone/')+1) || ':' || p.repo
@@ -66,6 +67,9 @@ def parse(gid: str) -> tuple[str, str]:
 
 
 def branch(parent_gid: str) -> str:
+    if parent_gid.startswith("gh:"):
+        # '+' cannot occur in GitHub repository names. Consecutive dots are illegal in a git ref.
+        return PREFIX + re.sub(r"[:/#]", "-", parent_gid).replace("..", "+")
     return PREFIX + parent_gid.removeprefix("notion:")
 
 
@@ -97,16 +101,49 @@ def staging_of(repo: str | None, *, notion: bool = False) -> str | None:
     return None
 
 
+def supported(project: dict) -> tuple[bool, str]:
+    """Check the source binding and eligible work repos from settings, before creating anything."""
+    source = project["source"]
+    repos = [r["repo"] for r in project.get("repos") or []]
+    if source == "github":
+        repos = [default_repo(project)]
+        if tag() == "tp":
+            return False, "GitHub 마일스톤 라벨을 작업 라벨 tp와 다르게 설정하세요"
+    elif source == "notion":
+        cfg = project.get("notion") or {}
+        if not all(cfg.get(k) for k in ("connection_id", "data_source_id", "milestone_data_source_id", "milestone_property")):
+            return False, "프로젝트에 Notion 마일스톤 DB와 관계 열을 설정하세요"
+        if cfg["milestone_data_source_id"] == cfg["data_source_id"] and not all(
+                cfg.get(k) for k in notion_tickets.MILESTONE_KIND_FIELDS):
+            return False, "같은 Notion DB에서 사용할 마일스톤 판별 열과 태그를 설정하세요"
+    elif source == "asana":
+        st = settings()
+        if not (project.get("asana_gid") and st.get("asana_enabled") and st.get("asana_workspace_gid")):
+            return False, "Asana 프로젝트와 워크스페이스를 연결하세요"
+    else:
+        return False, "이 프로젝트의 티켓 출처는 마일스톤을 지원하지 않아요"
+    mapped = project_map()["repos"]
+    if not any(mapped.get(r, {}).get("github") and staging_of(r, notion=source == "notion") for r in repos):
+        return False, "프로젝트에 staging 머지가 설정된 GitHub 레포가 필요해요"
+    return True, ""
+
+
 def notion_milestone(t) -> bool:
     return t["gid"].startswith("ms:notion:") or (t["gid"].startswith("notion:") and in_milestone(t))
 
 
-def on_notion_milestone_branch(t, base: str | None) -> bool:
+def github_milestone(t) -> bool:
+    return t["gid"].startswith("ms:gh:") or (t["gid"].startswith("gh:") and in_milestone(t))
+
+
+def on_milestone_branch(t, base: str | None) -> bool:
     # An open subtask PR can still point here after sync clears its relation.
-    return t["gid"].startswith("notion:") and (base or "").startswith(PREFIX)
+    return t["gid"].startswith(("notion:", "gh:")) and (base or "").startswith(PREFIX)
 
 
 def staging_config_error(t, repo: str) -> str | None:
+    if github_milestone(t) and not staging_of(repo):
+        return f"GitHub 마일스톤을 진행하려면 {repo}의 배포 설정에서 staging 머지를 설정하세요."
     if notion_milestone(t) and not staging_of(repo, notion=True):
         return (f"Notion 마일스톤에는 staging 머지가 필요해요. 프로젝트 → 설정 → 레포별 설정 → {repo} → 배포에서 "
                 "‘staging 브랜치 사용’을 켜고 중간·prod 브랜치와 다른 staging 브랜치를 지정한 뒤, ‘배포 방식’에서 staging을 선택하세요.")
@@ -116,7 +153,7 @@ def staging_config_error(t, repo: str) -> str | None:
 def base_for(t, repo: str | None) -> str | None:
     """Branch t's PR targets (and its worktree starts from): its milestone branch, else the repo's feature base."""
     # A Notion relation fixes the required base even if the repo loses its staging settings before launch.
-    if t is not None and in_milestone(t) and (t["parent_gid"].startswith("notion:") or staging_of(repo)):
+    if t is not None and in_milestone(t) and (t["parent_gid"].startswith(("notion:", "gh:")) or staging_of(repo)):
         return branch(t["parent_gid"])
     return feature_base(repo)
 
@@ -159,6 +196,8 @@ def ensure(con, t, repo: str) -> str:
     p = con.execute("SELECT * FROM tickets WHERE gid=?", (parent,)).fetchone()
     if p:
         pkey = p["key"]
+    elif parent.startswith("gh:"):
+        pkey = parent.removeprefix("gh:")
     elif parent.startswith("notion:"):
         pkey = notion_tickets.ticket_key(parent.removeprefix("notion:"))
     else:
@@ -254,14 +293,14 @@ def mark_done(parent_gid: str, cancel: bool = False) -> None:
     subtask is still in progress, and cleared by tick as soon as one comes in again (reset_done)."""
     from .pipeline import restage
     con = db()
-    like = f"ms:{parent_gid}:%"
-    rows = con.execute("SELECT * FROM tickets WHERE gid LIKE ? AND completed=0", (like,)).fetchall()
+    rows = con.execute("SELECT * FROM tickets WHERE gid LIKE 'ms:%' AND parent_gid=? AND completed=0", (parent_gid,)).fetchall()
     if not rows:
         raise SystemExit("진행할 마일스톤 티켓이 없어요 (아직 투입된 하위작업이 없거나 이미 배포됐어요)")
     busy = unfinished(con, parent_gid)
     if busy and not cancel:
         raise SystemExit(f"하위작업 {len(busy)}개가 아직 진행 중이에요: " + ", ".join(s["key"] for s in busy[:3]))
-    con.execute("UPDATE tickets SET ms_done_at=? WHERE gid LIKE ? AND completed=0", (None if cancel else now(), like))
+    con.execute("UPDATE tickets SET ms_done_at=? WHERE gid LIKE 'ms:%' AND parent_gid=? AND completed=0",
+                (None if cancel else now(), parent_gid))
     if not cancel:
         N.read_ms_ready(con, parent_gid)
     name = rows[0]["parent_name"] or parent_gid
@@ -279,7 +318,7 @@ def reset_done(con, log=print) -> int:
         busy = unfinished(con, p["parent_gid"])
         if not busy:
             continue
-        con.execute("UPDATE tickets SET ms_done_at=NULL WHERE gid LIKE ?", (f"ms:{p['parent_gid']}:%",))
+        con.execute("UPDATE tickets SET ms_done_at=NULL WHERE gid LIKE 'ms:%' AND parent_gid=?", (p["parent_gid"],))
         event(con, "milestone", f"{p['parent_name'] or p['parent_gid']}: 하위작업이 다시 진행 중이라 마일스톤 작업 완료를 "
                                 f"취소했어요 ({', '.join(s['key'] for s in busy[:3])})", p["gid"])
         log(f"milestone {p['parent_gid']}: done mark cleared")
@@ -304,7 +343,7 @@ def notify_ready(con) -> int:
         elif p["waiting"] and pg not in notified and ready(con, pg):
             N.add(con, "ms_ready", f"{p['name'] or pg}: 마일스톤 작업 완료 처리 필요",
                   f"하위작업 {len(subtasks(con, pg))}개가 모두 끝났어요. 마일스톤 페이지에서 마일스톤 작업 완료를 눌러 주세요.",
-                  f"#milestones/{pg}", p["gid"])
+                  N.milestone_href(pg), p["gid"])
             notified.add(pg)
             n += 1
     meta_set(con, "ms_notified", sorted(notified))
@@ -493,7 +532,7 @@ def open_pr(con, t, log=print) -> int:
 # ---------------------------------------------------------------- production
 
 def all_repos_live(con, parent):
-    return (not con.execute("SELECT 1 FROM tickets WHERE gid LIKE ? AND completed=0", (f"ms:{parent}:%",)).fetchone()
+    return (not con.execute("SELECT 1 FROM tickets WHERE gid LIKE 'ms:%' AND parent_gid=? AND completed=0", (parent,)).fetchone()
             and not unfinished(con, parent) and not (parent.startswith("notion:") and unshipped(con, parent)))
 
 
@@ -534,7 +573,7 @@ def complete(con, gid: str, *, pr_url: str | None = None) -> str | None:
             if err:
                 errs.append(f"parent: {err}")
             else:
-                event(con, "release", f"milestone {parent}: every repo is live; Asana parent completed", parent)
+                event(con, "release", f"milestone {parent}: every repo is live; parent completed", parent)
     return "; ".join(errs) or None
 
 
