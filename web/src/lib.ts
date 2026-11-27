@@ -112,11 +112,9 @@ export const reposFor = (s: State, projectGid: string | null) =>
 export function indexState(s: State) {
   const runBy: Record<string, State["runs"]> = {};
   const prBy: Record<string, State["prs"]> = {};
-  const revBy: Record<string, State["reviews"]> = {};
   for (const r of s.runs) (runBy[r.ticket_gid] ??= []).push(r);
   for (const p of s.prs) (prBy[p.ticket_gid] ??= []).push(p);
-  for (const v of s.reviews) (revBy[v.pr_url] ??= []).push(v);
-  return { runBy, prBy, revBy };
+  return { runBy, prBy };
 }
 export type Index = ReturnType<typeof indexState>;
 
