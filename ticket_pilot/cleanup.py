@@ -252,13 +252,16 @@ def _drop_branch(repo_path: str, branch: str) -> str:
     return f"로컬 브랜치 {branch} 삭제"
 
 
-def remove(con, path: str, repo_path: str, branch: str, wait_s: int = 120, force: bool = False) -> str | None:
+def remove(con, path: str, repo_path: str, branch: str, wait_s: int = 120, force: bool = False, *,
+           checkout_id: str | None = None) -> str | None:
     """git worktree remove (force: a skipped ticket's local changes go too), then delete the local branch.
     Legacy Orca worktrees: orca worktree rm, then wait for it (Orca answers before the checkout is gone).
     Returns a note, or None while an Orca removal is still in progress (finished on a later tick)."""
     # Both scan paths commit "removing" before this call, so new tp dev starts stay out during removal.
     worktree_dev.stop(con, path)
-    if not _legacy(path):
+    if checkout_id and not R.owns_checkout(path, branch, checkout_id):
+        raise RuntimeError("삭제를 준비하는 동안 워크트리가 바뀌었어요")
+    if checkout_id or not _legacy(path):
         R.remove(repo_path, path, force=force)
         return "워크트리 삭제, " + _drop_branch(repo_path, branch)
     orca_json(["worktree", "rm", "--worktree", f"path:{path}", *(["--force"] if force else [])], timeout=300)
@@ -325,7 +328,8 @@ def _clean_skipped(con, path: str, runs: list, wt: dict, ps: dict, dry_run: bool
         return
     _upsert(con, path, status="removing", reason="worktree 삭제 중", **base)
     con.commit()
-    note = remove(con, path, last["repo_path"], branch, force=True)
+    ownership = {"checkout_id": reservation["checkout_id"]} if reservation is not None else {}
+    note = remove(con, path, last["repo_path"], branch, force=True, **ownership)
     if note is None:
         log(f"cleanup {last['key']}: orca worktree rm still running, finishing next tick")
         return
@@ -342,8 +346,6 @@ def _clean_pending_skipped(con, wts, repos, ps, dry_run, stats, log):
         path = row["k"].removeprefix("dispatch_pending:")
         pending = json.loads(row["v"])
         wt = wts.get(path)
-        if wt and (wt["branch"] != pending["branch"] or (pending.get("repo") and wt["repo"] != pending["repo"])):
-            continue  # the reservation cannot identify this checkout safely
         if not dry_run:
             con.execute("BEGIN IMMEDIATE")
         try:
@@ -351,24 +353,17 @@ def _clean_pending_skipped(con, wts, repos, ps, dry_run, stats, log):
             t = con.execute("SELECT key FROM tickets WHERE gid=? AND skip=1", (gid,)).fetchone()
             if not t or con.execute("SELECT 1 FROM runs WHERE worktree_path=? AND removed_at IS NULL", (path,)).fetchone():
                 continue
-            if wt and (repo_path := repos.get(wt["repo"])):
+            checkout_id = pending.get("checkout_id")
+            branch = pending["branch"]
+            if (wt and wt["repo"] == pending.get("repo") and wt["branch"] == branch
+                    and (repo_path := repos.get(wt["repo"])) and R.owns_checkout(path, branch, checkout_id)):
                 last = dict(ticket_gid=gid, key=t["key"], repo=wt["repo"], repo_path=repo_path, github=None,
-                            branch=pending["branch"])
+                            branch=branch, checkout_id=checkout_id)
                 _clean_skipped(con, path, [], wt, ps, dry_run, stats, log, reservation=last)
             elif not wt and not dry_run and not os.path.lexists(path):
-                # A previous attempt may have removed the checkout before deleting the branch.
-                prev = con.execute("SELECT * FROM cleanups WHERE path=?", (path,)).fetchone()
-                if (prev and prev["ticket_gid"] == gid and prev["branch"] == pending["branch"]
-                        and prev["status"] in ("removing", "error")):
-                    if not (repo_path := repos.get(prev["repo"])) or not _gone(path, repo_path):
-                        continue
-                    note = "워크트리 삭제, " + _drop_branch(repo_path, prev["branch"])
-                    base = {k: prev[k] for k in ("ticket_gid", "key", "repo", "branch", "checked_at")}
-                    _finish(con, path, [], base, note, os.path.basename(path), "", "", t["key"], gid, skipped=True)
-                    stats["removed"] += 1
-                else:
-                    con.execute("DELETE FROM meta WHERE k=?", (row["k"],))
-                    con.commit()
+                # Once the checkout is gone, the reservation cannot establish ownership of a remaining branch.
+                con.execute("DELETE FROM meta WHERE k=?", (row["k"],))
+                con.commit()
         except Exception as e:  # noqa: BLE001
             if dry_run:
                 raise

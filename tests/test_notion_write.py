@@ -161,6 +161,7 @@ class NotionWrites(NotionDashboard):
         with mock.patch.object(dispatch, "ROOT", self.root), mock.patch.object(dispatch, "github_token", return_value="fixture"), \
                 mock.patch.object(pipeline.R, "worktrees", return_value=[]), mock.patch.object(pipeline.R, "create", return_value={
                     "path": str(self.root / "worktree"), "branch": "tp/example"}), \
+                mock.patch.object(pipeline.R, "mark_checkout", return_value="fixture"), \
                 mock.patch.object(pipeline, "prepare_worktree", return_value=(None, None)), \
                 mock.patch.object(pipeline.R, "launch", return_value="fixture") as launch:
             yield launch

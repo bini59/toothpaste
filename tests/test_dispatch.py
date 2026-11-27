@@ -1,11 +1,12 @@
 """Dispatch selects eligible tickets and records a run after the agent starts."""
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from ticket_pilot import cleanup, core, dispatch as D, milestone, pipeline as P, runner
+from ticket_pilot import briefs, cleanup, core, dispatch as D, milestone, pipeline as P, review, runner
 
 
 class DispatchTest(unittest.TestCase):
@@ -22,6 +23,7 @@ class DispatchTest(unittest.TestCase):
         }}}, "project_map": {}})
         (self.root / "prompts").symlink_to(core.ROOT / "prompts")
         self.enterContext(mock.patch.object(D, "ROOT", self.root))
+        self.enterContext(mock.patch.object(review, "ROOT", self.root))
         self.enterContext(mock.patch.object(D, "github_token", return_value="fixture"))
         self.enterContext(mock.patch.object(D, "asana_comments", return_value=[]))
         self.enterContext(mock.patch.object(D, "gh_json", return_value={"comments": []}))
@@ -30,11 +32,20 @@ class DispatchTest(unittest.TestCase):
         self.enterContext(mock.patch.object(runner, "worktrees", side_effect=lambda _: self.existing.copy()))
         self.create = self.enterContext(mock.patch.object(runner, "create", side_effect=self.make_worktree))
         self.launch = self.enterContext(mock.patch.object(runner, "launch", return_value="fixture"))
+        self.enterContext(mock.patch.object(runner, "mark_checkout", side_effect=lambda path: self.checkout_at(path)["checkout_id"]))
+        self.enterContext(mock.patch.object(runner, "owns_checkout", side_effect=self.owns_checkout))
+
+    def checkout_at(self, path):
+        return next((wt for wt in self.existing if wt["path"] == path), {})
+
+    def owns_checkout(self, path, branch, checkout_id):
+        wt = self.checkout_at(path)
+        return bool(checkout_id and wt.get("checkout_id") == checkout_id and wt["branch"] == branch)
 
     def make_worktree(self, repo, path, name, base, *, before_add=None):
         if before_add:
             before_add()
-        worktree = {"repo": repo, "path": str(self.root / name), "branch": f"tp/{name}"}
+        worktree = {"repo": repo, "path": str(self.root / name), "branch": f"tp/{name}", "checkout_id": name}
         self.existing.append(worktree)
         return worktree
 
@@ -211,14 +222,43 @@ class DispatchTest(unittest.TestCase):
         self.create.assert_called_once()
         self.assertEqual(self.launch.call_count, 2)
 
+    def test_replaced_pending_checkout_is_neither_retried_nor_removed(self):
+        self.ticket("A")
+        self.launch.side_effect = [OSError("start failed"), "fixture"]
+        self.assertEqual(self.run_dispatch(), [])
+        self.existing[0] = self.existing[0] | {"checkout_id": "manual"}
+        P.set_skip("A", True)
+        with mock.patch.object(cleanup, "_ps_entries", return_value={}), \
+                mock.patch.object(cleanup, "docker_prune"), mock.patch.object(cleanup, "remove") as remove:
+            self.assertEqual(cleanup.cleanup_scan(log=lambda *_: None)["removed"], 0)
+            remove.assert_not_called()
+
+        P.set_skip("A", False)
+        self.assertEqual(self.run_dispatch(), ["A"])
+        self.assertNotEqual(self.launch.call_args.args[0], self.existing[0]["path"])
+
+    def test_legacy_reservation_cannot_authorize_retry_or_removal(self):
+        self.ticket("A")
+        self.launch.side_effect = [OSError("start failed"), "fixture"]
+        self.assertEqual(self.run_dispatch(), [])
+        path = self.existing[0]["path"]
+        core.meta_set(self.con, f"dispatch_pending:{path}", {"ticket_gid": "A", "repo": "app", "branch": "tp/a", "base": "dev"})
+        P.set_skip("A", True)
+        with mock.patch.object(cleanup, "_ps_entries", return_value={}), \
+                mock.patch.object(cleanup, "docker_prune"), mock.patch.object(cleanup, "remove") as remove:
+            self.assertEqual(cleanup.cleanup_scan(log=lambda *_: None)["removed"], 0)
+            remove.assert_not_called()
+
+        P.set_skip("A", False)
+        self.assertEqual(self.run_dispatch(), ["A"])
+        self.assertNotEqual(self.launch.call_args.args[0], path)
+
     def test_cleanup_releases_a_skipped_reservation_after_the_server_stops(self):
         self.ticket("A-B")
         self.ticket("A B")
         self.launch.side_effect = [OSError("start failed"), "fixture"]
         self.assertEqual(self.run_dispatch(only="A-B"), [])
         path = self.existing[0]["path"]
-        # The original reservation format did not record the repo.
-        core.meta_set(self.con, f"dispatch_pending:{path}", {"ticket_gid": "A-B", "branch": "tp/a-b", "base": "dev"})
         P.set_skip("A-B", True)
         with mock.patch.object(runner, "root", return_value=self.root), \
                 mock.patch.object(cleanup, "_ps_entries", return_value={}), \
@@ -232,7 +272,7 @@ class DispatchTest(unittest.TestCase):
 
             listeners.return_value = []
             self.assertEqual(scan()["removed"], 1)
-            remove.assert_called_once_with(self.con, path, str(self.root), "tp/a-b", force=True)
+            remove.assert_called_once_with(self.con, path, str(self.root), "tp/a-b", force=True, checkout_id="a-b")
             self.existing.clear()  # cleanup removed the checkout
             self.assertEqual(scan()["removed"], 0)
 
@@ -254,3 +294,83 @@ class DispatchTest(unittest.TestCase):
             remove.assert_not_called()
         self.assertEqual(self.run_dispatch(only="A B"), ["A B"])
         self.assertNotEqual(*[c.args[0] for c in self.launch.call_args_list])
+
+    def test_cleanup_rechecks_the_checkout_before_forcing_removal(self):
+        self.ticket("A")
+        self.launch.side_effect = OSError("start failed")
+        self.assertEqual(self.run_dispatch(), [])
+        P.set_skip("A", True)
+
+        def replace_checkout(*_):
+            self.existing[0] = self.existing[0] | {"checkout_id": "manual"}
+
+        with mock.patch.object(runner, "root", return_value=self.root), \
+                mock.patch.object(cleanup, "_ps_entries", return_value={}), \
+                mock.patch.object(cleanup, "_listening_in", return_value=[]), \
+                mock.patch.object(cleanup, "docker_prune"), \
+                mock.patch.object(cleanup.worktree_dev, "stop", side_effect=replace_checkout), \
+                mock.patch.object(runner, "remove") as remove:
+            self.assertEqual(cleanup.cleanup_scan(log=lambda *_: None)["removed"], 0)
+            remove.assert_not_called()
+
+    def test_work_brief_followups_use_the_ticket_id_when_slugs_collide(self):
+        keys = ("A-B", "A B")
+        for key in keys:
+            self.ticket(key)
+        self.launch.side_effect = [OSError("start failed"), "first", "second"]
+        self.assertEqual(self.run_dispatch(only="A-B"), [])
+        self.existing[0]["branch"] = "manual-branch"
+        for number, key in enumerate(keys, 1):
+            self.assertEqual(self.run_dispatch(only=key), [key])
+            rid = P.latest_run(self.con, key)["id"]
+            self.con.execute("UPDATE runs SET ws_status='in-review' WHERE id=?", (rid,))
+            self.con.execute("""INSERT INTO prs(url,run_id,ticket_gid,repo,number,state,head_sha)
+                              VALUES (?,?,?,'app',?,'OPEN','head')""", (f"https://example.com/pr/{number}", rid, key, number))
+            P.restage(self.con)
+            self.con.commit()
+
+        queue = {item["ticket"]: Path(item["brief_file"]) for item in review.review_queue(self.con)}
+        self.assertNotEqual(queue["A-B"], queue["A B"])
+        for key in keys:
+            file = queue[key]
+            self.assertTrue(file.read_text().startswith(f"# {key}: "))
+            t = dict(P.find_ticket(self.con, key)) | {"reply": "continue"}
+            run = P.latest_run(self.con, key)
+            pr = P.run_pr(self.con, run["id"])
+            self.assertIn(str(file), review.build_rework_brief(t, run, pr, {"source": None, "summary": "", "body": ""}))
+            lines = []
+            review.unblock(self.con, t, dry_run=True, log=lines.append)
+            self.assertIn(str(file), lines[0])
+
+    def test_legacy_brief_is_used_only_for_the_matching_key_and_url(self):
+        url = "https://example.com/ticket/1"
+        legacy = self.root / "data" / "briefs" / "a-b.md"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text(f"# A-B: first\n\n## Ticket\n- Link: {url}\n")
+        self.assertEqual(briefs.find_brief(self.root, "first", "A-B", url), legacy)
+        self.assertIsNone(briefs.find_brief(self.root, "second", "A B", url))
+        self.assertIsNone(briefs.find_brief(self.root, "second", "A-B", "https://example.com/ticket/2"))
+
+
+class CheckoutIdentityTest(unittest.TestCase):
+    def test_git_registration_reuse_does_not_inherit_the_checkout_id(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        repo = root / "repo"
+        checkout = str(root / "worktree")
+        repo.mkdir()
+
+        def git(*args, cwd=repo):
+            return subprocess.run(["git", "-C", cwd, *args], check=True, capture_output=True, text=True).stdout.strip()
+
+        git("init", "-q")
+        git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "base", "--allow-empty")
+        git("worktree", "add", "-qb", "tp/a", checkout)
+        git_dir = git("rev-parse", "--absolute-git-dir", cwd=checkout)
+        checkout_id = runner.mark_checkout(checkout)
+        self.assertTrue(runner.owns_checkout(checkout, "tp/a", checkout_id))
+        with mock.patch.object(cleanup.worktree_dev, "stop"):
+            cleanup.remove(None, checkout, str(repo), "tp/a", checkout_id=checkout_id)
+
+        git("worktree", "add", "-qb", "tp/a", checkout)
+        self.assertEqual(git("rev-parse", "--absolute-git-dir", cwd=checkout), git_dir)
+        self.assertFalse(runner.owns_checkout(checkout, "tp/a", checkout_id))

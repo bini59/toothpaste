@@ -23,6 +23,7 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
+from subprocess import TimeoutExpired
 
 from . import antigravity, chat_usage
 from .asana_write import rules as asana_rules
@@ -137,6 +138,32 @@ def worktrees(repos) -> list[dict]:
                 out.append({"id": wt, "path": wt, "repo": name, "displayName": Path(wt).name,
                             "branch": f.get("branch", "").replace("refs/heads/", "")})
     return out
+
+
+def _checkout_marker(path: str) -> Path:
+    if not (Path(path) / ".git").is_file():
+        raise OSError(f"Not a linked worktree: {path}")
+    git_dir = _git(path, "rev-parse", "--absolute-git-dir", timeout=10).stdout.rstrip("\n")
+    return Path(git_dir) / "ticket-pilot-checkout-id"
+
+
+def mark_checkout(path: str) -> str:
+    """Record a new checkout's identity in Git's per-worktree directory, which Git removes with the registration."""
+    checkout_id = uuid.uuid4().hex
+    with _checkout_marker(path).open("x", encoding="ascii") as f:
+        f.write(checkout_id)
+    return checkout_id
+
+
+def owns_checkout(path: str, branch: str, checkout_id: str | None) -> bool:
+    if not checkout_id:
+        return False
+    try:
+        marker = _checkout_marker(path)
+        head = marker.with_name("HEAD").read_bytes().rstrip(b"\n")
+        return head == os.fsencode(f"ref: refs/heads/{branch}") and marker.read_text(encoding="ascii") == checkout_id
+    except (OSError, RuntimeError, TimeoutExpired, UnicodeError):
+        return False
 
 
 def create(repo: str, repo_path: str, name: str, base: str | None, *, before_add=None) -> dict:

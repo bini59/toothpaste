@@ -9,7 +9,7 @@ from subprocess import TimeoutExpired
 from . import milestone as M
 from . import notion, notion_tickets, review
 from . import runner as R
-from .briefs import render_agent_brief, slug
+from .briefs import render_agent_brief, slug, write_brief
 from .core import (
     ROOT, GitHubNotConnected, asana_comments, db, dispatch_lock, event, gh_json,
     github_token, meta_get, meta_set, repo_rules, repos_for_project, settings,
@@ -130,24 +130,25 @@ def dispatch(dry_run=False, log=print, only: str | None = None) -> list[str]:
 
 
 def _worktree_for(con, t, repo, name, base, existing):
-    """Return the worktree name, checkout (if any), and whether to retry its start."""
+    """Return the name, existing checkout (if any), and checkout ID for a reserved retry."""
     retry_prefix = f"{name}--retry-"
     matches = {n: w for w in existing if w["repo"] == repo["repo"]
                and ((n := Path(w["path"]).name) == name or n.startswith(retry_prefix))}
     reservations = {n: meta_get(con, f"dispatch_pending:{w['path']}") for n, w in matches.items()}
+    owned = {}
     for n, pending in reservations.items():
-        if (pending and pending["ticket_gid"] == t["gid"] and pending["base"] == base
-                and pending.get("repo", repo["repo"]) == repo["repo"]
-                and pending["branch"] == matches[n]["branch"]):
-            return n, matches[n], True
+        wt = matches[n]
+        if (pending and pending.get("repo") == repo["repo"] and pending["branch"] == wt["branch"]
+                and R.owns_checkout(wt["path"], wt["branch"], pending.get("checkout_id"))):
+            owned[n] = pending
+            if pending["ticket_gid"] == t["gid"] and pending["base"] == base:
+                return n, wt, pending["checkout_id"]
     clash = matches.get(name)
     if not clash:
-        return name, None, False
-    pending = reservations[name]
-    if not pending:
-        return name, clash, False  # adopt the existing worktree as usual
-    if (pending["ticket_gid"] != t["gid"] and pending["branch"] == clash["branch"]
-            and pending.get("repo", repo["repo"]) == repo["repo"]):
+        return name, None, None
+    if not reservations[name]:
+        return name, clash, None  # adopt the existing worktree as usual
+    if (pending := owned.get(name)) and pending["ticket_gid"] != t["gid"]:
         owner = con.execute("SELECT * FROM tickets WHERE gid=?", (pending["ticket_gid"],)).fetchone()
         if owner and not owner["skip"] and (owner_repo := chosen_repo(con, owner)) and owner_repo["repo"] == repo["repo"]:
             owner_base = M.base_for(owner, repo["repo"]) or R.worktree_base(repo["repo"])
@@ -155,7 +156,7 @@ def _worktree_for(con, t, repo, name, base, existing):
                 raise RuntimeError("다른 작업이 이 워크트리에서 시작을 재시도할 예정이에요")
     # Keep the previous checkout and its local work. A later retry can reuse the new reservation.
     replacement = next(n for i in count(1) if (n := f"{retry_prefix}{i}") not in matches)
-    return replacement, None, False
+    return replacement, None, None
 
 
 def _dispatch(con, dry_run, log, only):
@@ -247,15 +248,18 @@ def _dispatch(con, dry_run, log, only):
         if existing is None:
             existing = R.worktrees(repo_paths(con))
         wt = None
+        checkout_id = None
         try:
-            worktree_name, clash, retry = _worktree_for(con, t, repo, name, base, existing)
-            adopt = clash and not retry
+            worktree_name, clash, checkout_id = _worktree_for(con, t, repo, name, base, existing)
+            adopt = clash and not checkout_id
             guard(lock=bool(clash))
             if clash and con.execute("SELECT 1 FROM runs WHERE state='active' AND removed_at IS NULL AND worktree_path=?",
                                      (clash["path"],)).fetchone():
                 raise RuntimeError("다른 작업이 이미 이 워크트리를 사용 중이에요")
             if not adopt:
-                if retry:
+                if checkout_id:
+                    if not R.owns_checkout(clash["path"], clash["branch"], checkout_id):
+                        raise RuntimeError("시작을 재시도하는 동안 워크트리가 바뀌었어요")
                     wt = clash
                 else:
                     if (pr_base or "").startswith(M.PREFIX):
@@ -263,8 +267,8 @@ def _dispatch(con, dry_run, log, only):
                         con.commit()  # release milestone.ensure's writes before the remote fetch
                     wt = R.create(repo["repo"], repo["path"], worktree_name, base, before_add=guard)
                     existing.append(wt)
-                (ROOT / "data" / "briefs").mkdir(parents=True, exist_ok=True)
-                (ROOT / "data" / "briefs" / f"{name}.md").write_text(brief)
+                    checkout_id = R.mark_checkout(wt["path"])
+                write_brief(ROOT, t["gid"], brief)
                 setup, prep = prepare_worktree(repo["repo"], repo["path"], wt["path"])
                 agent = R.repo_extra(repo["repo"]).get("agent")
                 description = R.describe(agent)
@@ -279,6 +283,7 @@ def _dispatch(con, dry_run, log, only):
                 # Keep a worktree created by dispatch eligible for launch on the next attempt.
                 meta_set(con, f"dispatch_pending:{wt['path']}", {
                     "ticket_gid": t["gid"], "repo": repo["repo"], "branch": wt["branch"], "base": base,
+                    "checkout_id": checkout_id,
                 })
             event(con, "error", f"{t['key']}: worktree {'start' if wt else 'create'} failed: {e}", t["gid"])
             con.commit()

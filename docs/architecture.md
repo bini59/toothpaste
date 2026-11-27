@@ -20,7 +20,7 @@
 
 - **화면·API** — [Board.tsx](../web/src/views/Board.tsx)와 [Tickets.tsx](../web/src/views/Tickets.tsx)는 `GET /api/state`에서 티켓과 단계를 읽는다. `POST /api/refresh`는 동기화와 작업 상태 스캔을 실행하며, `POST /api/assign`은 투입할 저장소를 지정한다.
 - **동기화** — `tp sync`, 투입 사전 점검과 `POST /api/refresh`는 [ticket_sync.py](../ticket_pilot/ticket_sync.py)의 `sync()`를 호출한다. 이 모듈의 Asana와 GitHub 이슈 처리기, [notion_tickets.py](../ticket_pilot/notion_tickets.py)의 Notion 처리기가 각 소스의 필터, 부모 관계와 완료 상태를 적용한다.
-- **단계와 투입** — [pipeline.py](../ticket_pilot/pipeline.py)의 `compute_stage()`와 `restage()`는 동기화, 투입, PR 추적이 공유한다. `tp dispatch`와 투입 사전 점검은 [dispatch.py](../ticket_pilot/dispatch.py)에서 단계, 의존성, 남은 슬롯과 저장소를 확인한다. 마일스톤 기준 브랜치는 [milestone.py](../ticket_pilot/milestone.py)에 맡기고 작업 브리프를 작성해 [runner.py](../ticket_pilot/runner.py)로 워크트리와 에이전트를 시작한다. 시작에 실패하면 기준 브랜치와 작업 브랜치가 일치하는 워크트리를 재사용하고, 둘 중 하나가 바뀌면 현재 기준으로 새 워크트리를 만든다. [cleanup.py](../ticket_pilot/cleanup.py)는 티켓을 건너뛰면 실행 기록 없이 예약된 워크트리도 안전 여부를 확인한 뒤 정리한다. `--dry-run`은 브리프와 투입 계획을 출력한다.
+- **단계와 투입** — [pipeline.py](../ticket_pilot/pipeline.py)의 `compute_stage()`와 `restage()`는 동기화, 투입, PR 추적이 공유한다. `tp dispatch`와 투입 사전 점검은 [dispatch.py](../ticket_pilot/dispatch.py)에서 단계, 의존성, 남은 슬롯과 저장소를 확인한다. 마일스톤 기준 브랜치는 [milestone.py](../ticket_pilot/milestone.py)에 맡기고 작업 브리프를 작성해 [runner.py](../ticket_pilot/runner.py)로 워크트리와 에이전트를 시작한다. 시작에 실패하면 Git 워크트리 등록에 기록한 식별자와 기준·작업 브랜치를 확인해 같은 체크아웃에서 재시도한다. 일치하지 않으면 현재 기준으로 새 워크트리를 만든다. [cleanup.py](../ticket_pilot/cleanup.py)는 건너뛴 티켓의 실패 예약도 체크아웃 식별자와 작업 브랜치를 확인한 뒤 정리한다. `--dry-run`은 브리프와 투입 계획을 출력한다.
 - **테스트** — [test_issues.py](../tests/test_issues.py), [test_notion.py](../tests/test_notion.py), [test_deps.py](../tests/test_deps.py), [test_dispatch.py](../tests/test_dispatch.py), [test_milestone.py](../tests/test_milestone.py)
 
 ## PR 검사와 리뷰
@@ -28,6 +28,7 @@
 - **화면·API** — [Reviews.tsx](../web/src/views/Reviews.tsx)는 `GET /api/reviews`를 읽는다. 보드의 승인과 검사 예외 요청은 `POST /api/approve`, `POST /api/check-override`를 사용한다.
 - **추적** — `tp scan`, `tp ws-set`, 리뷰 사전 점검과 대시보드 새로고침은 [pipeline.py](../ticket_pilot/pipeline.py)를 거쳐 [pr_tracking.py](../ticket_pilot/pr_tracking.py)에서 워크트리, 에이전트 종료, GitHub PR 상태를 읽고 기록한다. 추적 모듈은 [milestone.py](../ticket_pilot/milestone.py)의 규칙에 따라 열린 PR의 base를 재지정하고, 작업 중 머지와 base 브랜치 직접 push를 감시한다.
 - **검사·리뷰** — [precheck.py](../ticket_pilot/precheck.py)의 `review()`는 스캔 후 [checks.py](../ticket_pilot/checks.py)에서 PR HEAD의 검사 상태를 확인한다. [review.py](../ticket_pilot/review.py)의 `review_queue()`와 `review_save()`가 HEAD별 리뷰 대상과 결과를 관리한다. 리뷰 에이전트는 [automation_review.md](../prompts/automation_review.md)를 따르며, `dispatch()`는 재작업과 충돌·답변 후 재시도를 리뷰 모듈에 위임한다. 티켓 단계 갱신은 `pipeline.restage()`가 수행한다.
+- **브리프** — [briefs.py](../ticket_pilot/briefs.py)는 투입·마일스톤·재작업·충돌 브리프를 티켓 고유 ID별로 저장한다. 리뷰 대기열, 재작업, 답변 후 재시도는 같은 ID로 원래 브리프를 찾는다. 기존 파일은 티켓 키와 소스 링크가 일치할 때 사용한다.
 - **테스트** — [test_pr_tracking.py](../tests/test_pr_tracking.py), [test_checks.py](../tests/test_checks.py), [test_rework_cap.py](../tests/test_rework_cap.py), [test_milestone.py](../tests/test_milestone.py)
 
 ## 마일스톤과 배포

@@ -16,7 +16,7 @@ from . import milestone as M
 from . import notifications as N
 from . import notion, notion_tickets
 from . import runner as R
-from .briefs import render_agent_brief, slug
+from .briefs import find_brief, render_agent_brief, slug, write_brief
 from .core import ROOT, db, event, gh_api, now, orca_json, project_map, run, settings
 from .pr_tracking import latest_run, mirror_orca, run_pr
 
@@ -54,12 +54,12 @@ def review_queue(con=None) -> list[dict]:
         prev = con.execute("SELECT verdict, summary, head_sha, body FROM reviews WHERE pr_url=? AND source IS NULL "
                            "ORDER BY id DESC LIMIT 1", (p["url"],)).fetchone()
         rounds = con.execute("SELECT count(*) c FROM reviews WHERE pr_url=? AND source IS NULL", (p["url"],)).fetchone()["c"]
-        brief = ROOT / "data" / "briefs" / f"{slug(p['key'])}.md"
+        brief = find_brief(ROOT, p["ticket_gid"], p["key"], p["turl"])
         out.append({
             "pr_url": p["url"], "github": p["github"], "number": p["number"], "title": p["title"],
             "head_sha": p["head_sha"], "ticket": p["key"], "ticket_title": p["tname"], "asana_url": p["turl"],
             "worktree_path": p["worktree_path"], "repo_path": p["repo_path"],
-            "brief_file": str(brief) if brief.exists() else None,
+            "brief_file": str(brief) if brief else None,
             "round": rounds + 1,  # 1 = first review; later rounds review the diff since previous_review.head_sha
             "previous_review": dict(prev) if prev else None,
             # tp's own results for this head ([] = the repo has no checks: run its tests yourself as before)
@@ -216,7 +216,7 @@ def escalate_rework(con, t, cap, dry_run=False, log=print) -> bool:
 
 def build_rework_brief(t, run, pr, rv, round_no=1) -> str:
     tpl = (ROOT / "prompts" / "rework_brief.md").read_text()
-    brief = ROOT / "data" / "briefs" / f"{slug(t['key'])}.md"
+    brief = find_brief(ROOT, t["gid"], t["key"], t["url"])
     sha7 = (pr["head_sha"] or "")[:7]
     vals = {
         "OPENING": (f"ticket-pilot's own repo checks (`tp check`, run by the host on head `{sha7}`) failed on your draft "
@@ -225,7 +225,7 @@ def build_rework_brief(t, run, pr, rv, round_no=1) -> str:
                     "requested changes."),
         "KEY": t["key"], "TITLE": t["name"], "URL": t["url"], "PR_URL": pr["url"], "PR_NUMBER": pr["number"],
         "HEAD_SHA": (pr["head_sha"] or "")[:7], "BRANCH": run["branch"] or "", "SUMMARY": rv["summary"] or "",
-        "REVIEW": (rv["body"] or "").strip(), "BRIEF_FILE": str(brief) if brief.exists() else "(not available)",
+        "REVIEW": (rv["body"] or "").strip(), "BRIEF_FILE": str(brief) if brief else "(not available)",
         "ROUND": round_no, "MAX_ROUNDS": max_rework_rounds(pr["repo"]) or "unlimited",
     }
     for k, v in vals.items():
@@ -246,8 +246,7 @@ def rework(con, t, dry_run=False, log=print) -> bool:
     if dry_run:
         log(f"--- would relaunch {st_agent()} in {r['worktree_path']}\n{brief}")
         return False
-    (ROOT / "data" / "briefs").mkdir(parents=True, exist_ok=True)
-    (ROOT / "data" / "briefs" / f"{slug(t['key'])}-rework-{(pr['head_sha'] or '')[:7]}.md").write_text(brief)
+    write_brief(ROOT, t["gid"], brief, name=f"rework-{(pr['head_sha'] or '')[:7]}")
     why = "tp checks failed" if rv["source"] == "check" else "AI review requested changes"
     comment = f"rework: {why} on PR #{pr['number']}"[:120]
     try:
@@ -293,8 +292,7 @@ def resolve_conflict(con, t, dry_run=False, log=print) -> bool:
     if dry_run:
         log(f"--- would relaunch {st_agent()} in {r['worktree_path']}\n{brief}")
         return False
-    (ROOT / "data" / "briefs").mkdir(parents=True, exist_ok=True)
-    (ROOT / "data" / "briefs" / f"{slug(t['key'])}-conflict-{(pr['head_sha'] or '')[:7]}.md").write_text(brief)
+    write_brief(ROOT, t["gid"], brief, name=f"conflict-{(pr['head_sha'] or '')[:7]}")
     comment = f"conflict: PR #{pr['number']} conflicts with {pr['base']}, merging it in"[:120]
     try:
         handle = relaunch(con, r, brief, f"{slug(t['key'])}-conflict", comment, ticket=t)
@@ -323,9 +321,9 @@ def unblock(con, t, dry_run=False, log=print) -> bool:
         log(f"unblock {t['key']}: missing run, skipped")
         return False
     brief = (ROOT / "prompts" / "unblock_brief.md").read_text()
-    orig = ROOT / "data" / "briefs" / f"{slug(t['key'])}.md"
+    orig = find_brief(ROOT, t["gid"], t["key"], t["url"])
     for k, v in {"KEY": t["key"], "TITLE": t["name"], "URL": t["url"], "BRANCH": r["branch"] or "",
-                 "BRIEF_FILE": str(orig) if orig.exists() else "(not available)",
+                 "BRIEF_FILE": str(orig) if orig else "(not available)",
                  "QUESTION": r["ws_comment"] or "", "REPLY": t["reply"]}.items():
         brief = brief.replace("{{" + k + "}}", str(v))
     brief = render_agent_brief(brief, t)
