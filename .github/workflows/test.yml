@@ -1,34 +1,33 @@
-# Tests on Linux and macOS for every PR and push to main (TP-162). GitHub-hosted runners, no secrets.
-# Not the deploy workflow: track.py reads only deploy.yml's runs, so keep this name and these job ids apart from it.
+# Full tests for same-repository staging -> main PRs.
 name: test
+run-name: "test PR #${{ github.event.pull_request.number }} at ${{ github.sha }}"
 on:
   pull_request:
-  push:
+    types: [opened, synchronize, reopened]
     branches: [main]
 permissions:
   contents: read
 concurrency:
   group: test-${{ github.ref }}
-  # a push to main is never cancelled: release.yml releases only commits whose test run succeeded (TP-186)
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 jobs:
-  architecture-map:
-    if: github.event_name == 'pull_request'
+  deployment-pr:
+    if: github.head_ref == 'staging' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      eligible: ${{ steps.head.outputs.eligible }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # include both PR merge parents and their common history
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Check architecture map update
-        env:
-          PR_BASE: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
-        run: python3 scripts/check_architecture_map.py "$PR_BASE" "$PR_HEAD"
+      - name: Match the exact staging branch
+        id: head
+        # Actions compares strings case-insensitively, while Git refs are case-sensitive.
+        run: |
+          if [ "$GITHUB_HEAD_REF" = staging ]; then
+            echo "eligible=true" >> "$GITHUB_OUTPUT"
+          fi
   oss-check:
+    needs: deployment-pr
+    if: needs.deployment-pr.outputs.eligible == 'true'
     # TP-184: no personal or company names, home paths or token-shaped strings in the tree
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -36,6 +35,8 @@ jobs:
       - uses: actions/checkout@v4
       - run: scripts/oss-check.sh
   unit:
+    needs: deployment-pr
+    if: needs.deployment-pr.outputs.eligible == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -71,6 +72,8 @@ jobs:
         working-directory: web
         run: npm ci --no-audit --no-fund && npm run build && npm run check
   docker:
+    needs: deployment-pr
+    if: needs.deployment-pr.outputs.eligible == 'true'
     # TP-164: the image builds, refuses to start without TP_ADMINS / TP_ORG, and asks every visitor to log in
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -97,6 +100,8 @@ jobs:
       - name: update button replaces tp and rolls back a failed image
         run: PYTHONPATH=. python3 tests/docker_update_integration.py
   mode:
+    needs: deployment-pr
+    if: needs.deployment-pr.outputs.eligible == 'true'
     # TP-165: a host install -> tp mode docker --apply -> the container sees the DB and the worktree folder at the same
     # path -> tp mode host --apply brings the DB back (no systemd units on the runner: the service steps are skipped)
     runs-on: ubuntu-latest

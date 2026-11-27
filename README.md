@@ -481,12 +481,21 @@ folder>` exports HEAD for the public repository (`git archive`; `.gitattributes`
 
 ### Versions and `tp update` (`ticket_pilot/update.py`, TP-140)
 
-A version is a git tag `vX.Y.Z` with a GitHub Release; no version file is committed (`web/package.json`'s `version`
-is unused). After each push to `main` whose `test` run passed, `.github/workflows/release.yml` (GitHub's runner) builds
-`web/dist` and tags the commit; in the private repository the `release` job of `deploy.yml` does it after the deploy. Bumped
-from the last `v*` tag by the merged PR's label: none = patch, **`minor`** = minor, **`major`** = major (a direct push
-= patch; first tag `v0.4.0`; release.yml's workflow_dispatch can set the version, e.g. `v0.5.0`). A commit that already
-has a tag is skipped, and a failed release job leaves the deploy green. Put the label on the PR before merging it.
+A version is a git tag `vX.Y.Z` with a GitHub Release (`web/package.json`'s `version` is unused). The full Actions suite
+(OSS, Linux and macOS unit and web checks, Docker, and mode switching) runs when a same-repository `staging → main` PR
+opens, reopens, or receives a new commit. The lightweight architecture map check runs on all PRs, including milestone
+subtasks.
+
+The dashboard and release train wait for that test result before merging the deployment PR. When it merges,
+`.github/workflows/release.yml` verifies that the latest `test` run for that PR's final head passed before the merge and
+that the tested file tree matches the merged one. It uses the actual `main` merge commit
+to tag, publish the GitHub Release and its `web-dist.tar.gz` asset, and publish the Docker image. A `main` push alone
+triggers neither the full tests nor an automatic release. If `main` changes the deployment PR's merge candidate, update
+`staging` to produce a new test result. To publish other `main` changes manually, select `main` in the release workflow's
+**Run workflow** menu and optionally enter a version.
+
+The private repository's `deploy.yml` release job tags after its deploy. Put a `minor` or `major` label on the PR
+before merging for that version bump. The default is a patch bump, and a commit that already has a version tag is skipped.
 
 To update another Mac's checkout (on `main`, no modified tracked files): `bin/tp update` (or `--to <tag|sha>`). It
 fetches the tags, fast-forwards to the latest release tag and, when `web/` changed, replaces `web/dist` with the

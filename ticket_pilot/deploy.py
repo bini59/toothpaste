@@ -33,6 +33,7 @@ from .core import db, event, gh_json, now, repo_rules, run
 from .pipeline import latest_run, restage, run_pr, slug
 from .release import (_execution_for, _finish, _gh, _today, deploy_timeout_min, expire_stale_train,
                       request_approval, staged_by_repo, staging_branch, verify_deploy)
+from .release_checks import AwaitingTests, tested_deployment_head
 
 MODES = {
     "staging": "티켓 → staging",
@@ -424,8 +425,14 @@ def _merge(con, rel, rr, st, log) -> str:
         if failed:
             raise RuntimeError(f"PR #{info['number']} 체크 실패: {', '.join(failed[:5])}")
         if info["mergeable"] == "MERGEABLE" and not pending:
-            _gh(["pr", "merge", url, f"--{st['method']}"])
-            continue  # re-read the merge commit
+            try:
+                tested_head = tested_deployment_head(rel["github"], info["number"])
+            except AwaitingTests:
+                pending.append("test")
+            else:
+                match = ["--match-head-commit", tested_head] if tested_head else []
+                _gh(["pr", "merge", url, f"--{st['method']}", *match])
+                continue  # re-read the merge commit
         if datetime.now(timezone.utc) > deadline:
             raise RuntimeError(f"PR #{info['number']}: {deploy_timeout_min()}분 동안 머지할 수 없었어요 "
                                f"(mergeable={info['mergeable']}, 대기 체크: {', '.join(pending[:5]) or '-'})")

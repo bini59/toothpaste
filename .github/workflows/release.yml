@@ -1,13 +1,8 @@
-# TP-186: tag + GitHub Release for each push to main of the public repository, on GitHub's runner (no self-hosted runner
-# there: a fork PR must not run code on anyone's machine). Same version rule as deploy.yml's release job (bin/tp
-# release-tag, update.release): PR label major / minor, else patch; a commit that already has a v* tag is skipped.
-# Runs after the push's test workflow succeeded. workflow_dispatch tags main's HEAD, optionally with a given version
-# (the first public release, v0.5.0). Installs pick the release up with tp update (update.auto, check_min).
+# Publish verified staging -> main PR merges in the public repository. Manual runs use the selected main commit.
 name: release
 on:
-  workflow_run:
-    workflows: [test]
-    types: [completed]
+  pull_request:
+    types: [closed]
     branches: [main]
   workflow_dispatch:
     inputs:
@@ -15,16 +10,49 @@ on:
         description: "vX.Y.Z (empty = bump the last tag by the merged PR's label)"
         required: false
         default: ""
-concurrency:
-  group: release
-  cancel-in-progress: false
+permissions: {}
 jobs:
-  release:
-    # only the public repository: the private one still tags from deploy.yml, so a commit gets one release
+  verify:
     if: >-
       github.repository == 'bini59/toothpaste' && (
         (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
-        (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'))
+        (github.event_name == 'pull_request' &&
+         github.event.pull_request.merged == true &&
+         github.event.pull_request.head.ref == 'staging' &&
+         github.event.pull_request.head.repo.full_name == github.repository))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      sha: ${{ steps.verify.outputs.sha || steps.manual.outputs.sha }}
+    steps:
+      - name: Select the main commit for a manual release
+        id: manual
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if [ "$GITHUB_REF" = refs/heads/main ]; then
+            echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          persist-credentials: false
+      - name: Verify the test result for the merged PR
+        id: verify
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -m ticket_pilot.release_checks
+
+  release:
+    needs: verify
+    if: needs.verify.outputs.sha != ''
+    concurrency:
+      group: release
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -32,7 +60,7 @@ jobs:
       packages: write
       pull-requests: read  # the merged PR's labels
     env:
-      SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      SHA: ${{ needs.verify.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
         with:

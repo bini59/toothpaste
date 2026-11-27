@@ -314,6 +314,14 @@ staging 열차 레포와 `pr_into_staging` 레포는 티켓 브랜치를 staging
 확인합니다. 무엇으로 확인할지는 레포 설정 → 배포의 **반영 확인**에서 골라요: CodePipeline, GitHub Actions workflow, 또는
 **최신 GitHub Release에 포함**(`prod.release: true`, 릴리즈를 받아 업데이트하는 toothpaste 자신처럼). 완료된 티켓의 worktree와 로컬 브랜치는 자동으로 지워집니다(원격 브랜치와 PR은 남음).
 
+**공개 toothpaste 릴리스**는 같은 저장소의 `staging → main` PR을 열거나 다시 열 때, 또는 새 커밋을 올릴 때 전체 테스트를 실행합니다.
+일반 PR과 마일스톤 하위 PR에도 가벼운 코드 지도 검사가 실행됩니다. 배포 화면과 열차는 전체 테스트 통과를 기다린 뒤 배포 PR을
+머지합니다. 머지 이벤트를 받으면 같은 PR의 최종 커밋에서 전체 테스트가
+머지 전에 성공했고, 테스트한 파일 트리가 머지 결과와 일치하는지 확인합니다. 확인을 통과하면 실제 `main` 머지 커밋으로 태그,
+GitHub Release, 웹 빌드와 Docker 이미지를 발행합니다. `main` push 자체로는 전체 테스트나 자동 릴리스가 실행되지 않습니다.
+`main`이 바뀌어 배포 PR의 머지 결과가 달라지면 `staging`을 갱신해 새 테스트 결과를 받으세요. 다른 `main` 변경을
+수동으로 발행하려면 GitHub Actions의 **release → Run workflow**에서 `main`을 선택하세요. 버전은 선택 입력입니다.
+
 ## agent · 에이전트 규칙
 에이전트(티켓, 채팅)가 해도 되는 것과 안 되는 것.
 
