@@ -6,7 +6,7 @@ for the automations' AI steps). The wrapper writes "<log>.exit" with the exit co
 after its process is gone; "<log>.json" keeps the agent name and session id for `tp attach` (resume by hand).
 
 The agent signals completion itself with `tp ws-set` (pipeline.ws_set); an agent that exits without it is handled by
-pipeline.agent_exits. A repo's settings `setup` script (what Orca's worktree setup ran: install deps, copy .env) runs
+pr_tracking.agent_exits. A repo's settings `setup` script (what Orca's worktree setup ran: install deps, copy .env) runs
 first, in the same wrapper and log, with TP_/ORCA_ROOT_PATH (main checkout) and TP_/ORCA_WORKTREE_PATH set.
 """
 from __future__ import annotations
@@ -26,7 +26,7 @@ from pathlib import Path
 
 from . import antigravity, chat_usage
 from .asana_write import rules as asana_rules
-from .core import DATA, ROOT, gh_env, run, settings
+from .core import DATA, ROOT, feature_base, gh_env, project_map, run, settings
 
 LOGS = DATA / "agents"
 # Full access like the owner's interactive sessions: agents push branches, open PRs and call bin/tp (writes data/tp.db).
@@ -39,6 +39,17 @@ SESSION = re.compile(r"session id: ([0-9a-f-]{36})", re.I)
 # folders never searched for .env files to copy into a new worktree
 ENV_SKIP_DIRS = {"node_modules", ".git", "dist", "build", ".next", ".turbo", ".venv", "venv", "vendor", "coverage", ".cache"}
 ENV_MAX_DEPTH = 3
+
+
+def repo_extra(repo: str | None) -> dict:
+    """A repo's settings entry (repo.<name>): setup, worktree_base, checks, ..."""
+    return ((project_map().get("repos") or {}).get(repo or "") or {})
+
+
+def worktree_base(repo: str) -> str | None:
+    """Branch new ticket worktrees start from: the feature base (PRs target it), else the repo's worktree_base
+    setting (what Orca's per-repo base ref was, e.g. staging or dev), else origin's default branch."""
+    return feature_base(repo) or (repo_extra(repo).get("worktree_base") or "").removeprefix("origin/") or None
 
 
 def node_bin() -> str | None:

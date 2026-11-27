@@ -10,7 +10,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
-from ticket_pilot import accounts, asana_write, chat, core, guide, pipeline, runner
+from ticket_pilot import accounts, asana_write, briefs, chat, core, guide, review, runner
 from ticket_pilot import server as S
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -58,9 +58,9 @@ class GuidePromptTest(unittest.TestCase):
 
     def test_brief_and_chat_prompt_have_the_path(self):
         st = core.DEFAULT_SETTINGS
-        with mock.patch.object(pipeline, "settings", lambda: st), mock.patch.object(chat, "settings", lambda: st), \
+        with mock.patch.object(briefs, "settings", lambda: st), mock.patch.object(chat, "settings", lambda: st), \
                 mock.patch.object(asana_write, "settings", lambda: st), mock.patch.object(runner, "settings", lambda: st):
-            brief = pipeline.build_conflict_brief({"key": "TP-1", "name": "n", "url": "u"}, {"branch": "b"},
+            brief = review.build_conflict_brief({"key": "TP-1", "name": "n", "url": "u"}, {"branch": "b"},
                                                   {"url": "p", "number": 1, "head_sha": "abc", "base": "main"})
             self.assertIn(LINE, brief)
             # the chat prompt gets {{TP}} where runner.launch writes the prompt file

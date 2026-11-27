@@ -3,7 +3,7 @@ Run: python3 -m unittest discover tests"""
 import unittest
 from unittest import mock
 
-from ticket_pilot import checks as K, pipeline as P, runner, server as S
+from ticket_pilot import checks as K, review, runner, server as S
 
 PM = {"repos": {
     "a": {"agent": {"tool": "claude", "model": "opus", "effort": "high"},
@@ -17,10 +17,10 @@ RULES = {"a": {"train": True, "modes": ["staging", "all"], "merge": "merge", "pr
 class FactoryRepoTest(unittest.TestCase):
     def setUp(self):
         for x in (mock.patch.object(S, "project_map", return_value=PM), mock.patch.object(K, "project_map", return_value=PM),
-                  mock.patch.object(P, "project_map", return_value=PM),
+                  mock.patch.object(review, "project_map", return_value=PM),
                   mock.patch.object(S, "repo_rules", side_effect=lambda n: RULES.get(n)),
                   mock.patch.object(runner, "settings", return_value={"agent": "codex"}),
-                  mock.patch.object(P, "settings", return_value={"review": {"max_rework_rounds": 2}})):
+                  mock.patch.object(review, "settings", return_value={"review": {"max_rework_rounds": 2}})):
             x.start()
             self.addCleanup(x.stop)
 

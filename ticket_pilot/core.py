@@ -626,7 +626,7 @@ _COLUMNS = {
     "prs": {"base": "TEXT", "merged_at": "TEXT", "merge_sha": "TEXT", "release_id": "INTEGER", "mergeable": "TEXT",
             # track.py: production verification for merged PRs outside the release train
             "prod_at": "TEXT", "prod_note": "TEXT", "track_sha": "TEXT",
-            # pipeline.conflict_rework: head commit the agent was relaunched on to resolve a base-branch conflict
+            # review.resolve_conflict: head commit the agent was relaunched on to resolve a base-branch conflict
             "conflict_sha": "TEXT", "conflict_at": "TEXT"},
     # chat.py: JSON list of {name, file, size, type} for user and assistant files in data/chat-uploads/<conv>/
     "chat_messages": {"attachments": "TEXT", "input_tokens": "INTEGER", "cache_read_input_tokens": "INTEGER",
@@ -1048,6 +1048,13 @@ def orca_json(args: list[str], timeout: int = 300) -> dict:
     if not j.get("ok", False):
         raise RuntimeError(f"orca {' '.join(args[:3])}: {json.dumps(j.get('error') or j)[:800]}")
     return j["result"]
+
+
+def gh_api(method: str, path: str, body: dict | None = None) -> dict:
+    cmd = ["gh", "api", "-X", method, path]
+    if body is not None:
+        cmd += ["--input", "-"]
+    return json.loads(run(cmd, timeout=120, input=json.dumps(body) if body is not None else None).stdout or "{}")
 
 
 def gh_json(args: list[str], cwd: str | None = None):

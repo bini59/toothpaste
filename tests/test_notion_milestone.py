@@ -4,7 +4,7 @@ from unittest import mock
 
 from test_notion import DOCS_DB, HOME_DB, MEMBER, OWNER, TEAM_DB, NotionDashboard, uid
 from test_ticket_write import command
-from ticket_pilot import cli, core, deploy, milestone, notion, notion_stages, notion_tickets, pipeline, release, server
+from ticket_pilot import cli, core, deploy, milestone, notion, notion_stages, notion_tickets, pipeline, pr_tracking, release, server
 
 
 def relation(*ids):
@@ -781,10 +781,10 @@ class NotionMilestones(NotionDashboard):
               "createdAt": "2026-10-01", "updatedAt": "x", "baseRefName": old, "mergedAt": None,
               "mergeCommit": None, "mergeable": "MERGEABLE"}
         for ahead, target in ((1, old), (0, "staging")):
-            with mock.patch.object(pipeline, "gh_json", return_value=[pr.copy()]), mock.patch.object(pipeline, "run") as patch, \
+            with mock.patch.object(pr_tracking, "gh_json", return_value=[pr.copy()]), mock.patch.object(pr_tracking, "run") as patch, \
                     mock.patch.object(milestone, "_gh", return_value=mock.Mock(stdout="a" * 40)), \
                     mock.patch.object(milestone, "_ahead", return_value=ahead):
-                pipeline.refresh_prs(self.con, r, "tp/example")
+                pr_tracking.refresh_prs(self.con, r, "tp/example")
             if ahead:
                 patch.assert_not_called()
             else:
@@ -837,11 +837,11 @@ class NotionMilestones(NotionDashboard):
             if not rule.get("pr_into_staging"):
                 reads.append({"defaultBranchRef": {"name": target}})
             with (
-                mock.patch.object(pipeline, "gh_json", side_effect=reads),
-                mock.patch.object(pipeline, "run") as retarget,
+                mock.patch.object(pr_tracking, "gh_json", side_effect=reads),
+                mock.patch.object(pr_tracking, "run") as retarget,
                 mock.patch.object(milestone, "_gh", side_effect=[mock.Mock(stdout=fork), mock.Mock(stdout=str(ahead))]) as compare,
             ):
-                pipeline.refresh_prs(self.con, run, "tp/example")
+                pr_tracking.refresh_prs(self.con, run, "tp/example")
             self.assertEqual(compare.call_args_list, [
                 mock.call(["api", f"repos/example/app/compare/{old}...head", "--jq", ".merge_base_commit.sha"]),
                 mock.call(["api", f"repos/example/app/compare/{target}...{fork}", "--jq", ".ahead_by"]),
@@ -889,9 +889,9 @@ class NotionMilestones(NotionDashboard):
         run = pipeline.latest_run(self.con, self.gid)
         pr = {"number": 1, "url": url, "state": "OPEN", "isDraft": True, "headRefOid": "head", "title": "task",
               "createdAt": core.now(), "updatedAt": core.now(), "baseRefName": "main", "mergeable": "MERGEABLE"}
-        with mock.patch.object(pipeline, "gh_json", return_value=[pr]), mock.patch.object(pipeline, "run") as retarget, \
+        with mock.patch.object(pr_tracking, "gh_json", return_value=[pr]), mock.patch.object(pr_tracking, "run") as retarget, \
                 mock.patch.object(milestone, "_gh", return_value=mock.Mock(returncode=0)):
-            pipeline.refresh_prs(self.con, {**dict(run), "github": "example/app"}, "tp/example")
+            pr_tracking.refresh_prs(self.con, {**dict(run), "github": "example/app"}, "tp/example")
         base = milestone.branch(self.parent_gid)
         self.assertIn(f"base={base}", retarget.call_args.args[0])
         self.assertEqual(release.approval_target(self.con, self.ticket(self.gid))[0]["base"], base)

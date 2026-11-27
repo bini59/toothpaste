@@ -77,7 +77,7 @@ def _discover_history(con):
     """Import retained runner logs, including relaunches whose handles were overwritten in runs."""
     if meta_get(con, "metrics_history_discovered"):
         return
-    from .pipeline import slug
+    from .briefs import slug
 
     worktrees = defaultdict(set)
     handles = []
