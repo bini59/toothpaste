@@ -1,6 +1,6 @@
 import { forwardRef, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Armchair, ChartNoAxesCombined, CircleHelp, Flag, ArrowUpCircle, Brush, Inbox as InboxIcon, ClipboardList, FolderGit2, GitPullRequest, History as HistoryIcon, LayoutDashboard, ListChecks, Milestone, Minimize2, type LucideIcon, type LucideProps, LayoutGrid, Package, RefreshCw, Rocket, ScrollText, Search, Settings as SettingsIcon, Star, Timer, Workflow } from "lucide-react";
-import { Button, Header, Sidebar, cn, type BreadcrumbItem, type SidebarEntry } from "./ui";
+import { Activity, Armchair, ChartNoAxesCombined, CircleHelp, Flag, ArrowUpCircle, Brush, Inbox as InboxIcon, ClipboardList, FolderGit2, GitPullRequest, History as HistoryIcon, LayoutDashboard, ListChecks, Milestone, Minimize2, type LucideIcon, type LucideProps, LayoutGrid, Package, RefreshCw, Rocket, ScrollText, Search, Settings as SettingsIcon, Star, Timer, Workflow } from "lucide-react";
+import { Button, Header, Sidebar, cn, type BreadcrumbItem, type SidebarEntry, type SidebarItem } from "./ui";
 import { fetchState, getJson, post, postJson } from "./api";
 import { CommandPalette } from "./components/CommandPalette";
 import { UsageCard } from "./components/UsageCard";
@@ -12,6 +12,7 @@ import { Inbox } from "./views/Inbox";
 import { logout } from "./views/Lan";
 import { Log } from "./views/Log";
 import { Milestones } from "./views/Milestones";
+import { Monitoring } from "./views/Monitoring";
 import { Office } from "./views/Office";
 import { Projects, SECTIONS, parseProjectSub, projectHref, projectOfRepo } from "./views/Projects";
 import { Release } from "./views/Release";
@@ -38,7 +39,7 @@ function MetricsLoadError() {
   );
 }
 const COMPACTIONS_ROUTE = "metrics/chat-compactions";
-
+const MONITORING = "모니터링";
 const TABS = {
   inbox: { label: "수신함", icon: InboxIcon, group: null },
   board: { label: "보드", icon: LayoutDashboard, group: null },
@@ -48,14 +49,15 @@ const TABS = {
   projects: { label: "프로젝트", icon: FolderGit2, group: null },
   tickets: { label: "전체 티켓", icon: ListChecks, group: "티켓" },
   map: { label: "관계도", icon: Workflow, group: "티켓" },
-  dispatch: { label: ROLES.dispatch.label, icon: ClipboardList, group: "모니터링" },
-  reviews: { label: ROLES.reviews.label, icon: GitPullRequest, group: "모니터링" },
-  deploy: { label: ROLES.deploy.label, icon: Package, group: "모니터링" },
-  cleanup: { label: ROLES.cleanup.label, icon: Brush, group: "모니터링" },
-  log: { label: "전체 로그", icon: ScrollText, group: "모니터링" },
-  jobs: { label: "시스템 자동화", icon: Timer, group: "모니터링" },
-  metrics: { label: "지표", icon: ChartNoAxesCombined, group: "모니터링" },
-  history: { label: "설정 이력", icon: HistoryIcon, group: "모니터링" },
+  monitoring: { label: MONITORING, icon: Activity, group: null },
+  metrics: { label: "지표", icon: ChartNoAxesCombined, group: MONITORING },
+  dispatch: { label: ROLES.dispatch.label, icon: ClipboardList, group: MONITORING },
+  reviews: { label: ROLES.reviews.label, icon: GitPullRequest, group: MONITORING },
+  deploy: { label: ROLES.deploy.label, icon: Package, group: MONITORING },
+  cleanup: { label: ROLES.cleanup.label, icon: Brush, group: MONITORING },
+  log: { label: "전체 로그", icon: ScrollText, group: MONITORING },
+  jobs: { label: "시스템 자동화", icon: Timer, group: MONITORING },
+  history: { label: "설정 이력", icon: HistoryIcon, group: MONITORING },
   settings: { label: "설정", icon: SettingsIcon, group: null },
   update: { label: "업데이트", icon: ArrowUpCircle, group: null },
   start: { label: "시작하기", icon: Flag, group: null },
@@ -71,8 +73,9 @@ const readTab = (): Tab => {
 };
 const PALETTE_TABS = [
   ...Object.entries(TABS).map(([key, t]) => ({ key, ...t })),
-  { key: COMPACTIONS_ROUTE, label: "채팅 압축", icon: Minimize2, group: "모니터링 → 지표" },
+  { key: COMPACTIONS_ROUTE, label: "채팅 압축", icon: Minimize2, group: `${MONITORING} → ${TABS.metrics.label}` },
 ];
+const MONITORING_TABS = PALETTE_TABS.filter((t) => t.group === MONITORING);
 const MAC = /Mac|iPhone|iPad/.test(navigator.platform);
 const readSub = () => decodeURIComponent(readRoute().split("/").slice(1).join("/"));
 
@@ -255,6 +258,7 @@ export default function App({ me }: { me: LanMe }) {
     { label: "전체 보기", icon: LayoutGrid, href: "#projects", active: tab === "projects" && !shortcuts.some((p) => p.id === proj.id), onClick: () => setMobileOpen(false) },
   ];
   const nUnread = (projects ?? []).reduce((n, p) => n + (p.unread || 0), nAlerts);
+  const group = TABS[tab].group;
   const items: SidebarEntry[] = [
     { ...leaf("inbox"), label: nUnread ? `수신함 · ${nUnread}` : "수신함" },
     leaf("board"),
@@ -263,20 +267,22 @@ export default function App({ me }: { me: LanMe }) {
     { ...leaf("release"), label: nReady ? `배포 · ${nReady}` : "배포" },
     { label: "프로젝트", items: projectItems },
     { label: "티켓", items: [leaf("tickets"), leaf("map")] },
-    { label: "모니터링", items: [leaf("metrics"), leaf("dispatch"), leaf("reviews"), leaf("deploy"), leaf("cleanup"), leaf("log"), leaf("jobs"), leaf("history")] },
-    leaf("settings"),
-    leaf("help"),
     // until the first project exists (afterwards 설정 and the ⌘K palette still open it)
     ...(projects && !projects.length || tab === "start" ? [leaf("start")] : []),
     // only when tp tick saw a newer release (or while on the page, so it stays after updating)
     ...(s?.meta.version.update || tab === "update"
       ? [{ ...leaf("update"), label: s?.meta.version.update ? `업데이트 ${s.meta.version.update}` : "업데이트" }] : []),
   ];
+  const pinnedItems: SidebarItem[] = [
+    { ...leaf("monitoring"), active: group === MONITORING ? "location" : tab === "monitoring" },
+    leaf("settings"),
+    leaf("help"),
+  ];
   const subLabel = tab === "milestones" && s ? (milestones(s).find((m) => m.gid === sub)?.name ?? sub) : sub;
   const hasSub = (tab === "milestones" || tab === "jobs" || tab === "history") && !!sub;
   const crumbs: BreadcrumbItem[] = [
     { label: "toothpaste", href: "#board" },
-    ...(TABS[tab].group ? [{ label: TABS[tab].group! }] : []),
+    ...(group ? [{ label: group, href: group === MONITORING ? "#monitoring" : undefined }] : []),
     ...(tab === "projects" && proj.id
       ? [{ label: TABS.projects.label, href: "#projects" },
          { label: projects?.find((p) => p.id === proj.id)?.name ?? proj.id, href: projectHref(proj.id) },
@@ -291,6 +297,7 @@ export default function App({ me }: { me: LanMe }) {
         version={(s?.meta.version.current ?? "").replace(/^v/, "")}
         logo={<Logo />}
         items={items}
+        pinnedItems={pinnedItems}
         collapsed={collapsed}
         onCollapsedChange={setCollapsed}
         mobileOpen={mobileOpen}
@@ -331,13 +338,15 @@ export default function App({ me }: { me: LanMe }) {
         />
         <main className={cn("min-w-0 flex-1", chatFull ? "flex min-h-0 flex-col" : "p-4 sm:p-6", tab === "office" && "flex min-h-0 flex-col overflow-y-auto",
           tab === "metrics" && "flex min-h-0 flex-col")}>
-          {error && !s && tab !== "metrics" && <p className="text-sm text-danger-700">데이터를 불러오지 못했어요: {error}</p>}
-          {tab === "metrics" ? (
+          {tab === "monitoring" ? (
+            <Monitoring title={MONITORING} items={MONITORING_TABS} />
+          ) : tab === "metrics" ? (
             <Suspense fallback={<p role="status" className="text-sm text-text-muted">지표를 불러오는 중…</p>}>
               <Metrics sub={sub} />
             </Suspense>
           ) : !s || !I ? (
-            !error && <p className="text-sm text-text-muted">불러오는 중…</p>
+            error ? <p className="text-sm text-danger-700">데이터를 불러오지 못했어요: {error}</p>
+              : <p className="text-sm text-text-muted">불러오는 중…</p>
           ) : tab === "inbox" ? (
             <Inbox onChanged={loadProjects} />
           ) : tab === "board" ? (

@@ -41,9 +41,15 @@
 
 ## 지표
 
-- **화면·API** — [App.tsx](../web/src/App.tsx)가 `#metrics`에서 [Metrics.tsx](../web/src/views/Metrics.tsx)를 불러오며, 기존 `#chat-compactions`는 지표의 채팅 압축 탭을 연다. 개요·주간 추이·시점 비교는 `GET /api/metrics`로 리포트를 읽고 `POST /api/metrics/mark`로 시점을 기록한다.
+- **화면·API** — 모니터링 목록의 지표 링크(`#metrics`)를 열면 [App.tsx](../web/src/App.tsx)가 [Metrics.tsx](../web/src/views/Metrics.tsx)를 불러온다. 채팅 압축 검색 항목(`#metrics/chat-compactions`)과 기존 `#chat-compactions` 주소는 지표의 채팅 압축 탭을 연다. 개요·주간 추이·시점 비교는 `GET /api/metrics`로 리포트를 읽고 `POST /api/metrics/mark`로 시점을 기록한다.
 - **처리** — [metrics_usage.py](../ticket_pilot/metrics_usage.py)가 작업·리뷰 실행을 기록하고 `tp tick`에서 에이전트 로그의 사용량을 수집한다. [metrics.py](../ticket_pilot/metrics.py)의 `report()`가 DB의 티켓, PR, 작업 기록을 기간별로 집계한다. [compactionData.ts](../web/src/views/metrics/compactionData.ts)는 압축 기록을 UTC 기준 일·주·월별로 묶는다. [MetricChart.tsx](../web/src/views/metrics/MetricChart.tsx)는 차트 크기, 텍스트 값, 주간 차트의 시점선과 이름을 관리한다. [Metrics.tsx](../web/src/views/Metrics.tsx)가 차트와 선택 상자의 시점을 비교 탭에 전달한다.
 - **테스트** — [test_metrics.py](../tests/test_metrics.py), [compactionData.check.mjs](../web/src/views/metrics/compactionData.check.mjs)
+
+## 대시보드 탐색과 모니터링
+
+- [App.tsx](../web/src/App.tsx)의 `TABS`가 해시 주소, 검색 항목, 모니터링 목록을 정의한다. [Sidebar.tsx](../web/src/ui/Sidebar.tsx)는 데스크톱 메뉴와 모바일 메뉴에 모니터링 링크를 표시하고, [UsageCard.tsx](../web/src/components/UsageCard.tsx)는 하단에 에이전트 사용량과 한도 초기화 시각을 표시한다.
+- `#monitoring`의 [Monitoring.tsx](../web/src/views/Monitoring.tsx)에서 각 상세 화면의 기존 해시 주소로 이동한다. [useMonitoringData.ts](../web/src/views/useMonitoringData.ts)는 자동화 로그와 리뷰 화면에서 사용하는 `GET /api/events`와 `GET /api/reviews` 응답을 개별적으로 불러온다.
+- `npm run check`는 [monitoring.check.mjs](../web/src/monitoring.check.mjs)의 탐색 검사와 [usage-card.check.mjs](../web/src/components/usage-card.check.mjs)의 한도 초기화 시각 검사를 실행한다.
 
 ## PR에서 코드 지도 갱신
 
