@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 from ticket_pilot import core, migrate as M
+from ticket_pilot.storage import connection
 
 
 def git(cwd, *args):
@@ -26,6 +27,12 @@ def git(cwd, *args):
 
 def munge(p):
     return "".join(c if c.isalnum() else "-" for c in str(p))
+
+
+def _close_test_connection():
+    con = connection._main_connections.get(os.getpid())
+    if con is not None:
+        core.close_db(con)
 
 
 @unittest.skipUnless(sys.platform == "darwin", "tp migrate moves a macOS (launchd) install")
@@ -52,7 +59,7 @@ class MigrateTest(unittest.TestCase):
         self.patched = False
         self.use(self.old)
         self.addCleanup(mock.patch.stopall)
-        self.addCleanup(lambda: core._CON and core._CON.close())  # runs first
+        self.addCleanup(_close_test_connection)  # runs first
         con = core.db()
         core.write_config(con, {"settings": {"worktree_root": "~/wts", "clone_root": "~/clones"}, "project_map": {
             "repos": {"tp": {"path": "~/old/checkout", "github": "o/tp"}, "repoA": {"path": str(self.repo), "github": "o/a"}},
@@ -71,12 +78,12 @@ class MigrateTest(unittest.TestCase):
 
     def use(self, root: Path):
         """Run as the tp of the checkout at root (what bin/tp there would see)."""
-        if self.patched and core._CON is not None:  # ours, never the connection another test left in core
-            core._CON.close()
+        if self.patched:
+            _close_test_connection()
         self.patched = True
         mock.patch.stopall()
         for p in (mock.patch.object(core, "ROOT", root), mock.patch.object(core, "DB_PATH", root / "data" / "tp.db"),
-                  mock.patch.object(core, "_CON", None), mock.patch.dict(os.environ, {"HOME": str(self.home)}),
+                  mock.patch.object(connection, "_main_connections", {}), mock.patch.dict(os.environ, {"HOME": str(self.home)}),
                   mock.patch.object(M, "_launchd_stop"), mock.patch.object(M, "_install")):
             p.start()
         core.config_cache_clear()

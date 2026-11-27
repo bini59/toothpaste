@@ -16,16 +16,13 @@ fi
 
 TP_PYTHON=$(command -v python3) || { echo "python3이 없어요" >&2; exit 1; }
 echo "systemd units use $TP_PYTHON"
-PORT=$(cd "$DIR" && PYTHONPATH="$DIR" "$TP_PYTHON" -c 'from ticket_pilot.core import settings; print(int(settings()["dashboard_port"]))') || {
-  echo "could not read the dashboard_port setting from data/tp.db (see the error above)" >&2; exit 1; }
-HOST=$(cd "$DIR" && PYTHONPATH="$DIR" "$TP_PYTHON" -c 'from ticket_pilot.core import settings; print("0.0.0.0" if settings()["lan_share"]["enabled"] else "127.0.0.1")') || {
-  echo "could not read the lan_share setting from data/tp.db (see the error above)" >&2; exit 1; }
-echo "dashboard listens on $HOST:$PORT"
+. "$DIR/scripts/service-install.sh"
+read_dashboard_settings
 
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 mkdir -p "$DIR/data" "$LOG_DIR" "$UNIT_DIR"
 for unit in ticket-pilot-dashboard.service ticket-pilot-tick.service ticket-pilot-tick.timer; do
-  sed -e "s#__TP_DIR__#$DIR#g" -e "s#__TP_PYTHON__#$TP_PYTHON#g" -e "s#__TP_LOG_DIR__#$LOG_DIR#g" -e "s#__TP_HOME__#$HOME#g" -e "s#__TP_PORT__#$PORT#g" -e "s#__TP_HOST__#$HOST#g" "$DIR/systemd/$unit" > "$UNIT_DIR/$unit.new"
+  render_service_template "$DIR/systemd/$unit" > "$UNIT_DIR/$unit.new"
   mv "$UNIT_DIR/$unit.new" "$UNIT_DIR/$unit"
 done
 systemctl --user daemon-reload
@@ -38,9 +35,4 @@ if [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null || true)" !
   echo "주의: linger가 꺼져 있어 로그아웃하면 대시보드와 tick이 멈춰요. 계속 돌리려면: sudo loginctl enable-linger $(id -un)"
 fi
 
-for _ in $(seq 30); do
-  curl -fs -o /dev/null --max-time 5 http://127.0.0.1:$PORT/api/state && { echo "dashboard up (systemd --user)"; exit 0; }
-  sleep 1
-done
-echo "dashboard did not answer http://127.0.0.1:$PORT/api/state; see $LOG_DIR/dashboard.log (journalctl --user -u ticket-pilot-dashboard)" >&2
-exit 1
+wait_for_dashboard "systemd --user" "$LOG_DIR/dashboard.log (journalctl --user -u ticket-pilot-dashboard)"

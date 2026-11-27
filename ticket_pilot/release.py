@@ -25,8 +25,10 @@ from . import checks as K
 from . import milestone as M
 from . import notifications as N
 from .core import asana, current_actor, db, event, gh_json, meta_get, now, repo_rules, run, settings, train_repos
-from .pipeline import VIOLATION, active_deploy, active_release_pr_urls, latest_run, restage, review_overridden, run_pr
+from .pipeline import active_deploy, active_release_pr_urls, restage
+from .pr_tracking import VIOLATION, latest_run, mirror_orca, run_pr
 from .release_checks import AwaitingTests, PUBLIC_REPOSITORY, StagingAdvanced, merge_deployment_pr
+from .review import review_overridden
 
 
 def cfg() -> dict:
@@ -280,7 +282,6 @@ def process_approvals(log=print) -> int:
                 merged += 1
                 log(f"approved {t['key']}: PR #{pr['number']} merged into {stg}")
                 if r:
-                    from .pipeline import mirror_orca  # cosmetic, legacy Orca runs only
                     mirror_orca(r, "completed", f"PR #{pr['number']} merged to {stg}; waits for prod release")
                 con.commit()
                 continue

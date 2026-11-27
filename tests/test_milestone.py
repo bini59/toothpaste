@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from ticket_pilot import core, deploy
+from ticket_pilot import core, deploy, pr_tracking, review
 from ticket_pilot import milestone as M
 from ticket_pilot import notifications as N
 from ticket_pilot import pipeline as P
@@ -171,9 +171,9 @@ class MilestoneTest(unittest.TestCase):
         listed = [{"number": 7, "url": "u7", "state": "OPEN", "isDraft": False, "headRefOid": "h", "title": "t",
                    "createdAt": "2026-10-01", "updatedAt": "x", "baseRefName": "staging", "mergedAt": None,
                    "mergeCommit": None, "mergeable": "MERGEABLE"}]
-        with mock.patch.object(P, "gh_json", return_value=listed), mock.patch.object(P, "run") as run, \
+        with mock.patch.object(pr_tracking, "gh_json", return_value=listed), mock.patch.object(pr_tracking, "run") as run, \
                 mock.patch.object(M, "ensure") as ensure:
-            P.refresh_prs(self.con, r, "tp/a")
+            pr_tracking.refresh_prs(self.con, r, "tp/a")
         ensure.assert_called_once()
         self.assertIn("base=milestone/P1", run.call_args[0][0])
         self.assertEqual(self.con.execute("SELECT base FROM prs WHERE url='u7'").fetchone()["base"], "milestone/P1")
@@ -473,7 +473,7 @@ class MilestoneTest(unittest.TestCase):
     # ------------------------------------------------------------ 수신함 alerts (TP-105)
 
     def _dbs(self):
-        for mod in (P, M, N):
+        for mod in (P, M, N, review):
             p = mock.patch.object(mod, "db", lambda: self.con)
             p.start()
             self.addCleanup(p.stop)

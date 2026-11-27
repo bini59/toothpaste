@@ -43,7 +43,7 @@ Contributing: [CONTRIBUTING.md](CONTRIBUTING.md).
 Agent in the worktree: implement -> commit -> push -> draft PR
   -> tp ws-set --status in-review                     (completion signal)
   -> or tp ws-set --status todo --comment "BLOCKED: ..."  (needs the owner)
-  exits without either: exit 0 + open PR = in-review, else BLOCKED with its last message (pipeline.agent_exits)
+  exits without either: exit 0 + open PR = in-review, else BLOCKED with its last message (pr_tracking.agent_exits)
   still running after agent_max_min (default 240): stopped, BLOCKED (event agent_timeout)
 
 [automation "ticket-pilot: PR review", every 5 min]
@@ -78,7 +78,7 @@ local runner keep reading their status from Orca until tp relaunches them, and c
 `orca worktree rm`.
 
 Agents run with the owner's gh login and no sandbox, and the base branches are not protected on GitHub, so the brief's
-"never merge / never push to main or staging" rules are checked after the fact on every scan (`pipeline.audit_pushes`):
+"never merge / never push to main or staging" rules are checked after the fact on every scan (`pr_tracking.audit_pushes`):
 a `[KEY] ...` commit of the ticket on main/master/staging/dev/develop/production or the repo's deploy branches while
 its PR is unmerged, or a PR merged while tp's agent for it was running. Either stops the agent, blocks the ticket with
 `BLOCKED: 규칙 위반: ...` (shown as 막힘 even over an approved review) and logs a `violation` event, once per commit/PR.
@@ -111,9 +111,9 @@ Needed first (`tp setup` checks all of them, lists everything missing with how t
 2. `web/dist`: when missing, the current tag's release asset `web-dist.tar.gz` (same download as `tp update`), else `npm ci && npm run build`
 3. port: the setting `dashboard_port` when stored; otherwise 3032, or the next free port when 3032 is taken (another
    user's dashboard on the same Mac), saved to `dashboard_port`. An install from before the setting keeps 3032
-4. `launchd/install.sh` (skipped when this checkout's dashboard already answers), which waits for `/api/state`. On
-   Linux it hands over to `systemd/install.sh` (고급 > Linux); every caller (`tp update`, the deploy workflow, 로컬망 공유)
-   runs `launchd/install.sh` on both systems
+4. `launchd/install.sh` (skipped when this checkout's dashboard already answers). It hands over to `systemd/install.sh`
+   on Linux (고급 > Linux). Both installers read the dashboard settings, render their templates and wait for
+   `/api/state` using `scripts/service-install.sh`. `tp update`, 로컬망 공유 and `tp mode host` also use this entry point.
 5. the browser on `http://127.0.0.1:<port>/#start` (`open` on macOS, `xdg-open` on a Linux desktop); with neither (a
    server) it only prints the address
 
@@ -219,8 +219,8 @@ bin/tp mode host [--apply]                 # back (run on the host; the containe
   installed before).
 - Progress: `~/tp-work/mode-state.json`; a failure prints the finished steps and how to undo them. The dashboard's run
   logs to `~/tp-work/logs/mode.log`. 설정 → 실행 방식 is 127.0.0.1 only on the host; in Docker it shows the host command.
-- While switched to Docker, `tp update` / `tp setup` / `tp migrate` on the host refuse (so a deploy of `main` fails
-  instead of starting a second tick through launchd). The host Docker update manager described above handles dashboard updates.
+- While switched to Docker, `tp update` / `tp setup` / `tp migrate` on the host refuse to run. The host Docker update
+  manager described above handles dashboard updates, and the container keeps writing its DB in `tp-data`.
 
 ### 고급
 
@@ -245,14 +245,14 @@ instead of the keychain; `ASANA_PAT` still wins. `tp migrate` and the launchd li
 `mkdir -p web/dist && gh release download "$(git describe --tags --abbrev=0)" -p web-dist.tar.gz -O - | tar -xz -C web/dist`
 (`bin/tp update` keeps it current). Only people changing the UI build it: `cd web && npm ci && npm run build` (see Web UI).
 Then `launchd/install.sh` -> `http://127.0.0.1:<dashboard_port>` (localhost only).
-The script fills `launchd/com.ticket-pilot.{dashboard,tick}.plist` with this checkout's path, installs them to
-`~/Library/LaunchAgents` (logs in `~/tp-work/logs/{dashboard,tick}.log`; another folder: `TP_LOG_DIR=<absolute path> launchd/install.sh`
-on every run, repository variable `TP_LOG_DIR` for the deploy workflow), restarts them and waits for `/api/state`.
+On macOS the script fills `launchd/com.ticket-pilot.{dashboard,tick}.plist` with this checkout's path, installs them to
+`~/Library/LaunchAgents`, restarts them and waits for `/api/state`. Logs go to `~/tp-work/logs/{dashboard,tick}.log`.
+To use a different directory, run `TP_LOG_DIR=<absolute path> launchd/install.sh` each time you reinstall.
 It first disables any enabled Orca automation whose precheck is this checkout's `bin/tp`, so the two never dispatch twice.
 Agents run as `codex exec --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust` or
 `claude -p --dangerously-skip-permissions` (settings `agent`), with the user's own CLI login and config.
-Python changes need a restart (`launchctl kickstart -k gui/$(id -u)/com.ticket-pilot.dashboard`),
-UI changes a `npm run build`; `config/` is read live. The deploy workflow does both on every push to main.
+Python changes need a restart (`launchctl kickstart -k gui/$(id -u)/com.ticket-pilot.dashboard`). Local UI changes
+need `npm run build`. To apply a published release and restart the services, run `bin/tp update`.
 A host process and a container never share one `tp.db` over a bind mount: SQLite file locks do not cross a Docker
 Desktop bind mount (two writers corrupted the DB on 2026-10-20, TP-8). Docker mode keeps its DB in a named volume that
 only the container writes.
@@ -283,10 +283,10 @@ worktree links, in the launchd plists and in the names of Claude's session folde
    (`~/.claude/projects/<path>`) of the checkout and the worktrees to their new names, so `claude --resume` still finds
    chat and ticket sessions -> `launchd/install.sh` from `<to>/app` (logs: `TP_LOG_DIR`, else `<to>/logs`).
    Repositories themselves (`repos.path`, the owner's own clones) are never moved, only toothpaste's checkout.
-3. Set the repository variable `TP_DIR` to `<to>/app` (`gh variable set TP_DIR --body ...`); until then the next deploy
-   looks for the checkout at the old path and fails. The command ends with this and the other leftovers (old log
-   folder, Python virtualenvs inside worktrees, an optional symlink from the old checkout path for agents that remember
-   the old `bin/tp`).
+3. If an external self-hosted workflow uses `TP_DIR` to locate this checkout, set that repository's variable to
+   `<to>/app` (`gh variable set TP_DIR --repo <owner>/<repo> --body ...`). Update `TP_LOG_DIR` there as well if it
+   supplies a custom log location for this install. The command also lists the old log folder, Python virtualenvs
+   inside worktrees and an optional symlink for agents that remember the old `bin/tp`.
 
 On a failure it prints the finished steps and how to go back by hand (restore the DB backup, `mv` the folders back,
 `git worktree repair`, `launchd/install.sh`). Progress is kept in `<to>/migrate-state.json`: the same command run again
@@ -464,20 +464,15 @@ issues labeled `tp` (key prefix from `github_issues`, else from the repo name); 
 reassigned away, adding it back brings it back. The issue body and comments go into the work brief. Once the change is
 live, toothpaste comments on the issue and closes it (instead of the Asana completion).
 
-toothpaste itself (this repository, 2026-10-20): `main` is production. Its deploy rule sets
-`staging.branch: main`, so **main 머지 승인** on the dashboard merges the reviewed PR into main. The push runs
-`.github/workflows/deploy.yml` on this Mac's self-hosted runner (label `tp-mac`, `~/actions-runners/32_Ticket_pilot`,
-launchd service): `bin/tp update --to "$GITHUB_SHA"` in the host checkout (repository variable `TP_DIR`, required: the
-workflow stops without it; it must stay on `main`), the same command colleagues use (next section). track.py reads the latest green
-run of that workflow, so the ticket moves to 완료 and its issue is closed.
+For `bini59/toothpaste`, `main` is production. A verified `staging` → `main` PR merge runs `.github/workflows/release.yml`
+on GitHub's runner. The deploy rule uses `prod.release: true`. A merged PR is live once the latest GitHub Release's
+tag contains its commit. Host installs apply those releases with `tp update` or `update.auto`, and the Docker update
+manager uses the published image.
 
-The public repository `bini59/toothpaste` (TP-186) has no self-hosted runner (a fork PR must not run code on the owner's
-Mac): its `.github/workflows/release.yml` only tags releases on GitHub's runner, and every install, the owner's
-included, updates from those releases (`tp update`, `update.auto`). Its deploy rule uses `prod.release: true` instead of
-`prod.workflow`: a merged PR is live once the latest GitHub Release's tag contains its commit. Both workflows check
-`github.repository`, so during the switch each repository releases a commit once. `scripts/export-public.sh <empty
-folder>` exports HEAD for the public repository (`git archive`; `.gitattributes` leaves `deploy.yml` out) and runs
-`scripts/oss-check.sh` on the result.
+The separate legacy installation repository has a self-hosted `.github/workflows/deploy.yml` that runs
+`bin/tp update --to "$GITHUB_SHA"` in a host checkout. Its `TP_DIR` and `TP_LOG_DIR` repository variables belong to
+that workflow. `scripts/export-public.sh <empty folder>` exports HEAD with `git archive` and runs
+`scripts/oss-check.sh` on the result. The archive excludes the legacy workflow through `.gitattributes`.
 
 ### Versions and `tp update` (`ticket_pilot/update.py`, TP-140)
 
@@ -507,16 +502,15 @@ It uses the actual `main` merge commit to tag, publish the GitHub Release and it
 the Docker image. A `main` push alone triggers neither the full tests nor an automatic release. To publish other `main`
 changes manually, select `main` in the release workflow's **Run workflow** menu and optionally enter a version.
 
-The private repository's `deploy.yml` release job tags after its deploy. Put a `minor` or `major` label on the PR
-before merging for that version bump. The default is a patch bump, and a commit that already has a version tag is skipped.
+Put a `minor` or `major` label on the PR before merging for that version bump. The default is a patch bump, and
+a commit that already has a version tag is skipped.
 
-To update another Mac's checkout (on `main`, no modified tracked files): `bin/tp update` (or `--to <tag|sha>`). It
+To update a host checkout (on `main`, no modified tracked files), run `bin/tp update` (or `--to <tag|sha>`). It
 fetches the tags, fast-forwards to the latest release tag and, when `web/` changed, replaces `web/dist` with the
 release's `web-dist.tar.gz` (`gh release download`; unpacked in `data/` first, so a broken download keeps the old UI),
 then `launchd/install.sh`, and prints old -> new version with the release notes. No Node needed. Without
 that file (older releases, `--to <sha>`) or with `--build`, it runs `npm ci` (when `web/package-lock.json` changed) and
-`npm run build` instead; the deploy workflow targets a sha, so it always builds. The release job attaches the file
-after each deploy, from the host checkout's `web/dist` once its HEAD is the tagged commit.
+`npm run build` to produce the UI locally. The public release job builds and attaches the asset for the tagged commit.
 A run that stopped after the fast-forward (build or restart failed) finishes when run again. Log:
 `$TP_LOG_DIR/update.log` (default `~/tp-work/logs`). The dashboard shows the version under the title; tp tick fetches the
 tags every `update.check_min` minutes (default 360, at least 10) and, when a newer release exists, the sidebar shows **업데이트 vX.Y.Z**: its page lists the release

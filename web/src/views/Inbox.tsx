@@ -4,7 +4,7 @@ import { Button } from "../ui";
 import { getJson, postJson } from "../api";
 import { ago } from "../lib";
 import type { InboxItem, InboxNotification } from "../types";
-import { UnreadBadge } from "./ProjectChat";
+import { UnreadBadge } from "./chat/ConversationList";
 import { projectHref } from "./Projects";
 
 const KIND = {
@@ -16,14 +16,14 @@ const KIND = {
 type Row = { at: string; chat?: InboxItem; alert?: InboxNotification };
 
 /** 수신함 (TP-103): every project's conversations with unread replies and the unread pipeline alerts (TP-105), newest
- * first. Opening a conversation marks it read there (ProjectChat's Thread), clicking an alert marks it read here;
+ * first. Opening a conversation marks it read there (useChatThread), clicking an alert marks it read here;
  * 모두 읽음 marks only what is listed here. */
 export function Inbox({ onChanged }: { onChanged: () => void }) {
   const [items, setItems] = useState<InboxItem[] | null>(null);
   const [alerts, setAlerts] = useState<InboxNotification[]>([]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  // browser notifications (TP-134, App's notifyNew); undefined: this browser has none
+  // Browser notification permission (TP-134). The app checks for new alerts across all screens.
   const [perm, setPerm] = useState(() => (typeof Notification === "undefined" ? undefined : Notification.permission));
   const load = useCallback(() => getJson<{ items: InboxItem[]; notifications: InboxNotification[] }>("/api/chat/inbox")
     .then((r) => { setItems(r.items); setAlerts(r.notifications); setError(""); }).catch((e) => setError(String(e))), []);

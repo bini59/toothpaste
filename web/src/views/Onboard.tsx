@@ -4,7 +4,8 @@ import { Button, Card, Input, cn } from "../ui";
 import { ConfigError, getJson, postConfig, postJson } from "../api";
 import { Select } from "../components/Select";
 import type { CloneJob, ConfigChange, ConfigState, GithubRepo, PathCheck, ProjectConf, ProjectSource } from "../types";
-import { ChangeTable, Errors, ID_RE, SOURCE_LABEL, slug } from "./Settings";
+import { ChangeTable, Errors } from "./settings/ConfigFeedback";
+import { ID_RE, SOURCE_LABEL, slug } from "./settings/projectFields";
 import { emptyNotion, notionError, NotionPreview, NotionSource } from "./NotionSource";
 
 const ROLES = ["fe", "be", "admin", "app"];

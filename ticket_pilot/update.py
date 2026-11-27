@@ -1,8 +1,7 @@
-"""Versions and updates (TP-140). A version is a git tag vX.Y.Z (+ a GitHub Release), made after each push to main
-(.github/workflows/release.yml on GitHub's runner, TP-186; the old repository's deploy.yml release job before that):
-no version file is committed. `tp update` moves this
-checkout to the latest release tag (or --to <tag|sha>), rebuilds what changed and restarts the launchd agents; the
-deploy workflow runs the same command on the owner's Mac, and the dashboard's 업데이트 button starts it detached."""
+"""Versions and updates (TP-140). A version is a git tag vX.Y.Z with a GitHub Release. The public release.yml
+publishes after a verified staging-to-main merge or a manual main release. `tp update` moves the checkout to
+the latest release tag (or --to <tag|sha>), updates the UI and restarts the host services. The dashboard's
+업데이트 button starts it detached. The separate legacy deploy.yml workflow uses the explicit SHA form."""
 from __future__ import annotations
 
 import fcntl
@@ -227,7 +226,7 @@ def _update(to, root, npm, install, say, build, gh):
     # the dashboard button runs this under launchd's PATH, which lacks nvm's node
     env = {**os.environ, "CI": "1", "PATH": agent_path()}
     if any(f.startswith("web/") for f in changed) or not (web / "dist" / "index.html").is_file():
-        # a sha target (deploy.yml) has no release yet, so it always builds; nor does a HEAD past the tag (resume)
+        # A SHA target or a checkout past a tag needs a local build when updating the UI.
         if build or not TAG.match(target) or _git(root, "rev-parse", "HEAD") != sha \
                 or not _fetch_dist(root, target, gh, env, say):
             nm, lock = web / "node_modules", web / "package-lock.json"
