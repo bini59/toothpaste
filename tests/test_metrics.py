@@ -1,13 +1,12 @@
 import json
 import os
-import re
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from ticket_pilot import core, metrics, metrics_usage, update
+from ticket_pilot import chat_usage, core, metrics, metrics_usage, update
 
 MONDAY = "2026-11-16T00:00:00Z"
 
@@ -116,6 +115,26 @@ class MetricsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             metrics.report(self.con, days=0)
 
+    def test_missing_ws_set_distinguishes_untracked_history_from_a_measured_zero(self):
+        start = metrics_usage.timestamp(MONDAY)
+        week = 7 * 86400
+        self.con.execute("INSERT INTO metric_markers(at,label,kind) VALUES(?,'tracking','manual')", (start,))
+        self.con.executemany("""INSERT INTO metric_agent_runs(log,kind,finished_at,has_ws_set)
+                               VALUES(?,?,?,?)""", [
+            ("legacy.log", "work", start - 1, None),
+            ("tracked.log", "work", start + 1, 1),
+            ("review.log", "review", start + 2, None),
+        ])
+        self.event("ticket", "agent_exit", metrics.iso(start - week - 1))
+        report = metrics.report(self.con, mark_id=1, days=7, at=start + week)
+        before, after = report["comparison"]["before"], report["comparison"]["after"]
+        self.assertEqual(before["values"]["missing_ws_set"], {"value": None, "n": 0})
+        self.assertEqual(before["work_execution_count"], 1)
+        self.assertEqual(after["values"]["missing_ws_set"], {"value": 0, "n": 1})
+        self.assertEqual(after["work_execution_count"], 1)
+        legacy_exit_week = next(row for row in report["weeks"] if row["end"] == metrics.iso(start - week))
+        self.assertEqual(legacy_exit_week["values"]["missing_ws_set"], {"value": 1, "n": 0})
+
     def test_version_markers_wait_for_success_and_deduplicate(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(update, "current", return_value="v1.2.3") as current:
             root = Path(tmp)
@@ -159,19 +178,31 @@ class MetricsTests(unittest.TestCase):
 
             claude_home = root / "claude"
             work = log_record("ticket-1-rework", "claude", wt, claude_home)
-            project = claude_home / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(wt.resolve()))
+            project = claude_home / "projects" / "shortened-project-path"
             project.mkdir(parents=True)
             claude = project / f"{session}.jsonl"
-            call = {"type": "tool_use", "id": "tool-1", "name": "Bash", "input": {"command": "bin/tp screenshot --help; sleep 3"}}
-            assistant = {"type": "assistant", "timestamp": metrics.iso(start + 10),
-                         "message": {"id": "msg", "content": [call], "usage": {
-                             "input_tokens": 10, "cache_creation_input_tokens": 30,
-                             "cache_read_input_tokens": 40, "output_tokens": 5,
-                         }}}
+
+            def response(at, msg, tool_id, command, *, sidechain=False, counts):
+                call = {"type": "tool_use", "id": tool_id, "name": "Bash", "input": {"command": command}}
+                return {"type": "assistant", "timestamp": metrics.iso(start + at), "isSidechain": sidechain,
+                        "message": {"id": msg, "content": [call],
+                                    "usage": dict(zip(chat_usage.FIELDS, counts))}}
+
+            assistant = response(10, "msg", "tool-1", "bin/tp screenshot --help; sleep 3", counts=(10, 40, 30, 5))
+            inline = response(15, "inline", "tool-2", "ls", sidechain=True, counts=(7, 3, 2, 4))
+            child = response(25, "child", "tool-3", "npm run dev; sleep 1", sidechain=True, counts=(13, 17, 19, 2))
             claude.write_text("\n".join(map(json.dumps, [
-                assistant, assistant | {"isSidechain": True},
+                assistant, assistant | {"isSidechain": True}, inline,
                 assistant | {"message": assistant["message"] | {"usage": {"output_tokens": 8}}},
                 assistant | {"message": {"content": 3}},
+            ])))
+            subagents = project / session / "subagents"
+            subagents.mkdir(parents=True)
+            (subagents / "agent-child.jsonl").write_text("\n".join(map(json.dumps, [
+                assistant, inline, child,
+                child | {"message": child["message"] | {"usage": {"output_tokens": 5}}},
+                response(-1, "old", "old", "ls", sidechain=True, counts=(500, 0, 0, 3)),
+                response(61, "late", "late", "ls", sidechain=True, counts=(500, 0, 0, 3)),
             ])))
 
             codex_home = root / "codex"
@@ -204,13 +235,17 @@ class MetricsTests(unittest.TestCase):
             ])
             with patch.object(metrics_usage.runner, "LOGS", logs):
                 self.assertEqual(metrics_usage.collect(self.con), 2)
+                self.assertEqual(metrics_usage.measure(
+                    work, metrics_usage._meta(work), start, start + 60, (start, start + 20), ("one", "two"),
+                ), ("claude", 158, 3, [1, 1, 2], {"one": 104, "two": 54}))
                 claude.unlink()
+                self.assertEqual(metrics_usage.measure(work, metrics_usage._meta(work), start, start + 60)[1:3], (155, 3))
                 codex.unlink()
                 self.assertEqual(metrics_usage.collect(self.con), 0)
             rows = self.con.execute("""SELECT log,tool,tokens,tool_calls,help_calls,dev_calls,wait_calls
                                        FROM metric_agent_runs ORDER BY kind DESC""").fetchall()
             self.assertEqual([tuple(r) for r in rows], [
-                (str(work), "claude", 88, 1, 1, 0, 1), (str(review), "codex", 100, 1, 1, 1, 1),
+                (str(work), "claude", 158, 3, 1, 1, 2), (str(review), "codex", 100, 1, 1, 1, 1),
             ])
             shares = self.con.execute("SELECT ticket_gid,tokens FROM metric_review_tokens ORDER BY ticket_gid").fetchall()
             self.assertEqual([tuple(r) for r in shares], [("one", 40), ("two", 60)])

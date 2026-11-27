@@ -211,7 +211,7 @@ def _read_codex(path, start, end, on_call, on_tool):
 
 
 def measure(log: Path, meta: dict, start: float, end: float, boundaries=(), owners=()):
-    """Read one transcript. Return total tokens, numeric tool counts and review token shares."""
+    """Read the session's transcripts. Return tokens, numeric tool counts and review token shares."""
     seen = set()
     patterns = [0, 0, 0]
     tokens = None
@@ -250,7 +250,7 @@ def measure(log: Path, meta: dict, start: float, end: float, boundaries=(), owne
     readable = False
     if tool == "claude" and isinstance(session, str) and isinstance(meta.get("cwd"), str):
         usage = chat_usage.transcript(meta["cwd"], session, start, end, on_call=on_call, on_tool=on_tool,
-                                      config_dir=meta.get("transcript_home"))
+                                      config_dir=meta.get("transcript_home"), include_subagents=True)
         readable = usage[0] is not None or bool(seen)
     elif (tool == "codex" and isinstance(meta.get("cwd"), str) and session
           and (path := _codex_log(meta, session))):

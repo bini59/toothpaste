@@ -185,16 +185,19 @@ def _period(records, start, end, observed_until):
 
     events = [(kind, message) for at, kind, message in stability if _inside(at, start, observed_end)]
     errors = {message for kind, message in events if kind == "error"}
+    work = [r for r in finished if r["kind"] == "work"]
+    tracked = [r for r in work if r["has_ws_set"] is not None]
     missing = sum(kind in ("agent_exit", "agent_timeout") for kind, _ in events)
-    missing += sum(r["has_ws_set"] == 0 for r in finished)
+    missing += sum(r["has_ws_set"] == 0 for r in tracked)
+    values["missing_ws_set"] = _metric(missing if tracked or missing else None, len(tracked))
     conflicts = sum(kind == "conflict_rework" for kind, _ in events)
     stability_metrics = (("errors", len(errors), sum(kind == "error" for kind, _ in events)),
-                         ("missing_ws_set", missing, missing), ("conflict_rework", conflicts, conflicts))
+                         ("conflict_rework", conflicts, conflicts))
     for key, count, samples in stability_metrics:
         values[key] = _metric(count if start < observed_end else None, samples)
     return {"start": iso(start), "end": iso(end), "observed_until": iso(observed_end) if start < observed_end else None,
             "values": values, "token_sources": sorted(sources), "token_runs": measured, "linked_runs": linked,
-            "execution_count": len(finished)}
+            "execution_count": len(finished), "work_execution_count": len(work)}
 
 
 def report(con, *, mark_id=None, days=DEFAULT_DAYS, at=None, rules=None):
