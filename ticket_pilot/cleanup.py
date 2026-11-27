@@ -172,10 +172,10 @@ def _ps_entries() -> dict[str, dict]:
 
 
 def _listening_in(path: str, managed: int | None = None) -> list[str]:
-    """Listeners that need the worktree kept. Cleanup can terminate its registered tp dev process group."""
+    """Listeners that need the worktree kept. Cleanup can terminate its registered tp dev session."""
     if not shutil.which("lsof") and os.path.exists("/proc/net/tcp"):
         return [f"{p['name']}({p['pid']}) :{p['port']}" for p in devserver.proc_listeners(directory=path)
-                if p["name"] not in AGENT_PROCS and not worktree_dev.in_group(p["pid"], managed)]
+                if p["name"] not in AGENT_PROCS and not worktree_dev.in_session(p["pid"], managed)]
     p = run(["lsof", "-nP", "-d", "cwd", "-Fpcn"], check=False, timeout=60)
     pids, cur, name = {}, None, ""
     for ln in p.stdout.splitlines():
@@ -187,7 +187,7 @@ def _listening_in(path: str, managed: int | None = None) -> list[str]:
             pids[cur] = name
     out = []
     for pid, name in pids.items():
-        if name in AGENT_PROCS or worktree_dev.in_group(int(pid), managed):
+        if name in AGENT_PROCS or worktree_dev.in_session(int(pid), managed):
             continue
         q = run(["lsof", "-nP", "-a", "-p", pid, "-iTCP", "-sTCP:LISTEN", "-Fn"], check=False, timeout=30)
         ports = [ln[1:] for ln in q.stdout.splitlines() if ln.startswith("n")]

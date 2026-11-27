@@ -33,16 +33,14 @@ from pathlib import Path
 from . import milestone as M
 from . import runner as R
 from .core import DATA, db, event, meta_get, meta_set, now, run
+from .dev_package import PORT_FLAG, bind_port
 
 KEY = "dev_servers"
 LOGS = DATA / "dev"
 SCRIPTS = ("dev", "start:dev", "develop", "serve", "start")
 EXAMPLE = re.compile(r"^\.env\.(example|sample|template|dist)$")
 ENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$")
-PORT_FLAG = re.compile(r"(?:^|\s)(?:-p|--port)[ =](\d{2,5})\b")
 VITE_CMD = re.compile(r"(^|[\s/])(vite|remix vite:dev|react-router dev)(?=\s|$)")
-VITE_SERVER = re.compile(r"(?:^|[\s/])(?:vite(?!\s+(?:build|optimize)\b)(?:\s+(?:dev|serve|preview)\b)?"
-                         r"|remix vite:dev|react-router dev)(?=\s|$)")
 # env vars of the dashboard that a dev server has no business seeing
 SECRET_ENV = ("ASANA_PAT", "GITHUB_TOKEN", "GH_TOKEN", "TP_DB", "TP_PORT", "TP_HOST", "CLAUDE_CODE_OAUTH_TOKEN",
               "ANTHROPIC_API_KEY")
@@ -176,7 +174,7 @@ def _vite_port(wt: Path) -> int | None:
     return None
 
 
-def detect(repo: str, wt: Path, *, port_hint: int | None = None) -> dict:
+def detect(repo: str, wt: Path, *, port_hint: int | None = None, ticket: bool = False) -> dict:
     """{cmd (with {port}), port, how}: what start() runs and on which port by default."""
     from .pipeline import repo_extra
     conf = repo_extra(repo).get("dev") or {}
@@ -184,40 +182,34 @@ def detect(repo: str, wt: Path, *, port_hint: int | None = None) -> dict:
         scripts = json.loads((wt / "package.json").read_text()).get("scripts") or {}
     except (OSError, ValueError):
         scripts = {}
-    if conf.get("cmd"):
-        cmd, how, body, kind = conf["cmd"], "설정", conf["cmd"], _kind(conf["cmd"])
+    configured = conf.get("cmd")
+    if configured:
+        cmd = body = configured
+        how = "설정"
+        if ticket:
+            package_run = re.fullmatch(r"(?:npm|pnpm|yarn)\s+(?:(?:run|run-script)\s+)?([\w:.-]+)", cmd.strip())
+            if package_run and package_run[1] in scripts:
+                script = package_run[1]
+                body = scripts[script]
     else:
         script = next((s for s in SCRIPTS if s in scripts), None)
         if not script:
             raise DevError(f"{repo}: dev 명령을 못 찾았어요. 설정 > 기본 > dev 서버 명령을 채워주세요")
-        body, kind, pm = scripts[script], _kind(scripts[script]), _pm(wt)
+        body, pm = scripts[script], _pm(wt)
         cmd = f"{pm} run {script}"
         how = f"package.json {script}: {body}"
-        if kind and not PORT_FLAG.search(body):
-            extra = "--port {port}" + (" --strictPort" if kind == "vite" else "")
-            cmd += f" {'-- ' if pm == 'npm' else ''}{extra}"
+    kind = _kind(re.sub(r"[;&|()]", " ", body) if ticket else body)
     fixed = PORT_FLAG.search(body)
     port = (conf.get("port") or (int(fixed.group(1)) if fixed else None) or _env_port(wt)
             or (_vite_port(wt) if kind == "vite" else None) or {"next": 3000, "vite": 5173}.get(kind or "")
             or (3000 if "nest start" in body else port_hint))
     if not port:
         raise DevError(f"{repo}: dev 서버 포트를 모르겠어요. 설정 > 기본 > dev 서버 포트를 채워주세요")
-    result = {"cmd": cmd, "port": int(port), "how": how, "fixed": bool(fixed) and "{port}" not in cmd}
-    if result["fixed"]:
-        # The ticket CLI may have to move this server. Keep the milestone's fixed command intact.
-        result["fixed_port"] = int(fixed[1])
-        flag = fixed.group().strip().replace(fixed[1], "{port}")
-        if conf.get("cmd"):
-            result["port_cmd"] = body[:fixed.start(1)] + "{port}" + body[fixed.end(1):]
-        else:
-            result["port_cmd"] = f"{cmd} {'-- ' if pm == 'npm' else ''}{flag}" + (" --strictPort" if kind == "vite" else "")
-    elif conf.get("cmd") and kind == "vite" and "{port}" not in cmd and not re.search(r"\$\{?PORT\b", cmd):
-        # Vite does not read PORT. A configured script may build first and then serve via `vite preview`.
-        servers = list(VITE_SERVER.finditer(cmd))
-        if servers:
-            end = servers[-1].end()
-            result["port_cmd"] = cmd[:end] + " --port {port} --strictPort" + cmd[end:]
-    return result
+    if not ticket and not configured and kind and not fixed:
+        extra = "--port {port}" + (" --strictPort" if kind == "vite" else "")
+        cmd += f" {'-- ' if pm == 'npm' else ''}{extra}"
+    return {"cmd": bind_port(cmd, "{port}") if ticket else cmd,
+            "port": int(port), "how": how, "fixed": bool(fixed) and "{port}" not in cmd}
 
 
 # ---------------------------------------------------------------- ports
@@ -377,6 +369,8 @@ def _launch(wt: Path, repo_path: str, port: int, cmd: str, setup: str | None, lo
     env = {k: v for k, v in os.environ.items() if k not in SECRET_ENV}
     env.update({"PATH": path, "PORT": str(port), "TP_SETUP": setup or "", "TP_DEV": cmd,
                 "TP_ROOT_PATH": repo_path, "TP_WORKTREE_PATH": str(wt)})
+    if supervise:
+        env["TP_DEV_PORT"] = str(port)
     with log.open("w") as out:
         # Keep a launch-specific fd in worktree children even when a script redirects stdout and stderr.
         return subprocess.Popen(args, cwd=str(wt), stdout=out, stderr=subprocess.STDOUT,

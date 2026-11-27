@@ -2,6 +2,7 @@
 import json
 import os
 import shlex
+import shutil
 import signal
 import socket
 import sqlite3
@@ -146,9 +147,60 @@ class WorktreeDevTest(unittest.TestCase):
         for invocation in ("cd web && vite", "vite build && vite preview"):
             with self.subTest(invocation=invocation):
                 self.cmd = invocation + " --host 127.0.0.1"
-                detected = devserver.detect("site", self.wt)
-                self.assertEqual(detected["cmd"], self.cmd)  # milestone command
-                self.assertEqual(detected["port_cmd"], invocation + " --port {port} --strictPort --host 127.0.0.1")
+                self.assertEqual(devserver.detect("site", self.wt)["cmd"], self.cmd)
+                detected = devserver.detect("site", self.wt, ticket=True)
+                self.assertEqual(detected["cmd"], invocation + " --port {port} --strictPort --host 127.0.0.1")
+
+    @unittest.skipUnless(shutil.which("npm") and shutil.which("node"), "npm and Node required")
+    def test_package_scripts_pass_the_allocated_port_to_the_listener(self):
+        # The Python CI runs before npm ci. Use an offline Vite CLI stand-in that requires
+        # the server flags and actually listens, even when npm starts it in the background.
+        vite = self.wt / "node_modules/.bin/vite"
+        vite.parent.mkdir(parents=True)
+        vite.write_text("""#!/usr/bin/env node
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+if (args.includes('build')) {
+  assert.deepEqual(args, ['--mode', 'staging', 'build']);
+  fs.writeFileSync('built', '');
+} else {
+  assert(args.includes('--strictPort'));
+  const port = Number(args.join(' ').match(/--port[= ]([0-9]+)/)[1]);
+  assert.equal(port, Number(process.env.PORT));
+  require('node:http').createServer((req, res) => res.end(fs.readFileSync('index.html')))
+    .listen(port, '127.0.0.1');
+}
+""")
+        vite.chmod(0o755)
+        (self.wt / "package-lock.json").touch()
+        cases = [("npm run dev", "vite", True), ("npm run dev", "vite", False),
+                 ("", "vite --port 5173 & wait", True),
+                 ("npm run dev -- --port {port}", "vite --port 5173 & wait", True),
+                 ("npm run dev", 'NODE_OPTIONS=--no-warnings vite --port "$PORT" & wait', True),
+                 ("", "vite --mode staging build && vite preview --port=5173 & wait", False)]
+        for command, body, explicit in cases:
+            with self.subTest(command=command, body=body, explicit=explicit), socket.socket() as foreign:
+                (self.wt / "package.json").write_text(json.dumps({"scripts": {"predev": "touch prepared", "dev": body}}))
+                self.cmd = command
+                foreign.bind(("127.0.0.1", 0))
+                foreign.listen()
+                self.port = foreign.getsockname()[1]
+                requested = free_port() if explicit else None
+                with mock.patch.object(dev, "READY_TIMEOUT", 10):
+                    server = dev.start(self.con, self.wt, requested)
+                self.assertNotEqual(server["port"], self.port)
+                if explicit:
+                    self.assertEqual(server["port"], requested)
+                with urlopen(server["url"], timeout=2) as response:
+                    self.assertEqual(response.read(), b"ticket preview")
+                self.assertTrue((self.wt / "prepared").is_file())
+                (self.wt / "prepared").unlink()
+                if "build" in body:
+                    self.assertTrue((self.wt / "built").is_file())
+                self.stop()
+                self.assertFalse(devserver.listeners(server["port"]))
+                self.assertTrue(devserver.port_open(self.port))
 
     def test_background_listener_with_redirected_logs_stops_with_the_group(self):
         self.cmd = self.cmd.removeprefix("exec ") + " >app.log 2>&1 &"
@@ -156,6 +208,28 @@ class WorktreeDevTest(unittest.TestCase):
         self.assertEqual(dev.start(self.con, self.wt)["pid"], server["pid"])
         self.stop()
         self.assertFalse(devserver.port_open(server["port"]))
+
+    @unittest.skipUnless(shutil.which("npm"), "npm required")
+    def test_fixed_port_in_a_custom_package_script_is_replaced_before_wait(self):
+        command = f'{shlex.quote(sys.executable)} serve.py --port {self.port} & wait'
+        (self.wt / "package.json").write_text(json.dumps({"scripts": {"predev": "touch prepared", "dev": command}}))
+        (self.wt / "package-lock.json").touch()
+        (self.wt / "serve.py").write_text(
+            "import http.server, os, pathlib, sys\n"
+            "assert pathlib.Path('prepared').exists()\n"
+            "assert sys.argv[1:] == ['--port', os.environ['PORT']]\n"
+            "http.server.HTTPServer(('127.0.0.1', int(sys.argv[2])), http.server.SimpleHTTPRequestHandler)"
+            ".serve_forever()\n")
+        self.cmd = "npm run dev"
+        with socket.socket() as foreign, mock.patch.object(dev, "READY_TIMEOUT", 10):
+            foreign.bind(("127.0.0.1", self.port))
+            foreign.listen()
+            server = dev.start(self.con, self.wt)
+            self.assertNotEqual(server["port"], self.port)
+            with urlopen(server["url"], timeout=2) as response:
+                self.assertEqual(response.read(), b"ticket preview")
+            self.stop()
+            self.assertTrue(devserver.port_open(self.port))
 
     def test_stop_rechecks_the_group_when_signalling_is_denied(self):
         log = self.root / "server.log"
@@ -182,9 +256,10 @@ class WorktreeDevTest(unittest.TestCase):
                 self.stop()
             self.assertIsNone(dev.record(self.con, self.wt))
 
-    def test_stop_kills_a_child_that_ignores_term_and_closes_the_log(self):
+    def test_listener_in_another_group_is_reused_and_stopped_even_if_it_ignores_term(self):
         (self.wt / "serve.py").write_text(
             "import os, signal, socket, time\n"
+            "os.setpgid(0, 0)\n"
             "os.closerange(3, 1024)\n"
             "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
             "s = socket.socket()\n"
@@ -193,6 +268,7 @@ class WorktreeDevTest(unittest.TestCase):
             "while os.path.exists(__file__): time.sleep(0.1)\n")
         self.cmd = f"{shlex.quote(sys.executable)} serve.py >app.log 2>&1 &"
         server = dev.start(self.con, self.wt)
+        self.assertTrue(dev.start(self.con, self.wt)["reused"])
         self.stop()
         self.assertFalse(devserver.port_open(server["port"]))
 

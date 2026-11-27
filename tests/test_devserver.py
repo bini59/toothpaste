@@ -74,6 +74,17 @@ class DetectTest(unittest.TestCase):
         d = DS.detect("X", self.d)
         self.assertEqual((d["cmd"], d["port"]), ("make serve P={port}", 8100))
 
+    def test_configured_package_runner_uses_the_named_script_for_ticket_port_detection(self):
+        self.pkg({"dev": "next dev", "ui": "vite --port 6200 & wait"})
+        for cmd in ("npm run ui", "pnpm run-script ui", "yarn ui"):
+            with self.subTest(cmd=cmd):
+                self.conf = {"dev": {"cmd": cmd}}
+                result = DS.detect("Site", self.d, ticket=True)
+                self.assertTrue(result["cmd"].endswith(" " + cmd))
+                self.assertEqual(result["port"], 6200)
+                with self.assertRaises(DS.DevError):
+                    DS.detect("Site", self.d)  # milestone preflight still requires its configured port
+
     def test_env_check_reports_missing_and_empty_keys_without_values(self):
         main = Path(tempfile.mkdtemp())
         (main / ".env").write_text("A=1\nB=\n")

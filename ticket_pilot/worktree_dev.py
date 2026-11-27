@@ -77,10 +77,10 @@ def node_path(wt: Path) -> str:
     raise D.DevError(f"{wt / '.nvmrc'}: {nvm}에 Node {want} 버전을 설치해주세요")
 
 
-def in_group(pid: int, group: int | None) -> bool:
+def in_session(pid: int, session: int | None) -> bool:
     try:
-        return group is not None and os.getpgid(pid) == group
-    except ProcessLookupError:
+        return session is not None and os.getsid(pid) == session
+    except (PermissionError, ProcessLookupError):
         return False
 
 
@@ -89,29 +89,25 @@ def managed_pid(rec: dict | None) -> int | None:
     if not rec:
         return None
     pid, log = rec["pid"], rec["log"]
-    if R._alive(pid) and in_group(pid, pid):
+    if R._alive(pid) and in_session(pid, pid):
         args = run(["ps", "-ww", "-p", str(pid), "-o", "args="], check=False).stdout.rstrip("\n")
         if args.endswith(" " + log):
             return pid
-    # A shell script may leave a child serving after its leader exits. Check both the group and its unique log.
+    # A child can outlive the leader or run in a new process group. Check its session and the unique log.
     if not Path(log).is_file():
         return None
-    try:
-        os.killpg(pid, 0)
-    except ProcessLookupError:
-        return None
-    except PermissionError:
-        pass  # The group may still have our log open even if we cannot signal it.
     if Path("/proc/self/fd").is_dir():
         for proc in Path("/proc").glob("[0-9]*"):
-            if in_group(int(proc.name), pid):
+            if in_session(int(proc.name), pid):
                 try:
                     if any(os.path.realpath(fd) == log for fd in (proc / "fd").iterdir()):
                         return pid
                 except (FileNotFoundError, PermissionError, ProcessLookupError):
                     continue
-    elif run(["lsof", "-t", "-a", "-g", str(pid), "--", log], check=False, timeout=10).stdout.strip():
-        return pid
+    else:
+        holders = run(["lsof", "-t", "--", log], check=False, timeout=10).stdout.splitlines()
+        if any(p.isdigit() and in_session(int(p), pid) for p in holders):
+            return pid
     return None
 
 
@@ -130,7 +126,7 @@ def _state(rec: dict | None) -> str:
     if D.port_open(rec["port"]):
         listeners = D.listeners(rec["port"])
         if listeners:
-            return "running" if all(in_group(p["pid"], pid) for p in listeners) else "port-in-use"
+            return "running" if all(in_session(p["pid"], pid) for p in listeners) else "port-in-use"
     return "starting"
 
 
@@ -149,58 +145,51 @@ def _launch(con, wt: Path, port: int | None) -> dict:
     row = con.execute("""SELECT r.repo, rp.path FROM runs r LEFT JOIN repos rp ON rp.name=r.repo
                          WHERE r.worktree_path=? ORDER BY r.id DESC LIMIT 1""", (str(wt),)).fetchone()
     repo = row["repo"] if row else wt.name
-    detected = D.detect(repo, wt, port_hint=port)
+    detected = D.detect(repo, wt, port_hint=port, ticket=True)
     port = detected["port"] if port is None else port
     if not 1024 <= port <= 65535:
         raise D.DevError("포트는 1024-65535 사이여야 해요")
     used = D._used_ports(con, "") | reserved_ports(con).keys()
     if port in used or D.port_open(port) or D.listeners(port):
         port = D.free_port(port, used)
-    cmd = detected["cmd"]
-    if port != detected.get("fixed_port"):
-        cmd = detected.get("port_cmd", cmd)
-    cmd = cmd.replace("{port}", str(port))
+    cmd = detected["cmd"].replace("{port}", str(port))
     log = D.LOGS / f"{wt.name[:64]}-{uuid4().hex}.log"
     root = row["path"] if row and row["path"] else str(wt)
     pid = D._launch(wt, root, port, cmd, None, log, node_path(wt), supervise=True)
     return {"pid": pid, "port": port, "log": str(log)}
 
 
-def _live_children(group: int) -> set[int]:
-    """Children may redirect every log fd. Zombies have already released their sockets and files."""
+def _session_members(session: int) -> dict[int, int]:
+    """Live PID -> process group. Some package managers put their script in a separate group."""
     rows = run(["ps", "-A", "-o", "pid=,pgid=,stat="]).stdout.strip().splitlines()
-    return {int(pid) for pid, pgid, state in (row.split() for row in rows)
-            if pgid == str(group) and pid != pgid and not state.startswith("Z")}
+    return {int(pid): int(pgid) for pid, pgid, state in (row.split() for row in rows)
+            if not state.startswith("Z") and in_session(int(pid), session)}
 
 
 def _terminate(rec: dict):
-    group = rec["pid"]
-    children = _live_children(group)
+    session = rec["pid"]
+    members = _session_members(session)
     if managed_pid(rec) is None:
         return
-
-    def still_running() -> bool:
-        if children and not children.isdisjoint(_live_children(group)):
-            return True
-        return managed_pid(rec) is not None
-
     for sig in (signal.SIGTERM, signal.SIGKILL):
-        try:
-            os.killpg(group, sig)
-        except ProcessLookupError:
-            return
-        except PermissionError:
-            # macOS can report EPERM when the last live member exits between the check and the signal.
-            if still_running():
-                raise
-            return
+        for group in set(members.values()):
+            try:
+                os.killpg(group, sig)
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                # Darwin can report EPERM for a group that exited just before the signal.
+                if group in _session_members(session).values():
+                    raise
         deadline = time.monotonic() + 5
-        while still_running():
+        while True:
+            live = _session_members(session)
+            if not live or (members.keys().isdisjoint(live) and managed_pid(rec) is None):
+                return
+            members = live
             if time.monotonic() >= deadline:
                 break
             time.sleep(0.1)
-        else:
-            return
     raise RuntimeError(f"{rec['port']} 포트의 dev 서버를 종료하지 못했어요")
 
 
