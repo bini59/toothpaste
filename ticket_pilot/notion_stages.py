@@ -13,6 +13,34 @@ RETRY_SECONDS = 300
 MILESTONE_DONE = "milestone_done"
 
 
+def mapping_errors(configs, previous, *, con):
+    """Check both sides of a shared DB binding against the proposed settings, in either save order."""
+    for pid, cfg in configs.items():
+        if not cfg.get("stage_statuses"):
+            continue
+        source = cfg["data_source_id"]
+        try:
+            notion_tickets.validate_stage_statuses(cfg, notion_tickets.milestone_kinds(configs.values(), source))
+            # A separate milestone DB may itself be a peer's task DB. Its status column and option
+            # are resolved by name. Only fetch those schemas when this binding or its markers change.
+            parent = cfg.get("milestone_data_source_id")
+            done = cfg["stage_statuses"].get("done")
+            if con is None or not done or not parent or parent == source:
+                continue
+            kinds = notion_tickets.milestone_kinds(configs.values(), parent)
+            old = previous.get(pid, {})
+            binding = ("connection_id", "data_source_id", "status_property", "milestone_data_source_id")
+            if not kinds or (all(old.get(k) == cfg.get(k) for k in binding)
+                             and old.get("stage_statuses", {}).get("done") == done
+                             and notion_tickets.milestone_kinds(previous.values(), parent) == kinds):
+                continue
+            pages = notion_write.ProjectPages(con, cfg, source=parent)
+            col, choice = pages.status_target(done, by_id=True)
+            notion_tickets.validate_stage_target(kinds, col["id"], choice["id"], milestone=True)
+        except notion.NotionError as e:
+            yield f"project.{pid}.notion.stage_statuses: {e}"
+
+
 def enqueue(con, ticket, stage):
     """In restage's transaction. Keep the latest mapped transition until its page write succeeds."""
     parent = stage == MILESTONE_DONE
@@ -26,6 +54,9 @@ def enqueue(con, ticket, stage):
     cfg = notion_tickets.project_config(con, pid)
     source = (cfg or {}).get("milestone_data_source_id" if parent else "data_source_id")
     if source and cfg.get("stage_statuses", {}).get("done" if parent else stage):
+        # A former task can also have a pending write. Keep the milestone ticket's retry under its own GID.
+        if parent and source == cfg["data_source_id"]:
+            gid = ticket["gid"]
         con.execute("""INSERT OR REPLACE INTO notion_status_queue(ticket_gid,project_id,data_source_id,stage,next_attempt_at)
                        VALUES(?,?,?,?,?)""", (gid, pid, source, stage, time()))
 
@@ -71,6 +102,8 @@ def flush(con):
                              ORDER BY next_attempt_at, id LIMIT ?""", (time(), BATCH_SIZE)).fetchall()
     for job in pending:
         gid = job["ticket_gid"]
+        if milestone.is_ms(gid):
+            gid, _ = milestone.parse(gid)
         page_id = gid.removeprefix("notion:")
         with notion_write.page_lock(page_id):
             row = con.execute("SELECT * FROM notion_status_queue WHERE id=? AND next_attempt_at<=?",
@@ -83,14 +116,20 @@ def flush(con):
                 option = (cfg or {}).get("stage_statuses", {}).get("done" if parent else row["stage"])
                 source = (cfg or {}).get("milestone_data_source_id" if parent else "data_source_id")
                 if option and source == row["data_source_id"]:
+                    kinds = notion_tickets.saved_milestone_kinds(con, source)
                     pages = notion_write.ProjectPages(con, cfg, source=source)
                     page = pages.client.page(page_id, pages.source)
-                    props = pages.status_change(page, option, by_id=True)
+                    role_kinds = notion_tickets.milestone_kinds([cfg]) if parent else kinds
+                    tags = notion_tickets.milestone_tag_filters(pages.schema, role_kinds)
+                    same_role = not tags or any(tagged(page) for tagged in tags.values()) == parent
+                    props = (pages.status_change(page, option, by_id=True, milestone_kinds=kinds, milestone=parent)
+                             if same_role else {})
                     # A host transition or settings save may have finished during the page/schema reads.
                     if (not con.execute("SELECT 1 FROM notion_status_queue WHERE id=?", (row["id"],)).fetchone()
-                            or notion_tickets.project_config(con, row["project_id"]) != cfg):
+                            or notion_tickets.project_config(con, row["project_id"]) != cfg
+                            or notion_tickets.saved_milestone_kinds(con, source) != kinds):
                         continue
-                    if not parent or milestone.all_repos_live(con, gid):
+                    if same_role and (not parent or milestone.all_repos_live(con, gid)):
                         pages.apply_properties(page, props)
                         core.event(con, "notion_write", f"Notion 상태 반영 · {row['stage']} · {notion_tickets.ticket_key(page_id)}", gid)
                 con.execute("DELETE FROM notion_status_queue WHERE id=?", (row["id"],))

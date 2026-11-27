@@ -9,7 +9,7 @@ import type { AgentAccount, AgentAccounts, AgentConf, CodexLogin, AsanaStatus, C
 import { ConfirmButton } from "../components/ConfirmButton";
 import { Update } from "./Update";
 import { ModeSection } from "./Mode";
-import { emptyNotion, NotionAccounts, NotionSource } from "./NotionSource";
+import { emptyNotion, NotionAccounts, notionError, NotionSource } from "./NotionSource";
 import { LanShare, Tunnel } from "./Lan";
 import { applyTheme, loadThemes, type ThemeList } from "../theme/theme";
 
@@ -1443,6 +1443,7 @@ function ProjectEditor({ id, c, onReload, onSaved, onDeleted }: {
   const set = (f: (d: ProjectConf) => void) => setD((cur) => { const n = clone(cur); f(n); return n; });
   const pid = id ?? (newId || slug(d.name));
   const idErr = id ? "" : !pid ? "id를 정해 주세요 (영문 소문자, 숫자, -)" : !ID_RE.test(pid) ? "영문 소문자, 숫자, - 로 40자 이내" : pid in c.config.project || pid === "unsorted" ? "이미 있는 id예요" : "";
+  const saveError = idErr ? `id: ${idErr}` : d.source === "notion" ? notionError(d.notion ?? emptyNotion) : "";
   // Asana projects another tp project already links are not offered again
   const usedGids = new Set(Object.entries(c.config.project).filter(([k]) => k !== id).map(([, p]) => p.asana_gid).filter(Boolean));
   const free = Object.keys(c.config.repo).filter((n) => !d.repos.some((r) => r.repo === n));
@@ -1536,7 +1537,7 @@ function ProjectEditor({ id, c, onReload, onSaved, onDeleted }: {
         </Section>
       )}
       <SaveBar dirty={!id || !same(d, orig)} onReset={() => setD(clone(orig))} onSaved={() => { onReload(); onSaved?.(pid); }}
-        run={(dry) => (idErr ? Promise.reject(new ConfigError(idErr, [`id: ${idErr}`])) : postConfig("/api/config", { scope: `project.${pid}`, value: d, dry_run: dry, create: !id }))} />
+        run={(dry) => (saveError ? Promise.reject(new ConfigError(saveError, [saveError])) : postConfig("/api/config", { scope: `project.${pid}`, value: d, dry_run: dry, create: !id }))} />
     </div>
   );
 }

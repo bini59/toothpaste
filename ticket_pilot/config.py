@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from . import antigravity, core, notion, notion_tickets
+from . import antigravity, core, notion, notion_stages, notion_tickets
 from .core import ROOT, db, event, now
 
 MODES = ("staging", "direct", "promote", "all")
@@ -509,7 +509,9 @@ def validate(doc: dict, old: dict | None = None, *, con=None) -> list[str]:
         need("preview_label" not in d or _text(d["preview_label"]), f"{p}.preview_label", "비어 있으면 안 돼요 (없으면 빼요)")
 
     seen, gids = set(), set()
-    old_notion = {p["id"]: p.get("notion") for p in (old or {}).get("project_map", {}).get("projects", [])}
+    notion_configs = {}
+    old_notion = {p["id"]: p["notion"] for p in (old or {}).get("project_map", {}).get("projects", [])
+                  if p.get("notion")}
     for i, pj in enumerate(pm["projects"]):
         if not isinstance(pj, dict):
             err.append(f"project[{i}]: 객체여야 해요")
@@ -532,6 +534,8 @@ def validate(doc: dict, old: dict | None = None, *, con=None) -> list[str]:
                 notion_tickets.validate(pj.get("notion"), con=con, previous=old_notion.get(pid))
             except notion.NotionError as e:
                 err.append(f"{p}.notion: {e}")
+            else:
+                notion_configs[pid] = pj["notion"]
         else:
             need("notion" not in pj, f"{p}.notion", "Notion 연결 프로젝트에서만 써요")
         need(_text(pj.get("name")), f"{p}.name", "이름이 비어 있으면 안 돼요")
@@ -543,6 +547,7 @@ def validate(doc: dict, old: dict | None = None, *, con=None) -> list[str]:
         need(sum(1 for rr in rows if rr.get("default")) <= 1, f"{p}.repos", "기본 레포는 하나만 정할 수 있어요")
         rn = [rr.get("repo") for rr in rows]
         need(len(rn) == len(set(rn)), f"{p}.repos", "같은 레포가 두 번 연결돼 있어요")
+    err.extend(notion_stages.mapping_errors(notion_configs, old_notion, con=con))
     return err
 
 

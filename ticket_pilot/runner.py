@@ -128,7 +128,7 @@ def worktrees(repos) -> list[dict]:
     return out
 
 
-def create(repo: str, repo_path: str, name: str, base: str | None) -> dict:
+def create(repo: str, repo_path: str, name: str, base: str | None, *, before_add=None) -> dict:
     """New branch <branch_prefix><name> from origin/<base> (or origin's default branch) in <root>/<repo>/<name>."""
     path = root() / repo / name
     if path.exists():
@@ -138,6 +138,8 @@ def create(repo: str, repo_path: str, name: str, base: str | None) -> dict:
     start = f"origin/{base}" if base else (
         _git(repo_path, "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD", check=False).stdout.strip() or "HEAD")
     branch = f"{settings().get('branch_prefix', 'tp/')}{name}"
+    if before_add:
+        before_add()
     # --no-track: the agent pushes its own upstream (`git push -u`); tracking origin/<base> would make a bare
     # `git push` target the base branch
     _git(repo_path, "worktree", "add", "-q", "--no-track", "-b", branch, str(path), start)

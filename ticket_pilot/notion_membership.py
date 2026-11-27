@@ -3,8 +3,9 @@ from __future__ import annotations
 
 from . import notion
 
+MILESTONE_KIND_FIELDS = ("milestone_kind_property", "milestone_kind_option")
 FIELDS = {"parent_property", "contains_property", "contains_text", "project_data_source_id", "project_page_id",
-          "project_property"}
+          "project_property", *MILESTONE_KIND_FIELDS}
 TEXT_TYPES = ("title", "rich_text", "formula", "unique_id")
 UNRESOLVED = object()
 

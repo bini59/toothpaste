@@ -94,11 +94,13 @@ def compute_stage(con, t, *, repos=None) -> str:
             return own
     if r and r["state"] != "abandoned":
         pr = run_pr(con, r["id"])
+        if pr and (pr["release_id"] or pr["prod_at"]):
+            return "done"  # verified in production (deploy.py / release train / track.py)
+        if pr and active_deploy(con, t["gid"]):
+            return "deploying"
+        if (not pr or pr["state"] == "OPEN") and t["milestone_error"] and notion_tickets.uses_milestone_kind(con, t):
+            return "blocked"
         if pr:
-            if pr["release_id"] or pr["prod_at"]:
-                return "done"  # verified in production (deploy.py / release train / track.py)
-            if active_deploy(con, t["gid"]):
-                return "deploying"
             if pr["state"] == "MERGED":
                 if (pr["base"] or "").startswith(M.PREFIX):
                     return "milestone"  # in its milestone branch; ships with the milestone PR (milestone.py)
@@ -521,9 +523,12 @@ def dispatch(dry_run=False, log=print, only: str | None = None) -> list[str]:
             meta_set(con, "github_missing_logged", True)
     elif gh_ok and meta_get(con, "github_missing_logged"):
         meta_set(con, "github_missing_logged", False)
+    def retry_error(t):
+        return notion_tickets.retry_error(con, t) or resume_staging_error(con, t)
+
     # answered BLOCKED tickets already hold a slot, so they go before the slot limit
     for t in answered if gh_ok else ():
-        if err := resume_staging_error(con, t):
+        if err := retry_error(t):
             log(f"{t['key']}: {err}")
         elif unblock(con, t, dry_run=dry_run, log=log):
             done.append(t["key"])
@@ -538,7 +543,7 @@ def dispatch(dry_run=False, log=print, only: str | None = None) -> list[str]:
     for t in cands if gh_ok else ():
         if not slots:
             break
-        if t["stage"] != "queued" and (err := resume_staging_error(con, t)):
+        if t["stage"] != "queued" and (err := retry_error(t)):
             log(f"{t['key']}: {err}")
             continue
         slots -= 1
@@ -557,6 +562,7 @@ def dispatch(dry_run=False, log=print, only: str | None = None) -> list[str]:
         if t["gid"].startswith("notion:") and con.in_transaction:
             con.commit()  # release earlier candidates' writes before reading the page over HTTP
         try:
+            guard = notion_tickets.worktree_guard(con, t, repo)
             brief = build_brief(con, t, repo)
         except notion.NotionError as e:
             slots += 1  # an unavailable page must not hold a slot ahead of the next ticket
@@ -571,21 +577,35 @@ def dispatch(dry_run=False, log=print, only: str | None = None) -> list[str]:
         if existing is None:
             existing = R.worktrees(repo_paths(con))
         clash = next((w for w in existing if w["repo"] == repo["repo"] and w["path"].rstrip("/").endswith("/" + name)), None)
-        if clash:
-            _insert_run(con, t, repo, clash, None, "adopt")
-            event(con, "adopt", f"{t['key']}: existing worktree {name} linked", t["gid"])
-            done.append(t["key"])
-            continue
-        (ROOT / "data" / "briefs").mkdir(parents=True, exist_ok=True)
-        (ROOT / "data" / "briefs" / f"{name}.md").write_text(brief)
         try:
+            if guard:
+                guard(lock=bool(clash))
+            if clash:
+                _insert_run(con, t, repo, clash, None, "adopt")
+                event(con, "adopt", f"{t['key']}: existing worktree {name} linked", t["gid"])
+                if guard:
+                    con.commit()
+                done.append(t["key"])
+                continue
+            (ROOT / "data" / "briefs").mkdir(parents=True, exist_ok=True)
+            (ROOT / "data" / "briefs" / f"{name}.md").write_text(brief)
             base = worktree_base(repo["repo"])
             if (M.base_for(t, repo["repo"]) or "").startswith(M.PREFIX):
                 base = M.ensure(con, t, repo["repo"])  # the milestone branch (created on the first subtask)
-            wt = R.create(repo["repo"], repo["path"], name, base)
+            if guard:
+                con.commit()  # release milestone.ensure's writes before the remote fetch
+                wt = R.create(repo["repo"], repo["path"], name, base, before_add=guard)
+            else:
+                wt = R.create(repo["repo"], repo["path"], name, base)
             setup, prep = prepare_worktree(repo["repo"], repo["path"], wt["path"])
             handle = R.launch(wt["path"], brief, name, setup=setup, repo_path=repo["path"],
                               agent=repo_extra(repo["repo"]).get("agent"))
+        except notion.NotionError as e:
+            slots += 1
+            event(con, "error", f"{t['key']}: {e}", t["gid"])
+            con.commit()
+            log(f"{t['key']}: {e}")
+            continue
         except Exception as e:  # noqa: BLE001
             event(con, "error", f"{t['key']}: worktree create failed: {e}", t["gid"])
             con.commit()
@@ -595,6 +615,8 @@ def dispatch(dry_run=False, log=print, only: str | None = None) -> list[str]:
                     handle, "dispatch")
         event(con, "dispatch", f"{t['key']} -> {repo['repo']}/{name} ({R.describe(repo_extra(repo['repo']).get('agent'))}, "
                                f"{wt['branch']}{'; ' + prep if prep else ''})", t["gid"])
+        if guard:
+            con.commit()
         log(f"dispatched {t['key']} -> {repo['repo']}/{name} agent={handle}")
         done.append(t["key"])
     restage(con)
@@ -688,7 +710,7 @@ def rework(con, t, dry_run=False, log=print) -> bool:
     why = "tp checks failed" if rv["source"] == "check" else "AI review requested changes"
     comment = f"rework: {why} on PR #{pr['number']}"[:120]
     try:
-        handle = relaunch(con, r, brief, f"{slug(t['key'])}-rework", comment)
+        handle = relaunch(con, r, brief, f"{slug(t['key'])}-rework", comment, ticket=t)
     except Exception as e:  # noqa: BLE001
         event(con, "error", f"{t['key']}: rework launch failed: {e}", t["gid"])
         con.commit()
@@ -734,7 +756,7 @@ def resolve_conflict(con, t, dry_run=False, log=print) -> bool:
     (ROOT / "data" / "briefs" / f"{slug(t['key'])}-conflict-{(pr['head_sha'] or '')[:7]}.md").write_text(brief)
     comment = f"conflict: PR #{pr['number']} conflicts with {pr['base']}, merging it in"[:120]
     try:
-        handle = relaunch(con, r, brief, f"{slug(t['key'])}-conflict", comment)
+        handle = relaunch(con, r, brief, f"{slug(t['key'])}-conflict", comment, ticket=t)
     except Exception as e:  # noqa: BLE001
         event(con, "error", f"{t['key']}: conflict relaunch failed: {e}", t["gid"])
         con.commit()
@@ -771,7 +793,7 @@ def unblock(con, t, dry_run=False, log=print) -> bool:
         return False
     comment = f"answered: {t['reply']}"[:120]
     try:
-        handle = relaunch(con, r, brief, f"{slug(t['key'])}-unblock", comment)
+        handle = relaunch(con, r, brief, f"{slug(t['key'])}-unblock", comment, ticket=t)
     except Exception as e:  # noqa: BLE001
         event(con, "error", f"{t['key']}: unblock launch failed: {e}", t["gid"])
         con.commit()
@@ -826,7 +848,7 @@ def prepare_worktree(repo: str, repo_path: str, wt_path: str) -> tuple[str | Non
     return ("\n".join(steps) or None), ", ".join(note)
 
 
-def relaunch(con, r, brief: str, tag: str, comment: str) -> str:
+def relaunch(con, r, brief: str, tag: str, comment: str, *, ticket=None) -> str:
     """Start the agent again in a run's worktree (rework / conflict / unblock); returns the new handle.
     An agent still running there is stopped first: two agents on one branch fight over it."""
     if R.running(r["terminal"]):
@@ -836,6 +858,8 @@ def relaunch(con, r, brief: str, tag: str, comment: str) -> str:
         run(["git", "-C", r["worktree_path"], "pull", "-q", "--ff-only"], timeout=180, check=False)
     mirror_orca(r, "in-progress", comment)
     rp = con.execute("SELECT path FROM repos WHERE name=?", (r["repo"],)).fetchone()
+    if ticket is not None and (err := notion_tickets.retry_error(con, ticket, lock=True)):
+        raise notion.NotionError(err)
     return R.launch(r["worktree_path"], brief, tag, repo_path=rp["path"] if rp else None,
                     agent=repo_extra(r["repo"]).get("agent"))
 
