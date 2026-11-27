@@ -99,7 +99,7 @@ def _state(con) -> dict:
             t["staging_config_error"] = MS.staging_config_error(t, repo["repo"])
         elif t["stage"] == "blocked":
             if t["milestone_error"]:
-                t["milestone_kind_blocked"] = notion_tickets.milestone_kind_blocks_run(con, t)
+                t["milestone_kind_blocked"] = notion_tickets.uses_milestone_kind(con, t)
             else:
                 t["staging_config_error"] = P.resume_staging_error(con, t)
         if (ms := landed.get(t["gid"])) and t["parent_gid"] != ms["parent_gid"]:

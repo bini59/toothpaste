@@ -64,6 +64,9 @@ def validate(cfg, *, con=None, previous=None):
             or any(not isinstance(v, str) or not v for v in stages.values())
             or (stages and not cfg.get("status_property"))):
         raise notion.NotionError("단계별로 반영할 Notion 상태 열과 선택지를 골라 주세요")
+    if (source == cfg["data_source_id"] and cfg["milestone_kind_property"] == cfg.get("status_property")
+            and ("done" in stages or cfg["milestone_kind_option"] in stages.values())):
+        raise notion.NotionError("단계별 상태를 쓰면 마일스톤 태그가 바뀌어요. 상태 열과 마일스톤 판별 열을 따로 골라 주세요")
 
 
 def project_config(con, pid):
@@ -71,8 +74,8 @@ def project_config(con, pid):
     return json.loads(row["extra"])["notion"] if row else None
 
 
-def milestone_kind_blocks_run(con, ticket):
-    if not ticket["gid"].startswith("notion:") or not ticket["milestone_error"]:
+def uses_milestone_kind(con, ticket):
+    if not ticket["gid"].startswith("notion:"):
         return False
     cfg = project_config(con, ticket["project_gid"].removeprefix("notion:"))
     return bool(cfg and cfg.get("milestone_kind_property"))
@@ -208,14 +211,15 @@ def matches(con, project, work_tag, rules, *, track_runs=False):
         client.page(cfg["project_page_id"], cfg["project_data_source_id"])
     listing = Listing()
 
-    def read_parent(gid, page=None):
+    def read_parent(gid, page=None, *, milestone_row=False):
         parent, error = None, None
         try:
             if milestone_col:
                 if page is None:
                     page = client.page(gid.removeprefix("notion:"), cfg["data_source_id"])
-                    if tagged_milestone and tagged_milestone(page):
-                        raise notion.NotionError("진행 중인 작업에 마일스톤 태그가 붙었어요. 작업을 계속하려면 태그를 제거하세요")
+                    milestone_row = tagged_milestone and tagged_milestone(page)
+                if milestone_row:
+                    raise notion.NotionError("진행 중인 작업에 마일스톤 태그가 붙었어요. 작업을 계속하려면 태그를 제거하세요")
                 parent = _milestone_parent(client, page, milestone_col, cfg["milestone_data_source_id"], milestones)
                 if parent and tagged_milestone and not tagged_milestone(parent):
                     raise notion.NotionError("연결된 행에 마일스톤 태그가 없어요. 마일스톤 태그가 붙은 행을 연결하세요")
@@ -227,12 +231,17 @@ def matches(con, project, work_tag, rules, *, track_runs=False):
                                 "milestone_error": error}
 
     for page in pages:
-        if not notion.active_page(page) or (tagged_milestone and tagged_milestone(page)):
+        if not notion.active_page(page):
             continue
         page_id = page["id"]
         if not notion.valid_id(page_id):
             raise notion.NotionError("Notion 페이지 ID를 확인할 수 없어요")
         gid = f"notion:{page_id}"
+        if tagged_milestone and tagged_milestone(page):
+            # A run may have started by the time sync applies this listing.
+            if track_runs:
+                read_parent(gid, page, milestone_row=True)
+            continue
         owners, ancestors = membership.resolve(page)
         if owners is notion_membership.UNRESOLVED:
             listing.unresolved.add(gid)
@@ -243,9 +252,12 @@ def matches(con, project, work_tag, rules, *, track_runs=False):
         elif project["id"] not in owners:
             continue
         read_parent(gid, page)
+        dependencies = [f"notion:{i}" for i in ancestors]
+        if tagged_milestone and (parent := listing.parents[gid]["parent_gid"]) and parent not in dependencies:
+            dependencies.append(parent)  # editing the parent's tag can invalidate this task's dispatch
         listing.rows[gid] = {**_page_fields(page, cfg, schema, work_tag), "gid": gid, "key": ticket_key(page_id),
                              "project_gid": f"notion:{project['id']}", "project_name": project["name"],
-                             "ancestors": [f"notion:{i}" for i in ancestors], "owners": owners}
+                             "ancestors": dependencies, "owners": owners}
     if track_runs:
         # A stage write may exclude a running page from the import query. Its owner still needs current routing.
         running = con.execute("""SELECT t.gid FROM tickets t WHERE project_gid=? AND completed=0
@@ -354,13 +366,13 @@ def _batches(con, projects, work_tag, listings, run_owners):
         yield p, version, listing, owned
 
 
-def _dispatch_source(con, project_gid, gid):
+def _dispatch_source(con, project_gid, gid, parent_gid=None):
     doc = effective_config(read_config(con))
     pid = project_gid.removeprefix("notion:")
     projects = [p for p in doc["project_map"]["projects"] if p["source"] == "notion"]
     project = next((p for p in projects if p["id"] == pid), None)
     snapshot = meta_get(con, SYNC_STATE, {})
-    if gid in snapshot.get("edited", {}):
+    if gid in snapshot.get("edited", {}) or parent_gid in snapshot.get("edited", {}):
         raise notion.NotionError("수정한 페이지의 가져오기 조건을 다음 동기화에서 확인한 뒤 작업을 시작해요")
     state = snapshot.get("projects", {}).get(pid, {})
     rules = notion_membership.settings(projects, project["notion"]["data_source_id"]) if project else {}
@@ -371,19 +383,52 @@ def _dispatch_source(con, project_gid, gid):
     return project["notion"]["connection_id"], state["version"]
 
 
-def queued_page(con, ticket, repo):
+def retry_error(con, ticket, *, lock=False):
+    """Filtered runs may resume once sync has confirmed their current role and routing."""
+    if uses_milestone_kind(con, ticket):
+        if lock and not con.in_transaction:
+            con.execute("BEGIN IMMEDIATE")
+        try:
+            _dispatch_source(con, ticket["project_gid"], ticket["gid"], ticket["parent_gid"])
+        except notion.NotionError as e:
+            return str(e)
+        current = con.execute("SELECT stage, project_gid, parent_gid, milestone_error FROM tickets WHERE gid=?",
+                              (ticket["gid"],)).fetchone()
+        if not current or any(current[k] != ticket[k] for k in ("stage", "project_gid", "parent_gid")):
+            return "동기화 중 작업 단계나 마일스톤 연결이 바뀌었어요"
+        return current["milestone_error"]
+
+
+def _queued_ticket(con, ticket, repo, source):
     from .pipeline import chosen_repo, compute_stage
     project_gid = ticket["project_gid"]
-    source = _dispatch_source(con, project_gid, ticket["gid"])
-    client = notion.Client(con, source[0])
-    markdown = client.markdown(ticket["gid"].removeprefix("notion:"))
-    # A sync, skip or project edit can finish while the body is in flight. Build the brief from the current row.
     current = con.execute("SELECT * FROM tickets WHERE gid=?", (ticket["gid"],)).fetchone()
     if (not current or current["project_gid"] != project_gid or current["parent_gid"] != ticket["parent_gid"]
             or compute_stage(con, current) != "queued"
             or chosen_repo(con, current) != repo or _dispatch_source(con, project_gid, current["gid"]) != source):
         raise notion.NotionError("페이지를 읽는 동안 대기열이나 프로젝트 설정이 바뀌었어요")
-    return current, markdown
+    return current
+
+
+def queued_page(con, ticket, repo):
+    source = _dispatch_source(con, ticket["project_gid"], ticket["gid"])
+    client = notion.Client(con, source[0])
+    markdown = client.markdown(ticket["gid"].removeprefix("notion:"))
+    # A sync, skip or project edit can finish while the body is in flight. Build the brief from the current row.
+    return _queued_ticket(con, ticket, repo, source), markdown
+
+
+def worktree_guard(con, ticket, repo):
+    if uses_milestone_kind(con, ticket):
+        source = _dispatch_source(con, ticket["project_gid"], ticket["gid"])
+
+        def check(*, lock=True):
+            # After the git fetch, serialize the local worktree/adoption and run insert with role changes.
+            if lock and not con.in_transaction:
+                con.execute("BEGIN IMMEDIATE")
+            _queued_ticket(con, ticket, repo, source)
+
+        return check
 
 
 def _repo_override(old, project_gid, repos):

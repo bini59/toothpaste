@@ -27,8 +27,14 @@ export function notionError(value: NotionFilters) {
   if (!!value.contains_property !== !!value.contains_text?.trim()) return "문자열을 검사할 열과 포함할 문자열을 함께 입력하세요";
   if (value.project_data_source_id && !value.project_page_id) return "선택한 DB에서 프로젝트 행을 골라 주세요";
   if (!!value.milestone_data_source_id !== !!value.milestone_property) return "마일스톤 DB와 작업 DB의 마일스톤 관계 열을 함께 골라 주세요";
-  if (value.milestone_data_source_id === value.data_source_id && (!value.milestone_kind_property || !value.milestone_kind_option)) {
-    return "작업 DB를 쓰려면 마일스톤 판별 열과 마일스톤 태그를 함께 골라 주세요";
+  if (value.milestone_data_source_id === value.data_source_id) {
+    if (!value.milestone_kind_property || !value.milestone_kind_option) {
+      return "작업 DB를 쓰려면 마일스톤 판별 열과 마일스톤 태그를 함께 골라 주세요";
+    }
+    if (value.milestone_kind_property === value.status_property &&
+        (value.stage_statuses?.done || Object.values(value.stage_statuses ?? {}).includes(value.milestone_kind_option))) {
+      return "단계별 상태를 쓰면 마일스톤 태그가 바뀌어요. 상태 열과 마일스톤 판별 열을 따로 골라 주세요";
+    }
   }
   return "";
 }

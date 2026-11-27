@@ -17,10 +17,6 @@ def enqueue(con, ticket, stage):
     """In restage's transaction. Keep the latest mapped transition until its page write succeeds."""
     parent = stage == MILESTONE_DONE
     gid = ticket["parent_gid"] if parent else ticket["gid"]
-    # A former task and its milestone share a page ID. Keep the verified milestone write through a task restage.
-    if not parent and con.execute(
-            "SELECT 1 FROM notion_status_queue WHERE ticket_gid=? AND stage=?", (gid, MILESTONE_DONE)).fetchone():
-        return
     if (not parent and stage not in notion_tickets.WRITE_STAGES) or (stage == "closed" and not con.execute(
             "SELECT 1 FROM runs WHERE id=(SELECT max(id) FROM runs WHERE ticket_gid=?) AND state!='abandoned'",
             (gid,)).fetchone()):
@@ -30,6 +26,9 @@ def enqueue(con, ticket, stage):
     cfg = notion_tickets.project_config(con, pid)
     source = (cfg or {}).get("milestone_data_source_id" if parent else "data_source_id")
     if source and cfg.get("stage_statuses", {}).get("done" if parent else stage):
+        # A former task can also have a pending write. Keep the milestone ticket's retry under its own GID.
+        if parent and source == cfg["data_source_id"]:
+            gid = ticket["gid"]
         con.execute("""INSERT OR REPLACE INTO notion_status_queue(ticket_gid,project_id,data_source_id,stage,next_attempt_at)
                        VALUES(?,?,?,?,?)""", (gid, pid, source, stage, time()))
 
@@ -75,6 +74,8 @@ def flush(con):
                              ORDER BY next_attempt_at, id LIMIT ?""", (time(), BATCH_SIZE)).fetchall()
     for job in pending:
         gid = job["ticket_gid"]
+        if milestone.is_ms(gid):
+            gid, _ = milestone.parse(gid)
         page_id = gid.removeprefix("notion:")
         with notion_write.page_lock(page_id):
             row = con.execute("SELECT * FROM notion_status_queue WHERE id=? AND next_attempt_at<=?",
