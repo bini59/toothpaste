@@ -17,7 +17,8 @@ local runner with `orca worktree rm`, verified with `git worktree list` + the pa
 remote branch and the PR stay.
 
 Skipped tickets (건너뜀, e.g. dropped with 그만두기; 2026-10-23) need no production check: their worktree is
-removed as soon as no agent or dev server runs in it, uncommitted/unpushed work included. Remote branch and PR stay.
+removed as soon as no agent or unmanaged dev server runs in it, uncommitted/unpushed work included. A server
+started with tp dev is stopped on removal. Remote branch and PR stay.
 
 Kept (reason stored, checked again next tick) when: uncommitted changes, local commits that are in neither the PR heads
 nor production, an open PR from the branch, a ticket agent still running (runner handle; Orca agent state for legacy
@@ -35,6 +36,7 @@ import tempfile
 import time
 
 from . import runner as R
+from . import devserver, worktree_dev
 from .core import db, event, gh_json, now, orca_json, run
 from .track import deployed_sha, track_config
 
@@ -169,8 +171,11 @@ def _ps_entries() -> dict[str, dict]:
         return {}
 
 
-def _listening_in(path: str) -> list[str]:
-    """Processes with cwd inside the worktree that listen on a TCP port (dev servers), agent CLIs excepted."""
+def _listening_in(path: str, managed: int | None = None) -> list[str]:
+    """Listeners that need the worktree kept. Cleanup can terminate its registered tp dev session."""
+    if not shutil.which("lsof") and os.path.exists("/proc/net/tcp"):
+        return [f"{p['name']}({p['pid']}) :{p['port']}" for p in devserver.proc_listeners(directory=path)
+                if p["name"] not in AGENT_PROCS and not worktree_dev.in_session(p["pid"], managed)]
     p = run(["lsof", "-nP", "-d", "cwd", "-Fpcn"], check=False, timeout=60)
     pids, cur, name = {}, None, ""
     for ln in p.stdout.splitlines():
@@ -182,7 +187,7 @@ def _listening_in(path: str) -> list[str]:
             pids[cur] = name
     out = []
     for pid, name in pids.items():
-        if name in AGENT_PROCS:
+        if name in AGENT_PROCS or worktree_dev.in_session(int(pid), managed):
             continue
         q = run(["lsof", "-nP", "-a", "-p", pid, "-iTCP", "-sTCP:LISTEN", "-Fn"], check=False, timeout=30)
         ports = [ln[1:] for ln in q.stdout.splitlines() if ln.startswith("n")]
@@ -191,13 +196,13 @@ def _listening_in(path: str) -> list[str]:
     return out
 
 
-def safety(path: str, repo_path: str, github: str, branch: str, keep_shas: list[str] | None, wt: dict, ps: dict) -> str | None:
+def safety(con, path: str, repo_path: str, github: str, branch: str, keep_shas: list[str] | None, wt: dict, ps: dict) -> str | None:
     """None when the worktree can go, else the reason to keep it. keep_shas=None (skipped ticket): the owner threw the
     work away, so local changes and open PRs do not keep it."""
     if wt.get("isMainWorktree") or not _managed(path) or os.path.realpath(path) == os.path.realpath(repo_path):
         return "메인 워크트리/관리 경로 밖"
     if keep_shas is None:
-        return _busy(path, ps, wt)
+        return _busy(con, path, ps, wt)
     st = _git(path, "status", "--porcelain")
     if st.returncode != 0:
         return f"git status 실패: {st.stderr.strip()[:120]}"
@@ -210,16 +215,16 @@ def safety(path: str, repo_path: str, github: str, branch: str, keep_shas: list[
         open_prs = gh_json(["pr", "list", "--repo", github, "--head", branch, "--state", "open", "--json", "number"]) or []
         if open_prs:
             return f"열린 PR #{open_prs[0]['number']}"
-    return _busy(path, ps, wt)
+    return _busy(con, path, ps, wt)
 
 
-def _busy(path: str, ps: dict, wt: dict) -> str | None:
+def _busy(con, path: str, ps: dict, wt: dict) -> str | None:
     if any(R.running(h) for h in wt.get("handles") or []):
         return "티켓 에이전트 실행 중"
     busy = [a.get("state") for a in (ps.get(path) or {}).get("agents", []) if a.get("state") not in SAFE_AGENT_STATES]
     if busy:
         return f"Orca 에이전트 실행 중 ({busy[0]})"
-    srv = _listening_in(path)
+    srv = _listening_in(os.path.realpath(path), worktree_dev.managed_pid(worktree_dev.record(con, path)))
     if srv:
         return f"워크트리에서 서버 실행 중: {srv[0]}"
     return None
@@ -250,6 +255,8 @@ def remove(con, path: str, repo_path: str, branch: str, wait_s: int = 120, force
     """git worktree remove (force: a skipped ticket's local changes go too), then delete the local branch.
     Legacy Orca worktrees: orca worktree rm, then wait for it (Orca answers before the checkout is gone).
     Returns a note, or None while an Orca removal is still in progress (finished on a later tick)."""
+    # Both scan paths commit "removing" before this call, so new tp dev starts stay out during removal.
+    worktree_dev.stop(con, path)
     if not _legacy(path):
         R.remove(repo_path, path, force=force)
         return "워크트리 삭제, " + _drop_branch(repo_path, branch)
@@ -298,7 +305,7 @@ def _clean_skipped(con, path: str, runs: list, wt: dict, ps: dict, dry_run: bool
     base = dict(ticket_gid=last["ticket_gid"], key=last["key"], repo=last["repo"], branch=branch, checked_at=now())
     stats["checked"] += 1
     prev = con.execute("SELECT status, reason FROM cleanups WHERE path=?", (path,)).fetchone()
-    why = safety(path, last["repo_path"], last["github"], branch, None, wt, ps)
+    why = safety(con, path, last["repo_path"], last["github"], branch, None, wt, ps)
     if why:
         _upsert(con, path, status="kept", reason=why, **base)
         if not prev or prev["status"] != "kept" or prev["reason"] != why:
@@ -398,7 +405,7 @@ def cleanup_scan(dry_run: bool = False, log=print) -> dict:
                 con.commit()
                 continue
             keep = [r["head_sha"] for r in results] + [prod]
-            why = safety(path, last["repo_path"], last["github"], branch, keep, wt, ps)
+            why = safety(con, path, last["repo_path"], last["github"], branch, keep, wt, ps)
             methods = ", ".join(f"#{r['number']} {r['live']}" for r in results)
             if why:
                 _upsert(con, path, status="kept", reason=why, **base)

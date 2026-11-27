@@ -33,6 +33,7 @@ from . import setup as S
 from . import runner
 from . import track as T
 from . import update as U
+from . import worktree_dev
 from .core import DATA, DOCKER_OFF, ROOT, db, docker, event, load_map, meta_get, meta_set, now
 
 
@@ -365,6 +366,18 @@ def cmd_notion_app(a):
     print("Notion OAuth 앱을 저장했어요. 전역 설정 → Notion에서 로그인하세요.")
 
 
+def cmd_dev(a):
+    con = db()
+    if a.op == "start":
+        result = worktree_dev.start(con, a.worktree, a.port)
+    elif a.op == "status":
+        result = worktree_dev.status(con, a.worktree)
+    else:
+        worktree_dev.stop(con, a.worktree)
+        result = {"status": "stopped"}
+    print(json.dumps(result, ensure_ascii=False))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="tp", description="toothpaste (치약), tp = ToothPaste. 사용법: tp guide [주제]")
     sp = ap.add_subparsers(dest="cmd", required=True)
@@ -491,6 +504,14 @@ def main(argv=None):
     rs.add_argument("--shot", action="append", default=[], help="PNG to embed in the PR comment (repeatable)")
     rs.add_argument("--no-post", action="store_true")
     rs.set_defaults(fn=lambda a: P.review_save(a.pr, a.sha, a.verdict, a.file, a.summary, post=not a.no_post, shots=a.shot))
+    dev = sp.add_parser("dev", help="start, inspect or stop a ticket worktree's dev server")
+    dev.set_defaults(fn=cmd_dev)
+    ops = dev.add_subparsers(dest="op", required=True)
+    for op in ("start", "status", "stop"):
+        sub = ops.add_parser(op)
+        sub.add_argument("--worktree", type=Path, required=True, help="ticket worktree path")
+        if op == "start":
+            sub.add_argument("--port", type=int, help="preferred port (default: detect from the repo)")
     sc = sp.add_parser("screenshot", help="capture a URL into a PNG (the repo's Playwright; Orca's browser as fallback)")
     sc.add_argument("--url", required=True)
     sc.add_argument("--out", required=True)

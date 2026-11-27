@@ -1,6 +1,7 @@
 """Milestone dev servers (devserver.py): command/port detection, the .env check, and start() with a port in use
 (refused, kill, other port) against real processes. Run: python3 -m unittest discover tests"""
 import json
+import shlex
 import socket
 import sqlite3
 import subprocess
@@ -74,6 +75,53 @@ class DetectTest(unittest.TestCase):
         d = DS.detect("X", self.d)
         self.assertEqual((d["cmd"], d["port"]), ("make serve P={port}", 8100))
 
+    def test_configured_package_runner_uses_the_named_script_for_ticket_port_detection(self):
+        self.pkg({"dev": "next dev", "ui": "vite --port 6200 & wait"})
+        for cmd in ("npm run ui", "pnpm run-script ui", "yarn ui"):
+            with self.subTest(cmd=cmd):
+                self.conf = {"dev": {"cmd": cmd}}
+                result = DS.detect("Site", self.d, ticket=True)
+                self.assertTrue(result["cmd"].endswith(" " + cmd))
+                self.assertEqual(result["port"], 6200)
+                with self.assertRaises(DS.DevError):
+                    DS.detect("Site", self.d)  # milestone preflight still requires its configured port
+
+    def test_ticket_detects_and_replaces_only_port_option_words(self):
+        for open_arg in ('"/docs --port 5173 --strictPort"', "'/docs --port 5173 --strictPort'",
+                         r"/docs\ --port\ 5173\ --strictPort"):
+            for port_arg in ('--port 6100', '--port="6100"', "'--port=6100'", "-p '6100'"):
+                with self.subTest(open_arg=open_arg, port_arg=port_arg):
+                    self.conf = {"dev": {"cmd": f"vite --open {open_arg} {port_arg}"}}
+                    result = DS.detect("Site", self.d, ticket=True)
+                    self.assertEqual(result["port"], 6100)
+                    argv = shlex.split(result["cmd"].format(port=6000))
+                    self.assertEqual(argv[:4], ["vite", "--strictPort", "--open", "/docs --port 5173 --strictPort"])
+                    self.assertIn(argv[4:], [["--port", "6000"], ["--port=6000"], ["-p", "6000"]])
+
+    def test_ticket_ignores_port_text_in_non_options(self):
+        for suffix in ('--open "/docs --port 6100"', '> "--port=6100"', '# --port 6100', '-- --port 6100'):
+            with self.subTest(suffix=suffix):
+                command = f"vite {suffix}"
+                self.conf = {"dev": {"cmd": command}}
+                result = DS.detect("Site", self.d, ticket=True)
+                self.assertEqual(result["port"], 5173)
+                self.assertEqual(result["cmd"], f"vite --port {{port}} --strictPort {suffix}")
+
+    def test_ticket_detects_forwarded_port_in_sh_c_wrapper(self):
+        for wrapper in ('sh -c \'exec vite "$@"\' --',
+                        'exec /bin/sh -c \'exec vite "$@"\' --port=6200'):
+            with self.subTest(wrapper=wrapper):
+                self.conf = {"dev": {"cmd": f"{wrapper} --port 6100"}}
+                result = DS.detect("Site", self.d, ticket=True)
+                self.assertEqual(result["port"], 6100)
+                self.assertEqual(result["cmd"], f"{wrapper} --port {{port}}")
+
+        command = 'sh -c \'exec vite "$@"\' -- -- --port 6100'
+        self.conf = {"dev": {"cmd": command}}
+        result = DS.detect("Site", self.d, ticket=True)
+        self.assertEqual(result["port"], 5173)
+        self.assertEqual(result["cmd"], command)
+
     def test_env_check_reports_missing_and_empty_keys_without_values(self):
         main = Path(tempfile.mkdtemp())
         (main / ".env").write_text("A=1\nB=\n")
@@ -139,6 +187,15 @@ class StartTest(unittest.TestCase):
         self.assertEqual(s["port"], info["free"])
         self.assertTrue(self.wait_listen(info["free"]))
         self.assertIsNone(self.ps[0].poll())  # the other process was left alone
+
+    def test_milestone_respects_an_unbound_ticket_port(self):
+        with mock.patch("ticket_pilot.worktree_dev.reserved_ports", return_value={self.port: "/ticket"}):
+            with self.assertRaises(DS.PortBusy) as err:
+                DS.start(GID)
+            self.assertNotEqual(err.exception.info["free"], self.port)
+            check = DS.check(GID)
+            self.assertFalse(check["ours"])  # keep the dashboard's milestone-only classification
+            self.assertEqual(check["busy"][0]["cwd"], "/ticket")
 
     def test_kill_then_start_on_same_port(self):
         other = listen_proc(self.port)
