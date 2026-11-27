@@ -140,6 +140,15 @@ class StartTest(unittest.TestCase):
         self.assertTrue(self.wait_listen(info["free"]))
         self.assertIsNone(self.ps[0].poll())  # the other process was left alone
 
+    def test_milestone_respects_an_unbound_ticket_port(self):
+        with mock.patch("ticket_pilot.worktree_dev.reserved_ports", return_value={self.port: "/ticket"}):
+            with self.assertRaises(DS.PortBusy) as err:
+                DS.start(GID)
+            self.assertNotEqual(err.exception.info["free"], self.port)
+            check = DS.check(GID)
+            self.assertFalse(check["ours"])  # keep the dashboard's milestone-only classification
+            self.assertEqual(check["busy"][0]["cwd"], "/ticket")
+
     def test_kill_then_start_on_same_port(self):
         other = listen_proc(self.port)
         self.ps.append(other)

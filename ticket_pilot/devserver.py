@@ -16,6 +16,7 @@ The agent CLI keeps worktree_dev_servers keyed by resolved path and waits for it
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -25,6 +26,7 @@ import socket
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -38,6 +40,9 @@ SCRIPTS = ("dev", "start:dev", "develop", "serve", "start")
 EXAMPLE = re.compile(r"^\.env\.(example|sample|template|dist)$")
 ENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$")
 PORT_FLAG = re.compile(r"(?:^|\s)(?:-p|--port)[ =](\d{2,5})\b")
+VITE_CMD = re.compile(r"(^|[\s/])(vite|remix vite:dev|react-router dev)(?=\s|$)")
+VITE_SERVER = re.compile(r"(?:^|[\s/])(?:vite(?!\s+(?:build|optimize)\b)(?:\s+(?:dev|serve|preview)\b)?"
+                         r"|remix vite:dev|react-router dev)(?=\s|$)")
 # env vars of the dashboard that a dev server has no business seeing
 SECRET_ENV = ("ASANA_PAT", "GITHUB_TOKEN", "GH_TOKEN", "TP_DB", "TP_PORT", "TP_HOST", "CLAUDE_CODE_OAUTH_TOKEN",
               "ANTHROPIC_API_KEY")
@@ -147,7 +152,7 @@ def _pm(wt: Path) -> str:
 def _kind(body: str) -> str | None:
     if re.search(r"(^|[\s/])next(\s|$)", body):
         return "next"
-    if re.search(r"(^|[\s/])(vite|remix vite:dev|react-router dev)(\s|$)", body):
+    if VITE_CMD.search(body):
         return "vite"
     return None
 
@@ -206,10 +211,25 @@ def detect(repo: str, wt: Path, *, port_hint: int | None = None) -> dict:
             result["port_cmd"] = body[:fixed.start(1)] + "{port}" + body[fixed.end(1):]
         else:
             result["port_cmd"] = f"{cmd} {'-- ' if pm == 'npm' else ''}{flag}" + (" --strictPort" if kind == "vite" else "")
+    elif conf.get("cmd") and kind == "vite" and "{port}" not in cmd and not re.search(r"\$\{?PORT\b", cmd):
+        # Vite does not read PORT. A configured script may build first and then serve via `vite preview`.
+        servers = list(VITE_SERVER.finditer(cmd))
+        if servers:
+            end = servers[-1].end()
+            result["port_cmd"] = cmd[:end] + " --port {port} --strictPort" + cmd[end:]
     return result
 
 
 # ---------------------------------------------------------------- ports
+
+@contextmanager
+def port_lock():
+    """Serialize selection through registration, including servers that have yet to bind their port."""
+    LOGS.mkdir(parents=True, exist_ok=True)
+    with (LOGS / ".ports.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
 
 def port_open(port: int) -> bool:
     for host in ("127.0.0.1", "::1"):
@@ -283,6 +303,15 @@ def _used_ports(con, gid: str) -> set[int]:
     return {d["port"] for g, d in (meta_get(con, KEY) or {}).items() if g != gid and R._alive(d["pid"])}
 
 
+def _port_users(con, port: int) -> tuple[list[dict], set[int]]:
+    from .worktree_dev import reserved_ports
+    tickets = reserved_ports(con)
+    busy = listeners(port)
+    if not busy and port in tickets:
+        busy = [{"pid": None, "cmd": "티켓 dev 서버", "cwd": tickets[port]}]
+    return busy, set(tickets)
+
+
 # ---------------------------------------------------------------- check / start / stop
 
 def _running(con, gid: str) -> dict | None:
@@ -301,13 +330,15 @@ def check(gid: str) -> dict:
             wt, repo, repo_path, notes = worktree(con, gid)
             env = env_check(repo, repo_path, wt)
             d = detect(repo, wt)
-            busy = listeners(d["port"]) or ([{"pid": None, "cmd": "(다른 사용자 프로세스라 볼 수 없어요)", "cwd": None}]
-                                            if port_open(d["port"]) else [])
-            ours = d["port"] in _used_ports(con, gid)
+            used = _used_ports(con, gid)
+            busy, tickets = _port_users(con, d["port"])
+            if not busy and port_open(d["port"]):
+                busy = [{"pid": None, "cmd": "(다른 사용자 프로세스라 볼 수 없어요)", "cwd": None}]
+            ours = d["port"] in used
             res = {"path": str(wt), "repo": repo, "notes": notes, "env": env, "cmd": d["cmd"], "how": d["how"],
                    "port": d["port"], "fixed": d["fixed"], "busy": busy, "ours": ours}
             if busy or ours:
-                res["free"] = free_port(d["port"], _used_ports(con, gid))
+                res["free"] = free_port(d["port"], used | tickets)
             return res
         finally:
             con.close()
@@ -335,7 +366,11 @@ def _launch(wt: Path, repo_path: str, port: int, cmd: str, setup: str | None, lo
     script = ('if [ -n "$TP_SETUP" ]; then echo "--- setup"; sh -c "$TP_SETUP" < /dev/null '
               '|| echo "--- setup failed ($?)"; fi; echo "--- dev: $TP_DEV"; ')
     # Keep an identifiable session leader for worktree stop/reuse, even when npm spawns the listener.
-    script += 'sh -c "$TP_DEV"; exit $?' if supervise else 'exec sh -c "$TP_DEV"'
+    if supervise:
+        # Keep a foreground parent for commands that start a background listener and redirect its output.
+        script += """sh -c 'eval "$TP_DEV"; rc=$?; wait; exit "$rc"'; exit $?"""
+    else:
+        script += 'exec sh -c "$TP_DEV"'
     args = ["/bin/sh", "-c", script]
     if supervise:
         args.append(str(log))  # sh's $0; unique to this launch, also visible in ps after a CLI restart
@@ -343,8 +378,10 @@ def _launch(wt: Path, repo_path: str, port: int, cmd: str, setup: str | None, lo
     env.update({"PATH": path, "PORT": str(port), "TP_SETUP": setup or "", "TP_DEV": cmd,
                 "TP_ROOT_PATH": repo_path, "TP_WORKTREE_PATH": str(wt)})
     with log.open("w") as out:
+        # Keep a launch-specific fd in worktree children even when a script redirects stdout and stderr.
         return subprocess.Popen(args, cwd=str(wt), stdout=out, stderr=subprocess.STDOUT,
-                                stdin=subprocess.DEVNULL, start_new_session=True, env=env).pid
+                                stdin=subprocess.DEVNULL, start_new_session=True, env=env,
+                                pass_fds=(out.fileno(),) if supervise else ()).pid
 
 
 def start(gid: str, port: int | None = None, kill: bool = False) -> dict:
@@ -357,39 +394,44 @@ def start(gid: str, port: int | None = None, kill: bool = False) -> dict:
             wt, repo, repo_path, _ = worktree(con, gid)
             env_check(repo, repo_path, wt)
             d = detect(repo, wt)
-            port = int(port or d["port"])
-            if not 1024 <= port <= 65535:
-                raise DevError("포트는 1024-65535 사이여야 해요")
-            if port != d["port"] and d["fixed"]:
-                raise DevError(f"{repo}의 dev 스크립트가 포트를 {d['port']}로 고정해요. 다른 포트로 띄우려면 설정 > 기본 > "
-                               "dev 서버 명령에 {port}를 넣어주세요")
-            if port in _used_ports(con, gid):
-                raise DevError(f"{port} 포트는 다른 마일스톤 dev 서버가 쓰고 있어요")
-            busy = listeners(port)
-            if busy or port_open(port):
-                if not kill:
-                    raise PortBusy(port, busy, free_port(port, _used_ports(con, gid)))
-                if not busy:
-                    raise DevError(f"{port} 포트를 쓰는 프로세스를 볼 수 없어서 끌 수 없어요. 다른 포트를 골라주세요")
-                _kill([b["pid"] for b in busy], port)
-                event(con, "dev", f"{gid}: {port} 포트의 프로세스 {', '.join(str(b['pid']) for b in busy)} 종료 (dashboard)", gid)
-            cmd = d["cmd"].replace("{port}", str(port))
-            setup = _setup_pending.pop(str(wt), None)
-            if setup is None and not (wt / "node_modules").exists():
-                setup = R.install_cmd(str(wt))
-            LOGS.mkdir(parents=True, exist_ok=True)
-            log = LOGS / f"{re.sub(r'[^A-Za-z0-9._-]+', '-', gid)}-{datetime.now():%Y%m%d-%H%M%S}.log"
-            pid = _launch(wt, repo_path, port, cmd, setup, log, R.agent_path())
-            rec = {"gid": gid, "repo": repo, "path": str(wt), "port": port, "pid": pid, "log": str(log),
-                   "cmd": cmd, "started": now()}
-            all_ = meta_get(con, KEY) or {}
-            all_[gid] = rec
-            meta_set(con, KEY, all_)
-            event(con, "dev", f"{gid}: dev 서버 시작 :{port} ({cmd})", gid)
-            con.commit()
-            return status_one(rec)
+            with port_lock():
+                return _start_on_port(con, gid, wt, repo, repo_path, d, port, kill)
         finally:
             con.close()
+
+
+def _start_on_port(con, gid, wt, repo, repo_path, d, port, kill):
+    port = int(port or d["port"])
+    if not 1024 <= port <= 65535:
+        raise DevError("포트는 1024-65535 사이여야 해요")
+    if port != d["port"] and d["fixed"]:
+        raise DevError(f"{repo}의 dev 스크립트가 포트를 {d['port']}로 고정해요. 다른 포트로 띄우려면 설정 > 기본 > "
+                       "dev 서버 명령에 {port}를 넣어주세요")
+    used = _used_ports(con, gid)
+    if port in used:
+        raise DevError(f"{port} 포트는 다른 마일스톤 dev 서버가 쓰고 있어요")
+    busy, tickets = _port_users(con, port)
+    if busy or port_open(port):
+        if not kill:
+            raise PortBusy(port, busy, free_port(port, used | tickets))
+        if not busy or busy[0]["pid"] is None:
+            raise DevError(f"{port} 포트를 쓰는 프로세스를 볼 수 없어서 끌 수 없어요. 다른 포트를 골라주세요")
+        _kill([b["pid"] for b in busy], port)
+        event(con, "dev", f"{gid}: {port} 포트의 프로세스 {', '.join(str(b['pid']) for b in busy)} 종료 (dashboard)", gid)
+    cmd = d["cmd"].replace("{port}", str(port))
+    setup = _setup_pending.pop(str(wt), None)
+    if setup is None and not (wt / "node_modules").exists():
+        setup = R.install_cmd(str(wt))
+    log = LOGS / f"{re.sub(r'[^A-Za-z0-9._-]+', '-', gid)}-{datetime.now():%Y%m%d-%H%M%S}.log"
+    pid = _launch(wt, repo_path, port, cmd, setup, log, R.agent_path())
+    rec = {"gid": gid, "repo": repo, "path": str(wt), "port": port, "pid": pid, "log": str(log),
+           "cmd": cmd, "started": now()}
+    all_ = meta_get(con, KEY) or {}
+    all_[gid] = rec
+    meta_set(con, KEY, all_)
+    event(con, "dev", f"{gid}: dev 서버 시작 :{port} ({cmd})", gid)
+    con.commit()
+    return status_one(rec)
 
 
 class PortBusy(DevError):

@@ -373,8 +373,8 @@ def cmd_dev(a):
     elif a.op == "status":
         result = worktree_dev.status(con, a.worktree)
     else:
-        with worktree_dev.stopped(con, a.worktree):
-            result = {"status": "stopped"}
+        worktree_dev.stop(con, a.worktree)
+        result = {"status": "stopped"}
     print(json.dumps(result, ensure_ascii=False))
 
 

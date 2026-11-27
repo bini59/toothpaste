@@ -275,7 +275,8 @@ staging 열차 레포와 `pr_into_staging` 레포는 티켓 브랜치를 staging
 - 티켓 화면을 확인할 때는 worktree에서 `tp dev start --worktree .`을 실행해요. 레포 설정이나 package.json에서 명령과 포트를 찾고,
   같은 worktree에서 tp가 띄운 서버가 있으면 재사용해요. `--port N`으로 원하는 포트를 지정할 수 있고, 다른 프로세스가 사용 중이면 빈 포트를 골라요.
   포트가 열리면 URL, 포트, `data/dev/` 아래의 로그 경로를 출력해요. 60초 안에 열리지 않으면 로그 경로와 함께 실패를 알려요.
-  worktree에 `.nvmrc`가 있으면 nvm에 설치된 버전 중 조건에 맞는 최신 버전을 사용해요. 맞는 버전이 없으면 먼저 설치해주세요.
+  worktree에 `.nvmrc`가 있으면 nvm에 설치된 버전 중 조건에 맞는 최신 버전을 사용해요. nvm에 없어도 현재 Node 버전이 맞으면 그대로 써요.
+  사용자 지정 명령이 선택된 포트를 받으려면 레포의 dev 서버 명령에 `{port}`를 넣거나 스크립트에서 `PORT` 환경변수를 읽으세요.
   `tp dev status --worktree .`으로 상태를 확인하고, `tp screenshot --url <출력된 URL> --repo . --out shot.png`로 캡처한 뒤
   `tp dev stop --worktree .`으로 종료해요. 티켓 worktree를 자동으로 정리할 때도 tp가 띄운 서버를 함께 꺼요.
 - **채팅 에이전트**: 레포 checkout은 읽기 전용입니다. 실험은 /tmp clone에서. GitHub 이슈는 만들어 달라고 할 때만.

@@ -2,6 +2,7 @@
 import json
 import os
 import shlex
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -40,9 +41,23 @@ class NodePathTest(unittest.TestCase):
                 with self.subTest(want=want):
                     (wt / ".nvmrc").write_text(f"# project version\n{want} # local\n")
                     self.assertEqual(dev.node_path(wt), f"{wt}/versions/node/{got}/bin:/usr/bin")
-            (wt / ".nvmrc").write_text("21")
-            with self.assertRaisesRegex(devserver.DevError, "Node 21"):
-                dev.node_path(wt)
+            (wt / ".nvmrc").write_text("24")
+            system_bin = wt / "system" / "bin"
+            system_bin.mkdir(parents=True)
+            node = system_bin / "node"
+            node.write_text('#!/bin/sh\nif [ "$1" = --version ]; then echo v24.22.3; else echo Krypton; fi\n')
+            node.chmod(0o755)
+            with mock.patch.object(dev.R, "agent_path", return_value=str(system_bin)), \
+                    mock.patch.dict(os.environ, NVM_DIR=str(wt / "empty-nvm")):
+                for want in ("24", "lts/*", "lts/krypton"):
+                    (wt / ".nvmrc").write_text(want)
+                    self.assertEqual(dev.node_path(wt), str(system_bin))
+                (wt / ".nvmrc").write_text("lts/other")
+                with self.assertRaisesRegex(devserver.DevError, "Node lts/other"):
+                    dev.node_path(wt)
+                (wt / ".nvmrc").write_text("21")
+                with self.assertRaisesRegex(devserver.DevError, "Node 21"):
+                    dev.node_path(wt)
 
 
 class WorktreeDevTest(unittest.TestCase):
@@ -74,8 +89,7 @@ class WorktreeDevTest(unittest.TestCase):
         return {"dev": {"cmd": self.cmd, "port": self.port}}
 
     def stop(self):
-        with dev.stopped(self.con, self.wt):
-            pass
+        dev.stop(self.con, self.wt)
 
     def test_wait_then_reuse_from_canonical_path(self):
         self.cmd = f"sleep 0.4; {self.cmd}"
@@ -126,6 +140,53 @@ class WorktreeDevTest(unittest.TestCase):
         (self.wt / "package-lock.json").touch()
         with mock.patch("ticket_pilot.pipeline.repo_extra", return_value={}):
             self.assertEqual(devserver.detect("site", self.wt, port_hint=self.port)["port"], self.port)
+
+    def test_configured_vite_can_take_the_selected_port(self):
+        for invocation in ("cd web && vite", "vite build && vite preview"):
+            with self.subTest(invocation=invocation):
+                self.cmd = invocation + " --host 127.0.0.1"
+                detected = devserver.detect("site", self.wt)
+                self.assertEqual(detected["cmd"], self.cmd)  # milestone command
+                self.assertEqual(detected["port_cmd"], invocation + " --port {port} --strictPort --host 127.0.0.1")
+
+    def test_background_listener_with_redirected_logs_stops_with_the_group(self):
+        self.cmd = self.cmd.removeprefix("exec ") + " >app.log 2>&1 &"
+        server = dev.start(self.con, self.wt)
+        self.assertEqual(dev.start(self.con, self.wt)["pid"], server["pid"])
+        self.stop()
+        self.assertFalse(devserver.port_open(server["port"]))
+
+    def test_listening_child_outlives_leader_and_can_still_be_stopped(self):
+        self.cmd += " >app.log 2>&1"
+        started = dev.start(self.con, self.wt)
+        os.kill(started["pid"], signal.SIGKILL)
+        os.waitpid(started["pid"], 0)
+        self.assertTrue(dev.start(self.con, self.wt)["reused"])
+        self.stop()
+        self.assertFalse(devserver.port_open(started["port"]))
+
+    def test_port_taken_before_bind_retries_after_child_exit(self):
+        launch = devserver._launch
+        with socket.socket() as foreign:
+            def race(wt, root, port, cmd, *args, **kwargs):
+                if port == self.port:
+                    foreign.bind(("127.0.0.1", port))
+                    foreign.listen(10)
+                    pid = launch(wt, root, port, "exit 1", *args, **kwargs)
+                    os.waitpid(pid, 0)  # first readiness poll sees the bind failure after the child has exited
+                    return pid
+                return launch(wt, root, port, cmd, *args, **kwargs)
+
+            with mock.patch.object(devserver, "_launch", side_effect=race):
+                started = dev.start(self.con, self.wt)
+            self.assertNotEqual(started["port"], self.port)
+            self.assertEqual(started["status"], "running")
+
+    def test_removing_worktree_rejects_start(self):
+        self.con.execute("INSERT INTO cleanups(path, status) VALUES(?, 'removing')", (str(self.wt),))
+        with self.assertRaisesRegex(devserver.DevError, "정리 중"):
+            dev.start(self.con, self.wt)
+        self.detect.assert_not_called()
 
     def test_fixed_port_command_moves_and_leaves_the_other_server_running(self):
         with socket.socket() as foreign:

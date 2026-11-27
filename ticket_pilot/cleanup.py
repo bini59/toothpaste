@@ -255,16 +255,17 @@ def remove(con, path: str, repo_path: str, branch: str, wait_s: int = 120, force
     """git worktree remove (force: a skipped ticket's local changes go too), then delete the local branch.
     Legacy Orca worktrees: orca worktree rm, then wait for it (Orca answers before the checkout is gone).
     Returns a note, or None while an Orca removal is still in progress (finished on a later tick)."""
-    with worktree_dev.stopped(con, path):
-        if not _legacy(path):
-            R.remove(repo_path, path, force=force)
+    # Both scan paths commit "removing" before this call, so new tp dev starts stay out during removal.
+    worktree_dev.stop(con, path)
+    if not _legacy(path):
+        R.remove(repo_path, path, force=force)
+        return "워크트리 삭제, " + _drop_branch(repo_path, branch)
+    orca_json(["worktree", "rm", "--worktree", f"path:{path}", *(["--force"] if force else [])], timeout=300)
+    for _ in range(wait_s // 3):
+        if _gone(path, repo_path):
             return "워크트리 삭제, " + _drop_branch(repo_path, branch)
-        orca_json(["worktree", "rm", "--worktree", f"path:{path}", *(["--force"] if force else [])], timeout=300)
-        for _ in range(wait_s // 3):
-            if _gone(path, repo_path):
-                return "워크트리 삭제, " + _drop_branch(repo_path, branch)
-            time.sleep(3)
-        return None
+        time.sleep(3)
+    return None
 
 
 def _finish(con, path: str, runs: list, base: dict, note: str, label: str, methods: str, how: str, key: str, gid: str,
