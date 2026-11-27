@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "check": "node src/views/factory/layout.check.ts && node src/views/settings.check.mjs && node src/ui/button.check.mjs && node --test src/components/usage-card.check.mjs",
+    "check": "node src/views/factory/layout.check.ts && node src/views/settings.check.mjs && node src/ui/button.check.mjs && node --test src/components/usage-card.check.mjs && node src/views/metrics/compactionData.check.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -16,7 +16,8 @@
     "react-dom": "^19.2.0",
     "react-markdown": "^10.1.0",
     "remark-breaks": "^4.0.0",
-    "remark-gfm": "^4.0.1"
+    "remark-gfm": "^4.0.1",
+    "uplot": "1.6.32"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.1",
