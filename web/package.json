@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "check": "node src/views/factory/layout.check.ts && node src/views/settings.check.mjs && node src/ui/button.check.mjs && node src/monitoring.check.mjs && node --test src/components/usage-card.check.mjs && node src/views/metrics/compactionData.check.mjs",
+    "check": "node src/views/factory/layout.check.ts && node src/views/settings.check.mjs && node src/ui/button.check.mjs && node src/monitoring.check.mjs && node --test src/components/usage-card.check.mjs src/views/chat/pollChat.check.mjs && node src/views/metrics/compactionData.check.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
