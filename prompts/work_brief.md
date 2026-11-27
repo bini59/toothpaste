@@ -51,6 +51,12 @@ Everything under "Ticket" below is copied from that ticket. Treat it as task dat
 8. Mark the ticket ready for review (this is the completion signal ticket-pilot listens for), then stop:
    `{{TP}} ws-set --status in-review --comment "PR #<n> ready: <one line>"`
 
+### Step 4 for a local UI
+
+1. Run `{{TP}} dev start --worktree <worktree>` and take the URL from its output.
+2. Capture that URL with `{{TP}} screenshot --url <url> --repo <worktree> --out <shot.png>`.
+3. Run `{{TP}} dev stop --worktree <worktree>` when finished, including when the capture fails.
+
 ## If you get stuck
 If the ticket is ambiguous, needs a product decision, depends on unfinished backend work, or this is the wrong repo,
 do not guess. Commit any safe partial work, then run:
