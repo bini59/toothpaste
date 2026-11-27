@@ -28,7 +28,7 @@ from pathlib import Path
 
 # everything this needs is imported here: once the checkout has moved, a lazy import from the old path fails
 from . import config as G
-from . import core, notion_stages, runner
+from . import core, notion_stages, runner, worktree_dev
 
 # the pre-TP-131 names too: a host that migrates before install.sh renamed its agents must still find and stop them
 LABELS = ("com.ticket-pilot.tick", "com.ticket-pilot.dashboard", "com.bini59.ticket-pilot.tick", "com.bini59.ticket-pilot.dashboard")
@@ -100,6 +100,9 @@ def busy(con, fix=lambda s: s) -> list[str]:
     for gid, d in (core.meta_get(con, "dev_servers") or {}).items():
         if runner._alive(d["pid"]):
             out.append(f"dev 서버 {gid} (포트 {d.get('port')})")
+    for path, d in (core.meta_get(con, worktree_dev.KEY) or {}).items():
+        if worktree_dev.managed_pid(d):
+            out.append(f"dev 서버 {path} (포트 {d['port']})")
     # Detached `tp check` runs outlive the tick and write logs and rows by the old paths.
     # ponytail: checks has no pid, so "running" younger than 3 hours counts (longer than any check run; a crashed
     # one blocks until then, or until the next tick marks it)

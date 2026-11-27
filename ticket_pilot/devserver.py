@@ -11,24 +11,29 @@ milestone/<parent gid>, so the owner can try the subtasks together before the mi
 Command and port: repo setting dev {cmd, port} (cmd may hold {port}), else the package.json script dev / start:dev /
 start through the lockfile's package manager, with --port for next / vite-based servers and PORT in the environment
 for all. Port: setting, a -p/--port in the script, PORT in the worktree's .env, vite.config server.port, then the
-framework default (next 3000, vite 5173). State lives in meta dev_servers {ms gid: {...}}.
+framework default (next 3000, vite 5173). The dashboard keeps meta dev_servers keyed by milestone gid.
+The agent CLI keeps worktree_dev_servers keyed by resolved path and waits for its own listener.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
+import shutil
 import signal
 import socket
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
 from . import milestone as M
 from . import runner as R
 from .core import DATA, db, event, meta_get, meta_set, now, run
+from .dev_package import bind_port, declared_port
 
 KEY = "dev_servers"
 LOGS = DATA / "dev"
@@ -36,6 +41,7 @@ SCRIPTS = ("dev", "start:dev", "develop", "serve", "start")
 EXAMPLE = re.compile(r"^\.env\.(example|sample|template|dist)$")
 ENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$")
 PORT_FLAG = re.compile(r"(?:^|\s)(?:-p|--port)[ =](\d{2,5})\b")
+VITE_CMD = re.compile(r"(^|[\s/])(vite|remix vite:dev|react-router dev)(?=\s|$)")
 # env vars of the dashboard that a dev server has no business seeing
 SECRET_ENV = ("ASANA_PAT", "GITHUB_TOKEN", "GH_TOKEN", "TP_DB", "TP_PORT", "TP_HOST", "CLAUDE_CODE_OAUTH_TOKEN",
               "ANTHROPIC_API_KEY")
@@ -145,7 +151,7 @@ def _pm(wt: Path) -> str:
 def _kind(body: str) -> str | None:
     if re.search(r"(^|[\s/])next(\s|$)", body):
         return "next"
-    if re.search(r"(^|[\s/])(vite|remix vite:dev|react-router dev)(\s|$)", body):
+    if VITE_CMD.search(body):
         return "vite"
     return None
 
@@ -169,7 +175,7 @@ def _vite_port(wt: Path) -> int | None:
     return None
 
 
-def detect(repo: str, wt: Path) -> dict:
+def detect(repo: str, wt: Path, *, port_hint: int | None = None, ticket: bool = False) -> dict:
     """{cmd (with {port}), port, how}: what start() runs and on which port by default."""
     from .pipeline import repo_extra
     conf = repo_extra(repo).get("dev") or {}
@@ -177,28 +183,50 @@ def detect(repo: str, wt: Path) -> dict:
         scripts = json.loads((wt / "package.json").read_text()).get("scripts") or {}
     except (OSError, ValueError):
         scripts = {}
-    if conf.get("cmd"):
-        cmd, how, body, kind = conf["cmd"], "설정", conf["cmd"], _kind(conf["cmd"])
+    configured = conf.get("cmd")
+    if configured:
+        cmd = body = configured
+        how = "설정"
+        if ticket:
+            package_run = re.fullmatch(r"(?:npm|pnpm|yarn)\s+(?:(?:run|run-script)\s+)?([\w:.-]+)", cmd.strip())
+            if package_run and package_run[1] in scripts:
+                script = package_run[1]
+                body = scripts[script]
     else:
         script = next((s for s in SCRIPTS if s in scripts), None)
         if not script:
             raise DevError(f"{repo}: dev 명령을 못 찾았어요. 설정 > 기본 > dev 서버 명령을 채워주세요")
-        body, kind, pm = scripts[script], _kind(scripts[script]), _pm(wt)
+        body, pm = scripts[script], _pm(wt)
         cmd = f"{pm} run {script}"
         how = f"package.json {script}: {body}"
-        if kind and not PORT_FLAG.search(body):
-            extra = "--port {port}" + (" --strictPort" if kind == "vite" else "")
-            cmd += f" {'-- ' if pm == 'npm' else ''}{extra}"
-    fixed = PORT_FLAG.search(body)
-    port = (conf.get("port") or (int(fixed.group(1)) if fixed else None) or _env_port(wt)
+    kind = _kind(re.sub(r"[;&|()]", " ", body) if ticket else body)
+    if ticket:
+        declared = declared_port(body)
+    else:
+        flag = PORT_FLAG.search(body)
+        declared = int(flag[1]) if flag else None
+    port = (conf.get("port") or declared or _env_port(wt)
             or (_vite_port(wt) if kind == "vite" else None) or {"next": 3000, "vite": 5173}.get(kind or "")
-            or (3000 if "nest start" in body else None))
+            or (3000 if "nest start" in body else port_hint))
     if not port:
         raise DevError(f"{repo}: dev 서버 포트를 모르겠어요. 설정 > 기본 > dev 서버 포트를 채워주세요")
-    return {"cmd": cmd, "port": int(port), "how": how, "fixed": bool(fixed) and "{port}" not in cmd}
+    if not ticket and not configured and kind and declared is None:
+        extra = "--port {port}" + (" --strictPort" if kind == "vite" else "")
+        cmd += f" {'-- ' if pm == 'npm' else ''}{extra}"
+    return {"cmd": bind_port(cmd, "{port}") if ticket else cmd,
+            "port": int(port), "how": how, "fixed": declared is not None and "{port}" not in cmd}
 
 
 # ---------------------------------------------------------------- ports
+
+@contextmanager
+def port_lock():
+    """Serialize selection through registration, including servers that have yet to bind their port."""
+    LOGS.mkdir(parents=True, exist_ok=True)
+    with (LOGS / ".ports.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
 
 def port_open(port: int) -> bool:
     for host in ("127.0.0.1", "::1"):
@@ -210,8 +238,44 @@ def port_open(port: int) -> bool:
     return False
 
 
+def proc_listeners(port: int | None = None, directory: str | None = None) -> list[dict]:
+    """Linux without lsof (including the slim Docker image): match listening socket inodes to open fds."""
+    sockets = {}
+    for table in (Path("/proc/net/tcp"), Path("/proc/net/tcp6")):
+        if not table.exists():
+            continue
+        for line in table.read_text().splitlines()[1:]:
+            fields = line.split()
+            number = int(fields[1].split(":")[1], 16)
+            if fields[3] == "0A" and (port is None or port == number):
+                sockets[f"socket:[{fields[9]}]"] = number
+    out = []
+    if not sockets:
+        return out
+    for proc in Path("/proc").glob("[0-9]*"):
+        try:
+            cwd = os.readlink(proc / "cwd")
+            if directory and cwd != directory and not cwd.startswith(directory + "/"):
+                continue
+            for fd in (proc / "fd").iterdir():
+                try:
+                    target = os.readlink(fd)
+                except FileNotFoundError:
+                    continue
+                if target in sockets:
+                    cmd = (proc / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace").strip()
+                    out.append({"pid": int(proc.name), "cmd": cmd[:300], "cwd": cwd, "port": sockets[target],
+                                "name": (proc / "comm").read_text().strip()})
+                    break
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            continue
+    return out
+
+
 def listeners(port: int) -> list[dict]:
     """Processes listening on port: pid, command line, cwd."""
+    if not shutil.which("lsof") and Path("/proc/net/tcp").exists():
+        return proc_listeners(port)
     p = run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fp"], timeout=10, check=False)
     pids = sorted({int(ln[1:]) for ln in p.stdout.splitlines() if ln.startswith("p") and ln[1:].isdigit()})
     out = []
@@ -223,9 +287,14 @@ def listeners(port: int) -> list[dict]:
     return out
 
 
-def free_port(start: int, skip: set[int] = frozenset()) -> int:
-    for p in range(start + 1, start + 200):
-        if p not in skip and not port_open(p) and not listeners(p):
+def _no_listener(port: int) -> bool:
+    return not port_open(port) and not listeners(port)
+
+
+def free_port(start: int, skip: set[int] = frozenset(), *, available=_no_listener) -> int:
+    for offset in range(1, 200):
+        p = 1024 + (start - 1024 + offset) % (65536 - 1024)
+        if p not in skip and available(p):
             return p
     raise DevError(f"{start} 다음으로 빈 포트를 못 찾았어요")
 
@@ -233,6 +302,15 @@ def free_port(start: int, skip: set[int] = frozenset()) -> int:
 def _used_ports(con, gid: str) -> set[int]:
     """Ports other milestone dev servers of ours hold (even while still starting)."""
     return {d["port"] for g, d in (meta_get(con, KEY) or {}).items() if g != gid and R._alive(d["pid"])}
+
+
+def _port_users(con, port: int) -> tuple[list[dict], set[int]]:
+    from .worktree_dev import reserved_ports
+    tickets = reserved_ports(con)
+    busy = listeners(port)
+    if not busy and port in tickets:
+        busy = [{"pid": None, "cmd": "티켓 dev 서버", "cwd": tickets[port]}]
+    return busy, set(tickets)
 
 
 # ---------------------------------------------------------------- check / start / stop
@@ -253,13 +331,15 @@ def check(gid: str) -> dict:
             wt, repo, repo_path, notes = worktree(con, gid)
             env = env_check(repo, repo_path, wt)
             d = detect(repo, wt)
-            busy = listeners(d["port"]) or ([{"pid": None, "cmd": "(다른 사용자 프로세스라 볼 수 없어요)", "cwd": None}]
-                                            if port_open(d["port"]) else [])
-            ours = d["port"] in _used_ports(con, gid)
+            used = _used_ports(con, gid)
+            busy, tickets = _port_users(con, d["port"])
+            if not busy and port_open(d["port"]):
+                busy = [{"pid": None, "cmd": "(다른 사용자 프로세스라 볼 수 없어요)", "cwd": None}]
+            ours = d["port"] in used
             res = {"path": str(wt), "repo": repo, "notes": notes, "env": env, "cmd": d["cmd"], "how": d["how"],
                    "port": d["port"], "fixed": d["fixed"], "busy": busy, "ours": ours}
             if busy or ours:
-                res["free"] = free_port(d["port"], _used_ports(con, gid))
+                res["free"] = free_port(d["port"], used | tickets)
             return res
         finally:
             con.close()
@@ -282,6 +362,31 @@ def _kill(pids: list[int], port: int) -> None:
     raise DevError(f"{port} 포트의 프로세스를 끄지 못했어요")
 
 
+def _launch(wt: Path, repo_path: str, port: int, cmd: str, setup: str | None, log: Path, path: str,
+            *, supervise: bool = False) -> int:
+    script = ('if [ -n "$TP_SETUP" ]; then echo "--- setup"; sh -c "$TP_SETUP" < /dev/null '
+              '|| echo "--- setup failed ($?)"; fi; echo "--- dev: $TP_DEV"; ')
+    # Keep an identifiable session leader for worktree stop/reuse, even when npm spawns the listener.
+    if supervise:
+        # Keep a foreground parent for commands that start a background listener and redirect its output.
+        script += """sh -c 'eval "$TP_DEV"; rc=$?; wait; exit "$rc"'; exit $?"""
+    else:
+        script += 'exec sh -c "$TP_DEV"'
+    args = ["/bin/sh", "-c", script]
+    if supervise:
+        args.append(str(log))  # sh's $0; unique to this launch, also visible in ps after a CLI restart
+    env = {k: v for k, v in os.environ.items() if k not in SECRET_ENV}
+    env.update({"PATH": path, "PORT": str(port), "TP_SETUP": setup or "", "TP_DEV": cmd,
+                "TP_ROOT_PATH": repo_path, "TP_WORKTREE_PATH": str(wt)})
+    if supervise:
+        env["TP_DEV_PORT"] = str(port)
+    with log.open("w") as out:
+        # Keep a launch-specific fd in worktree children even when a script redirects stdout and stderr.
+        return subprocess.Popen(args, cwd=str(wt), stdout=out, stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL, start_new_session=True, env=env,
+                                pass_fds=(out.fileno(),) if supervise else ()).pid
+
+
 def start(gid: str, port: int | None = None, kill: bool = False) -> dict:
     """Start the dev server; a port in use is refused (409 on the dashboard) unless kill. Returns its status."""
     with _lock:
@@ -292,46 +397,44 @@ def start(gid: str, port: int | None = None, kill: bool = False) -> dict:
             wt, repo, repo_path, _ = worktree(con, gid)
             env_check(repo, repo_path, wt)
             d = detect(repo, wt)
-            port = int(port or d["port"])
-            if not 1024 <= port <= 65535:
-                raise DevError("포트는 1024-65535 사이여야 해요")
-            if port != d["port"] and d["fixed"]:
-                raise DevError(f"{repo}의 dev 스크립트가 포트를 {d['port']}로 고정해요. 다른 포트로 띄우려면 설정 > 기본 > "
-                               "dev 서버 명령에 {port}를 넣어주세요")
-            if port in _used_ports(con, gid):
-                raise DevError(f"{port} 포트는 다른 마일스톤 dev 서버가 쓰고 있어요")
-            busy = listeners(port)
-            if busy or port_open(port):
-                if not kill:
-                    raise PortBusy(port, busy, free_port(port, _used_ports(con, gid)))
-                if not busy:
-                    raise DevError(f"{port} 포트를 쓰는 프로세스를 볼 수 없어서 끌 수 없어요. 다른 포트를 골라주세요")
-                _kill([b["pid"] for b in busy], port)
-                event(con, "dev", f"{gid}: {port} 포트의 프로세스 {', '.join(str(b['pid']) for b in busy)} 종료 (dashboard)", gid)
-            cmd = d["cmd"].replace("{port}", str(port))
-            setup = _setup_pending.pop(str(wt), None)
-            if setup is None and not (wt / "node_modules").exists():
-                setup = R.install_cmd(str(wt))
-            LOGS.mkdir(parents=True, exist_ok=True)
-            log = LOGS / f"{re.sub(r'[^A-Za-z0-9._-]+', '-', gid)}-{datetime.now():%Y%m%d-%H%M%S}.log"
-            script = ('if [ -n "$TP_SETUP" ]; then echo "--- setup"; sh -c "$TP_SETUP" < /dev/null '
-                      '|| echo "--- setup failed ($?)"; fi; echo "--- dev: $TP_DEV"; exec sh -c "$TP_DEV"')
-            env = {k: v for k, v in os.environ.items() if k not in SECRET_ENV}
-            env.update({"PATH": R.agent_path(), "PORT": str(port), "TP_SETUP": setup or "", "TP_DEV": cmd,
-                        "TP_ROOT_PATH": repo_path, "TP_WORKTREE_PATH": str(wt)})
-            with open(log, "w") as out:
-                p = subprocess.Popen(["/bin/sh", "-c", script], cwd=str(wt), stdout=out, stderr=subprocess.STDOUT,
-                                     stdin=subprocess.DEVNULL, start_new_session=True, env=env)
-            rec = {"gid": gid, "repo": repo, "path": str(wt), "port": port, "pid": p.pid, "log": str(log),
-                   "cmd": cmd, "started": now()}
-            all_ = meta_get(con, KEY) or {}
-            all_[gid] = rec
-            meta_set(con, KEY, all_)
-            event(con, "dev", f"{gid}: dev 서버 시작 :{port} ({cmd})", gid)
-            con.commit()
-            return status_one(rec)
+            with port_lock():
+                return _start_on_port(con, gid, wt, repo, repo_path, d, port, kill)
         finally:
             con.close()
+
+
+def _start_on_port(con, gid, wt, repo, repo_path, d, port, kill):
+    port = int(port or d["port"])
+    if not 1024 <= port <= 65535:
+        raise DevError("포트는 1024-65535 사이여야 해요")
+    if port != d["port"] and d["fixed"]:
+        raise DevError(f"{repo}의 dev 스크립트가 포트를 {d['port']}로 고정해요. 다른 포트로 띄우려면 설정 > 기본 > "
+                       "dev 서버 명령에 {port}를 넣어주세요")
+    used = _used_ports(con, gid)
+    if port in used:
+        raise DevError(f"{port} 포트는 다른 마일스톤 dev 서버가 쓰고 있어요")
+    busy, tickets = _port_users(con, port)
+    if busy or port_open(port):
+        if not kill:
+            raise PortBusy(port, busy, free_port(port, used | tickets))
+        if not busy or busy[0]["pid"] is None:
+            raise DevError(f"{port} 포트를 쓰는 프로세스를 볼 수 없어서 끌 수 없어요. 다른 포트를 골라주세요")
+        _kill([b["pid"] for b in busy], port)
+        event(con, "dev", f"{gid}: {port} 포트의 프로세스 {', '.join(str(b['pid']) for b in busy)} 종료 (dashboard)", gid)
+    cmd = d["cmd"].replace("{port}", str(port))
+    setup = _setup_pending.pop(str(wt), None)
+    if setup is None and not (wt / "node_modules").exists():
+        setup = R.install_cmd(str(wt))
+    log = LOGS / f"{re.sub(r'[^A-Za-z0-9._-]+', '-', gid)}-{datetime.now():%Y%m%d-%H%M%S}.log"
+    pid = _launch(wt, repo_path, port, cmd, setup, log, R.agent_path())
+    rec = {"gid": gid, "repo": repo, "path": str(wt), "port": port, "pid": pid, "log": str(log),
+           "cmd": cmd, "started": now()}
+    all_ = meta_get(con, KEY) or {}
+    all_[gid] = rec
+    meta_set(con, KEY, all_)
+    event(con, "dev", f"{gid}: dev 서버 시작 :{port} ({cmd})", gid)
+    con.commit()
+    return status_one(rec)
 
 
 class PortBusy(DevError):
