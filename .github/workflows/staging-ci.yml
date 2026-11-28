@@ -1,0 +1,55 @@
+name: staging-ci
+run-name: >-
+  ${{ (github.event.action != 'edited' || github.event.changes.base.ref.from) &&
+      format('staging-ci PR #{0}', github.event.pull_request.number) || 'PR metadata edited' }}
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+    branches: [staging]
+permissions:
+  contents: read
+concurrency:
+  # Metadata edits get their own group so they cannot cancel or replace an active run.
+  group: staging-ci-${{ github.event.action == 'edited' && !github.event.changes.base.ref.from && github.run_id || github.ref }}
+  cancel-in-progress: true
+jobs:
+  staging-ubuntu:
+    name: ${{ (github.event.action != 'edited' || github.event.changes.base.ref.from) && 'staging-ubuntu' || 'staging-ubuntu-metadata-edit' }}
+    if: github.event.action != 'edited' || github.event.changes.base.ref.from
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/unit-and-web
+
+  staging-macos:
+    name: ${{ (github.event.action != 'edited' || github.event.changes.base.ref.from) && 'staging-macos' || 'staging-macos-metadata-edit' }}
+    if: github.event.action != 'edited' || github.event.changes.base.ref.from
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/unit-and-web
+
+  staging-ci-passed:
+    # A skipped job with the required name could satisfy branch protection.
+    name: ${{ (github.event.action != 'edited' || github.event.changes.base.ref.from) && 'staging-ci-passed' || 'staging-ci-metadata-edit' }}
+    if: always() && (github.event.action != 'edited' || github.event.changes.base.ref.from)
+    needs: [staging-ubuntu, staging-macos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require both platforms to pass
+        env:
+          UBUNTU: ${{ needs.staging-ubuntu.result }}
+          MACOS: ${{ needs.staging-macos.result }}
+        shell: bash
+        run: |
+          if [ "$UBUNTU" != success ] || [ "$MACOS" != success ]; then
+            echo "::error::Staging CI did not pass (Ubuntu: $UBUNTU, macOS: $MACOS)"
+            exit 1
+          fi
