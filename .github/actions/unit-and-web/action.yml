@@ -1,0 +1,33 @@
+name: Unit and web checks
+description: Run the Python unit suite and build and check the web app.
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - uses: actions/setup-node@v4
+      with:
+        node-version: "24"  # runs the .ts check directly
+        cache: npm
+        cache-dependency-path: web/package-lock.json
+    - name: Skip reverse DNS in Python
+      # http.server calls getfqdn on every bind, which is slow on macos-latest.
+      # sitecustomize reaches servers started by test subprocesses too.
+      shell: bash
+      run: |
+        mkdir -p "$RUNNER_TEMP/site"
+        echo 'import socket; socket.getfqdn = lambda name="": name or socket.gethostname()' > "$RUNNER_TEMP/site/sitecustomize.py"
+        echo "PYTHONPATH=$RUNNER_TEMP/site" >> "$GITHUB_ENV"
+    - name: Run Python unit tests
+      # Run most test files in parallel. The two port-probing suites run alone.
+      shell: bash
+      run: |
+        ls tests/test_*.py | xargs -n1 basename | grep -vxE 'test_(devserver|worktree_dev)\.py' | xargs -P 4 -n1 sh -c \
+          's=$(date +%s); python -m unittest discover tests -p "$1" >"$RUNNER_TEMP/$1.log" 2>&1; r=$?; echo "$1: $(($(date +%s)-s))s"; [ $r = 0 ] || { cat "$RUNNER_TEMP/$1.log"; exit 1; }' sh
+        python -m unittest discover tests -p 'test_devserver.py'
+        python -m unittest discover tests -p 'test_worktree_dev.py'
+    - name: Build and check the web app
+      working-directory: web
+      shell: bash
+      run: npm ci --no-audit --no-fund && npm run build && npm run check

@@ -291,6 +291,27 @@ AI 리뷰, 수정 라운드 상한, tp 검사, 사유를 적고 승인하기.
   ("사유 적고 승인…", "사유 적고 검사 무시…"; `tp approve <키> --override "사유"`, `--override-review "사유"`, `tp check-override <키> "사유"`).
   그 head에만 적용되고 카드에 사유가 남습니다.
 
+**공개 toothpaste의 staging 검사**는 일반 티켓 PR과 마일스톤 PR이 `staging`을 향할 때 실행합니다. PR을 열거나 다시 열 때,
+새 커밋을 올릴 때, 대상을 `staging`으로 바꿀 때 Ubuntu와 macOS에서 Python 3.12 단위 테스트와 Node 24 웹 빌드·검사를 실행해요.
+두 환경이 모두 성공해야 `staging-ci-passed`가 통과합니다. 제목이나 본문만 편집하면 진행 중인 검사와 기존 결과를 유지합니다.
+
+1. 첫 `staging` 대상 PR의 **Checks**에서 **staging-ci** 실행이 성공하면 집계 검사 이름이 `staging-ci-passed`인지 확인하세요.
+   실행 상세 URL의 `<RUN_ID>`로 아래 명령을 실행하면 검사 이름과 결론, 출처(`GitHub Actions`)를 확인할 수 있어요.
+
+   ```bash
+   check_url=$(gh api 'repos/<OWNER>/<REPO>/actions/runs/<RUN_ID>/jobs' --paginate \
+     --jq '.jobs[] | select(.name == "staging-ci-passed") | .check_run_url')
+   gh api "$check_url" --jq '{name, conclusion, source: .app.name}'
+   ```
+
+2. GitHub **Settings → Branches**에서 `staging`의 브랜치 보호 규칙을 열거나 추가하세요. **Require a pull request before merging**과
+   **Require status checks to pass before merging**을 켜고, `staging-ci-passed`를 추가해 출처로 **GitHub Actions**를 선택하세요.
+   **Do not allow bypassing the above settings**을 켜고 저장하세요. GitHub에서 필수 검사로 검색하려면 최근 7일 안에 성공한 실행이 필요합니다.
+   [GitHub 브랜치 보호 문서](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches) ·
+   [필수 검사 문제 해결](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks)
+3. 검사 통과를 확인한 뒤 대시보드에서 **staging 머지 승인**을 누르세요. GitHub는 머지 시 필수 검사를 확인하며, 대시보드에서 tp 검사 예외를
+   승인해도 이 규칙이 적용됩니다.
+
 ## blocked · 막힘
 BLOCKED의 뜻, 답장, 그만두기.
 
@@ -345,8 +366,9 @@ merging**과 관리자 우회 금지를 켜고, 우회 허용 목록은 비워 �
 GitHub는 머지 시점에 검사한 `staging` SHA가 최신 `main`을 포함하는지 검사합니다. 이 API는 head만 고정하므로 배포가 진행되는 동안
 PR 대상을 유지하세요. 머지 후 `main` 대상과 실제 파일 트리를 다시 확인합니다.
 
-배포 후 다음 작업을 `staging`에 넣기 전에 `staging`을 새 `main` 머지 커밋으로 fast-forward하세요. 두 브랜치가 이미 갈라졌으면
-리뷰와 승인 절차가 있는 `staging` 대상 PR을 통해 `main`을 반영해야 열차가 동기화 커밋을 승인된 변경으로 확인할 수 있습니다.
+배포 후 다음 작업을 `staging`에 넣기 전에 새 `main` 머지 커밋을 반영하세요. `staging` 보호 규칙이 PR을 요구하거나 두 브랜치가 갈라졌으면
+리뷰와 승인 절차가 있는 `main → staging` PR로 동기화하세요. 열차는 이 PR을 통해 동기화 커밋을 승인된 변경으로 확인합니다.
+보호 규칙이 직접 갱신을 허용하고 fast-forward할 수 있으면 새 `main` 머지 커밋으로 fast-forward하세요.
 배포 PR은 갱신된 커밋에서 전체 테스트를 통과해야 합니다.
 
 머지 이벤트를 받으면 같은 PR의 최종 커밋에서 전체 테스트가 머지 전에 성공했고, 테스트한 파일 트리가 머지 결과와 일치하는지
