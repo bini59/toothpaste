@@ -492,9 +492,15 @@ At merge time GitHub requires that exact head to contain the latest `main`. The 
 and that the actual commit has the tested file tree. Keep the PR target unchanged while a deployment is in progress
 because the merge API pins only the head.
 
-After a release, fast-forward `staging` to the new `main` merge commit before staging the next batch. If both branches
-have already advanced, bring `main` into `staging` through a reviewed staging PR so the release train can account for
-the sync commit. The next deployment PR must pass tests on the updated head.
+After a release, sync `main` into `staging` before staging the next batch. With
+[staging branch protection](docs/guide.md#review--리뷰) in place, open a `main → staging` PR even when `staging`
+could be fast-forwarded. Use a PR if the branches have diverged, too. Once the PR is approved and `staging-ci-passed`
+succeeds, select **Create a merge commit** so the exact `main` SHA becomes an ancestor of `staging`. A fast-forward
+is available only when branch rules permit direct updates and `staging` is already an ancestor of `main`.
+
+If the sync PR is outside ticket-pilot tracking, use the dashboard's **staging 전체 → prod** action for the next
+deployment. The release train only accounts for commits from tracked PRs. The next deployment PR must pass
+`deployment-tests-passed` on the updated head.
 
 When GitHub marks the PR merged, `.github/workflows/release.yml` independently verifies that the latest `test` run for
 that PR's final head passed before the merge and that its tested file tree matches the commit on `main`.
