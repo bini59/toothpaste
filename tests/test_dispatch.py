@@ -12,7 +12,7 @@ from ticket_pilot.storage import connection
 
 class DispatchFixture(unittest.TestCase):
     def setUp(self):
-        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
         self.enterContext(mock.patch.object(core, "DB_PATH", self.root / "tp.db"))
         self.enterContext(mock.patch.object(connection, "_main_connections", {}))
         self.addCleanup(core.config_cache_clear)
