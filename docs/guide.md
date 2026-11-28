@@ -309,8 +309,9 @@ AI 리뷰, 수정 라운드 상한, tp 검사, 사유를 적고 승인하기.
    **Do not allow bypassing the above settings**을 켜고 저장하세요. GitHub에서 필수 검사로 검색하려면 최근 7일 안에 성공한 실행이 필요합니다.
    [GitHub 브랜치 보호 문서](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches) ·
    [필수 검사 문제 해결](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks)
-3. 검사 통과를 확인한 뒤 대시보드에서 **staging 머지 승인**을 누르세요. GitHub는 머지 시 필수 검사를 확인하며, 대시보드에서 tp 검사 예외를
-   승인해도 이 규칙이 적용됩니다.
+3. 보호 규칙을 적용한 뒤 첫 PR의 제목이나 본문을 편집하고 머지 영역에 `staging-ci-passed`의 통과 상태가 유지되는지 확인하세요.
+   평소에는 검사 통과를 확인한 뒤 대시보드에서 **staging 머지 승인**을 누르세요. GitHub는 머지 시 필수 검사를 확인하며,
+   대시보드에서 tp 검사 예외를 승인해도 이 규칙이 적용됩니다.
 
 ## blocked · 막힘
 BLOCKED의 뜻, 답장, 그만두기.
@@ -366,9 +367,9 @@ merging**과 관리자 우회 금지를 켜고, 우회 허용 목록은 비워 �
 GitHub는 머지 시점에 검사한 `staging` SHA가 최신 `main`을 포함하는지 검사합니다. 이 API는 head만 고정하므로 배포가 진행되는 동안
 PR 대상을 유지하세요. 머지 후 `main` 대상과 실제 파일 트리를 다시 확인합니다.
 
-배포 후 다음 작업을 `staging`에 넣기 전에 새 `main` 머지 커밋을 반영하세요. `staging` 보호 규칙이 PR을 요구하거나 두 브랜치가 갈라졌으면
-리뷰와 승인 절차가 있는 `main → staging` PR로 동기화하세요. 열차는 이 PR을 통해 동기화 커밋을 승인된 변경으로 확인합니다.
-보호 규칙이 직접 갱신을 허용하고 fast-forward할 수 있으면 새 `main` 머지 커밋으로 fast-forward하세요.
+배포 후 다음 작업을 `staging`에 넣기 전에 새 `main` 머지 커밋을 반영하세요. 보호 규칙이 직접 갱신을 허용하고 두 브랜치가
+갈라지지 않았으면 fast-forward하세요. 보호 규칙이 PR을 요구하거나 두 브랜치가 이미 갈라졌으면 리뷰와 승인 절차가 있는 `staging` 대상
+PR을 통해 `main`을 반영해야 열차가 동기화 커밋을 승인된 변경으로 확인할 수 있습니다.
 배포 PR은 갱신된 커밋에서 전체 테스트를 통과해야 합니다.
 
 머지 이벤트를 받으면 같은 PR의 최종 커밋에서 전체 테스트가 머지 전에 성공했고, 테스트한 파일 트리가 머지 결과와 일치하는지
